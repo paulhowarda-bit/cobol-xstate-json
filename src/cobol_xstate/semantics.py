@@ -182,7 +182,13 @@ def _set(core, data, spec):
             di = data.get(t.upper())
             if di is not None and getattr(di, "level", None) == 88 and val.upper() == "TRUE":
                 parent = di.cond_parent or t
-                v = di.condition_values[0] if di.condition_values else "TRUE"
+                ranges = getattr(di, "condition_ranges", None) or []
+                if di.condition_values:
+                    v = di.condition_values[0]
+                elif ranges:
+                    v = ranges[0][0]   # low end of the first range satisfies the condition
+                else:
+                    v = "TRUE"
                 assigns.append({"target": parent, "expr": v,
                                 "note": f"SET condition-name {t} TO TRUE"})
             else:
@@ -219,12 +225,20 @@ def _ctokens(s: str) -> List[str]:
 def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
     """Parse a COBOL condition into a serializable Boolean expression tree.
 
-    Falls back to ``{op:'raw', text}`` for forms beyond this recovery (e.g. abbreviated
-    or complex conditions) so nothing is silently lost.
+    Handles relational / class / sign / 88-level / AND-OR-NOT conditions and COBOL's
+    *abbreviated combined relation conditions* - where the subject and/or relational
+    operator are implied from the previous relation after a logical connective
+    (``A = 1 OR 2`` -> ``A = 1 OR A = 2``; ``A > 1 AND < 9`` -> ``A > 1 AND A < 9``).
+    88-level condition-names carry their singleton ``values`` and any ``ranges`` (THRU).
+    Falls back to ``{op:'raw', text}`` for forms still beyond this recovery so nothing is
+    silently lost.
     """
     data = data or {}
     toks = _ctokens(text)
     pos = 0
+    # COBOL abbreviation: the last *stated* subject and relational operator are implied
+    # when omitted after AND/OR. Tracked across the whole condition in textual order.
+    last = {"subject": None, "rel": None, "neg": False}
 
     def peek():
         return toks[pos] if pos < len(toks) else None
@@ -255,6 +269,43 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
             return {"op": "not", "arg": parse_atom()}
         return parse_atom()
 
+    def _norm(tok):
+        return tok if _is_literal(tok) else tok.upper()
+
+    def _read_rel_op():
+        """Consume a relational operator (worded or symbolic) and return its canonical
+        form, or None. Handles a leading NOT (``NOT =``) as relation negation."""
+        nonlocal pos
+        save = pos
+        neg = False
+        if peek() and peek().upper() == "NOT":
+            adv()
+            neg = True
+        nxt = peek()
+        if nxt and (nxt in _REL or nxt.upper() in _REL):
+            rel = _REL.get(nxt, _REL.get(nxt.upper()))
+            adv()
+            if peek() and peek().upper() in ("THAN", "TO"):  # GREATER THAN / EQUAL TO
+                adv()
+            return rel, neg
+        pos = save
+        return None, False
+
+    def _rel_node(left, rel, neg):
+        right = adv() if peek() is not None else "?"
+        subj = _norm(left) if isinstance(left, str) else left
+        last["subject"], last["rel"], last["neg"] = subj, rel, neg
+        node = {"op": "rel", "left": subj, "rel": rel, "right": _norm(right)}
+        return {"op": "not", "arg": node} if neg else node
+
+    def _condname_node(di, name):
+        node = {"op": "cond-name", "name": name.upper(),
+                "parent": di.cond_parent, "values": di.condition_values}
+        ranges = getattr(di, "condition_ranges", None)
+        if ranges:
+            node["ranges"] = ranges
+        return node
+
     def parse_atom():
         nonlocal pos
         if peek() == "(":
@@ -265,6 +316,12 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
             return node
         if peek() is None:
             return {"op": "raw", "text": text.strip()}
+        # abbreviated: a leading relational operator implies the previous subject
+        # (A = 1 OR > 5  ->  A > 5).
+        if last["subject"] is not None and (peek() in _REL or peek().upper() in _REL):
+            rel, neg = _read_rel_op()
+            if rel is not None:
+                return _rel_node(last["subject"], rel, neg)
         left = adv()
         nxt = peek()
         # class / sign condition: A [IS] [NOT] NUMERIC|POSITIVE|...
@@ -284,21 +341,20 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
             adv()
             return {"op": "sign", "operand": left.upper(), "sign": nxt.upper(), "negated": negated}
         pos = save
-        nxt = peek()
-        if nxt and (nxt in _REL or nxt.upper() in _REL):
-            rel = _REL.get(nxt, _REL.get(nxt.upper()))
-            adv()
-            # optional THAN / TO after worded operators
-            if peek() and peek().upper() in ("THAN", "TO"):
-                adv()
-            right = adv() if peek() is not None else "?"
-            return {"op": "rel", "left": left.upper() if not _is_literal(left) else left,
-                    "rel": rel, "right": right.upper() if not _is_literal(right) else right}
-        # bare name: an 88-level condition-name, or a boolean flag
+        # full relation: left [NOT] rel right
+        rel, neg = _read_rel_op()
+        if rel is not None:
+            return _rel_node(left, rel, neg)
+        # bare term: an 88-level condition-name; else (in an abbreviation context) an
+        # implied-subject object (A = 1 OR FOO -> A = FOO); else a standalone flag name.
         di = data.get(left.upper())
         if di is not None and getattr(di, "level", None) == 88:
-            return {"op": "cond-name", "name": left.upper(),
-                    "parent": di.cond_parent, "values": di.condition_values}
+            return _condname_node(di, left)
+        if last["subject"] is not None and last["rel"] is not None \
+                and (_is_literal(left) or di is not None):
+            node = {"op": "rel", "left": last["subject"], "rel": last["rel"],
+                    "right": _norm(left)}
+            return {"op": "not", "arg": node} if last["neg"] else node
         return {"op": "cond-name", "name": left.upper()}
 
     node = parse_or()

@@ -67,7 +67,8 @@ class DataItem:
     redefines: Optional[str] = None
     parent: Optional[str] = None
     is_group: bool = False
-    condition_values: List[str] = field(default_factory=list)  # 88-level VALUE(s)
+    condition_values: List[str] = field(default_factory=list)  # 88-level singleton VALUE(s)
+    condition_ranges: List[List[str]] = field(default_factory=list)  # 88-level [lo, hi] THRU
     cond_parent: Optional[str] = None                          # 88-level's data item
     type: Optional[PicType] = None
 
@@ -206,11 +207,26 @@ def parse_data_division(lines: List[CodeLine]):
 
         if level == 88:
             # condition-name: collect its VALUE(s); parent is the last elementary item.
-            vals = re.findall(r"'[^']*'|\"[^\"]*\"|[+-]?\d+(?:\.\d+)?|[A-Za-z][A-Za-z0-9-]*",
-                              re.sub(r"^88\s+[A-Z0-9-]+\s+VALUES?\s+(?:ARE\s+|IS\s+)?", "",
-                                     text, flags=re.I))
-            item.condition_values = [v.rstrip(".") for v in vals
-                                     if v.rstrip(".") and v.upper() not in ("THRU", "THROUGH")]
+            # `lo THRU hi` is a range (kept as a pair, not flattened into two singletons).
+            toks = re.findall(
+                r"'[^']*'|\"[^\"]*\"|[+-]?\d+(?:\.\d+)?|THRU|THROUGH|[A-Za-z][A-Za-z0-9-]*",
+                re.sub(r"^88\s+[A-Z0-9-]+\s+VALUES?\s+(?:ARE\s+|IS\s+)?", "",
+                       text, flags=re.I))
+            toks = [t.rstrip(".") for t in toks if t.rstrip(".")]
+            singles: List[str] = []
+            ranges: List[List[str]] = []
+            i = 0
+            while i < len(toks):
+                if (i + 2 < len(toks) and toks[i + 1].upper() in ("THRU", "THROUGH")):
+                    ranges.append([toks[i], toks[i + 2]])
+                    i += 3
+                elif toks[i].upper() in ("THRU", "THROUGH"):
+                    i += 1  # stray keyword, skip
+                else:
+                    singles.append(toks[i])
+                    i += 1
+            item.condition_values = singles
+            item.condition_ranges = ranges
             if parent_stack:
                 item.cond_parent = parent_stack[-1].name
             items.append(item)

@@ -97,6 +97,78 @@ def test_boolean_and_sign_and_class_conditions():
     assert tree["op"] == "and" and len(tree["args"]) == 2
 
 
+def test_abbreviated_condition_implies_subject():
+    # A = 1 OR 2  ->  A = 1 OR A = 2  (implied subject and relational operator)
+    assert parse_condition("A = 1 OR 2") == {
+        "op": "or", "args": [
+            {"op": "rel", "left": "A", "rel": "=", "right": "1"},
+            {"op": "rel", "left": "A", "rel": "=", "right": "2"},
+        ]}
+
+
+def test_abbreviated_condition_implies_subject_only():
+    # A > 1 AND < 9  ->  A > 1 AND A < 9  (subject implied, operator restated)
+    assert parse_condition("A > 1 AND < 9") == {
+        "op": "and", "args": [
+            {"op": "rel", "left": "A", "rel": ">", "right": "1"},
+            {"op": "rel", "left": "A", "rel": "<", "right": "9"},
+        ]}
+
+
+def test_abbreviated_condition_carries_not_into_implied_term():
+    # A NOT = 1 AND 2  ->  A NOT = 1 AND A NOT = 2 (the NOT is part of the implied operator)
+    assert parse_condition("A NOT = 1 AND 2") == {
+        "op": "and", "args": [
+            {"op": "not", "arg": {"op": "rel", "left": "A", "rel": "=", "right": "1"}},
+            {"op": "not", "arg": {"op": "rel", "left": "A", "rel": "=", "right": "2"}},
+        ]}
+
+
+def test_full_relation_after_connective_is_not_abbreviated():
+    # A = 1 OR B = 2 keeps B as a new subject (not an abbreviated object of A)
+    tree = parse_condition("A = 1 OR B = 2")
+    assert tree["args"][1] == {"op": "rel", "left": "B", "rel": "=", "right": "2"}
+
+
+def test_88_value_thru_is_a_range_not_two_singletons():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RNG.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-CODE  PIC 9(2) VALUE 0.\n"
+        "           88  VALID-CODE  VALUE 1 THRU 9.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           IF VALID-CODE MOVE 1 TO WS-CODE END-IF\n"
+        "           STOP RUN.\n"
+    )
+    machine = _machine(src)
+    vc = machine.data["VALID-CODE"]
+    assert vc["kind"] == "condition-name"
+    assert vc["values"] == []                 # endpoints not flattened into singletons
+    assert vc["ranges"] == [["1", "9"]]
+
+
+def test_88_range_emits_bounded_guard():
+    from cobol_xstate.emitter import emit_setup_module
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RNG.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-CODE  PIC 9(2) VALUE 0.\n"
+        "           88  VALID-CODE  VALUE 1 THRU 9.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           IF VALID-CODE MOVE 1 TO WS-CODE END-IF\n"
+        "           STOP RUN.\n"
+    )
+    mod = emit_setup_module(_machine(src))
+    assert ('(rel(context["WS-CODE"], ">=", "1", true) && '
+            'rel(context["WS-CODE"], "<=", "9", true))') in mod
+
+
 def test_end_to_end_compute_overflow_and_sign_flagged_and_captured():
     src = (
         "       DATA DIVISION.\n"

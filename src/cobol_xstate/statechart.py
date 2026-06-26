@@ -517,8 +517,11 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
     out: Dict[str, dict] = {}
     for it in program.data_items:
         if it.level == 88:
-            out[it.name] = {"kind": "condition-name", "of": it.cond_parent,
-                            "values": it.condition_values, "line": it.line}
+            entry88 = {"kind": "condition-name", "of": it.cond_parent,
+                       "values": it.condition_values, "line": it.line}
+            if it.condition_ranges:
+                entry88["ranges"] = it.condition_ranges
+            out[it.name] = entry88
             continue
         entry = {"level": it.level, "line": it.line}
         if it.section:

@@ -349,14 +349,22 @@ def _emit_guard(tree: dict, fields: Dict[str, dict]) -> Optional[str]:
     if op == "cond-name":
         parent = tree.get("parent")
         values = tree.get("values") or []
-        if not parent or not values:
+        ranges = tree.get("ranges") or []
+        if not parent or (not values and not ranges):
             return None
-        fld = fields.get(str(parent).upper())
+        pkey = str(parent).upper()
+        fld = fields.get(pkey)
         numeric = "true" if (fld and fld.get("category") == "numeric") else "false"
+        pref = f"context[{_js_str(pkey)}]"
         tests = []
         for v in values:
             rval, _ = _operand_js(str(v), fields)
-            tests.append(f'rel(context[{_js_str(str(parent).upper())}], "=", {rval}, {numeric})')
+            tests.append(f'rel({pref}, "=", {rval}, {numeric})')
+        for lo, hi in ranges:  # 88 VALUE lo THRU hi  ->  lo <= parent <= hi
+            loj, _ = _operand_js(str(lo), fields)
+            hij, _ = _operand_js(str(hi), fields)
+            tests.append(f'(rel({pref}, ">=", {loj}, {numeric}) && '
+                         f'rel({pref}, "<=", {hij}, {numeric}))')
         return "(" + " || ".join(tests) + ")"
     return None  # raw / unknown -> external
 
