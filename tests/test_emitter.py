@@ -67,10 +67,20 @@ def test_expr_figurative_zero():
     assert _emit_numeric_expr("WS-X + ZERO") == 'add(D(context["WS-X"]), D("0"))'
 
 
+def test_expr_subscript_read_variable_index():
+    assert _emit_numeric_expr("WS-SUM + TBL-AMT(WS-I)") == \
+        'add(D(context["WS-SUM"]), D(elem(context["TBL-AMT"], context["WS-I"])))'
+
+
+def test_expr_subscript_read_literal_index():
+    assert _emit_numeric_expr("TBL(3)") == 'D(elem(context["TBL"], "3"))'
+
+
 def test_expr_unparseable_raises():
     from cobol_xstate.emitter import _ExprError
     with pytest.raises(_ExprError):
-        _emit_numeric_expr("TBL ( I )")  # subscripting is not modeled here
+        # an arithmetic subscript (space-separated tokens) is out of scope -> not modeled
+        _emit_numeric_expr("TBL ( I )")
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +167,18 @@ def test_nested_perform_builds_nested_actors():
     mod = emit_setup_module(_machine("nestperf.cbl"))
     assert '"actor:1000-OUTER"' in mod and '"actor:2000-INNER"' in mod
     assert '"__RET__"' in mod                   # each actor returns via a final state
+
+
+# --------------------------------------------------------------------------- #
+# OCCURS subscript addressing
+# --------------------------------------------------------------------------- #
+
+def test_occurs_field_carries_count_and_writes_use_setelem():
+    mod = emit_setup_module(_machine("tblsum.cbl"))
+    assert '"occurs": 5' in mod                              # FIELDS records the table size
+    assert ('"TBL-AMT": setElem(context["TBL-AMT"], "1", '
+            'store(D("10"), FIELDS["TBL-AMT"]))') in mod      # MOVE 10 TO TBL-AMT(1)
+    assert 'D(elem(context["TBL-AMT"], context["WS-I"]))' in mod  # ADD TBL-AMT(WS-I) ...
 
 
 # --------------------------------------------------------------------------- #
@@ -269,3 +291,9 @@ def test_perform_until_call_return_runs_under_stock_xstate(repo_tmp):
 def test_nested_perform_threads_context_under_stock_xstate(repo_tmp):
     # 1000-OUTER performs 2000-INNER: context must thread back up two call levels.
     _run_to_done(repo_tmp, "nestperf.cbl", {"WS-SUM": "11"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_occurs_table_sum_runs_under_stock_xstate(repo_tmp):
+    # Write five elements by literal subscript, then sum with a variable subscript.
+    _run_to_done(repo_tmp, "tblsum.cbl", {"WS-SUM": "150"})

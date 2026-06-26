@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Dict, List, Optional, Tuple
 
 from .data_division import expand_pic
@@ -42,7 +43,22 @@ from .statechart import Machine
 
 RUNTIME_IMPORT = "./cobolRuntime.mjs"
 _HELPERS = ("D", "add", "sub", "mul", "div", "pow", "store", "storeStr",
-            "rel", "isClass", "isSign", "notModeled")
+            "elem", "setElem", "rel", "isClass", "isSign", "notModeled")
+
+# A single-dimension OCCURS subscript: NAME(SUB) where SUB is one identifier or integer.
+_SUBSCRIPT = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)\(([A-Za-z0-9-]+)\)$")
+
+
+def _split_subscript(tok: str) -> Tuple[str, Optional[str]]:
+    m = _SUBSCRIPT.match(tok)
+    return (m.group(1), m.group(2)) if m else (tok, None)
+
+
+def _subscript_js(sub: str) -> str:
+    """JS for the subscript value: an integer literal, or a subscript variable's value."""
+    if _is_num_literal(sub):
+        return _js_str(sub)
+    return f"context[{_js_str(sub.upper())}]"
 
 _FIGURATIVE_NUM = {"ZERO": "0", "ZEROS": "0", "ZEROES": "0"}
 _FIGURATIVE_STR = {"SPACE": "", "SPACES": "", "ZERO": "0", "ZEROS": "0", "ZEROES": "0"}
@@ -87,6 +103,9 @@ def _tokenize_expr(expr: str) -> List[str]:
     whitespace and then peel abutting parentheses off operand tokens."""
     out: List[str] = []
     for raw in expr.split():
+        if _SUBSCRIPT.match(raw):   # a subscript token: keep its parens, don't peel
+            out.append(raw)
+            continue
         # peel leading '(' and trailing ')'
         while raw.startswith("("):
             out.append("(")
@@ -171,6 +190,9 @@ class _ExprParser:
             return {"kind": "num", "text": _unquote(t)}
         if _is_num_literal(t):
             return {"kind": "num", "text": t}
+        name, sub = _split_subscript(t)
+        if sub is not None:
+            return {"kind": "ref", "name": name.upper(), "sub": sub}
         up = t.upper()
         if up in _FIGURATIVE_NUM:
             return {"kind": "num", "text": _FIGURATIVE_NUM[up]}
@@ -181,6 +203,9 @@ def _emit_num_node(node: dict) -> str:
     if "kind" in node:
         if node["kind"] == "num":
             return f'D({_js_str(node["text"])})'
+        if node.get("sub") is not None:  # TBL(I) -> the i-th element
+            return (f'D(elem(context[{_js_str(node["name"])}], '
+                    f'{_subscript_js(node["sub"])}))')
         return f'D(context[{_js_str(node["name"])}])'
     fn = _NUM_OPS[node["op"]]
     return f'{fn}({_emit_num_node(node["l"])}, {_emit_num_node(node["r"])})'
@@ -203,6 +228,9 @@ def _emit_string_expr(expr: str, fields: Dict[str, dict]) -> str:
         return _js_str(_FIGURATIVE_STR[up])
     if _is_num_literal(tok):
         return _js_str(tok)
+    name, sub = _split_subscript(tok)
+    if sub is not None and name.upper() in fields:  # TBL(I) text element
+        return f"elem(context[{_js_str(name.upper())}], {_subscript_js(sub)})"
     if up in fields:  # a field reference
         return f"context[{_js_str(up)}]"
     # multi-token or unrecognized source (e.g. an expression into a text item)
@@ -222,7 +250,7 @@ def _field_table(machine: Machine) -> Dict[str, dict]:
         t = d.get("type") or {}
         cat = t.get("category", "unknown")
         if cat.startswith("numeric"):
-            out[name] = {
+            spec = {
                 "category": "numeric",
                 "digits": t.get("digits", 0),
                 "scale": t.get("scale", 0),
@@ -236,7 +264,9 @@ def _field_table(machine: Machine) -> Dict[str, dict]:
             if pic:
                 exp = expand_pic(pic)
                 spec["len"] = sum(1 for c in exp.upper() if c not in "SV")
-            out[name] = spec
+        if d.get("occurs"):  # OCCURS n -> the spec describes one element of an n-array
+            spec["occurs"] = d["occurs"]
+        out[name] = spec
     return out
 
 
@@ -291,9 +321,16 @@ def _build_ops(machine: Machine, fields: Dict[str, dict]
         rounded = bool(spec.get("rounded"))
         pairs = []
         for a in spec["assignments"]:
-            val = _emit_assignment_value(a["target"], a.get("expr", ""), kind,
-                                         rounded, fields)
-            pairs.append(f"{_js_str(a['target'])}: {val}")
+            base, sub = _split_subscript(a["target"])
+            if sub is not None:  # MOVE/COMPUTE ... INTO TBL(I): replace one element
+                bu = base.upper()
+                val = _emit_assignment_value(bu, a.get("expr", ""), kind, rounded, fields)
+                val = f"setElem(context[{_js_str(bu)}], {_subscript_js(sub)}, {val})"
+                pairs.append(f"{_js_str(bu)}: {val}")
+            else:
+                val = _emit_assignment_value(a["target"], a.get("expr", ""), kind,
+                                             rounded, fields)
+                pairs.append(f"{_js_str(a['target'])}: {val}")
         ops[name] = "{ " + ", ".join(pairs) + " }"
     return ops, effects
 
@@ -311,6 +348,11 @@ def _operand_js(tok: str, fields: Dict[str, dict]) -> Tuple[str, bool]:
         return _js_str(_FIGURATIVE_STR[up]), up in _FIGURATIVE_NUM
     if _is_num_literal(tok):
         return _js_str(tok), True
+    name, sub = _split_subscript(tok)
+    if sub is not None:  # TBL(I) operand
+        fld = fields.get(name.upper())
+        numeric = bool(fld and fld.get("category") == "numeric")
+        return f"elem(context[{_js_str(name.upper())}], {_subscript_js(sub)})", numeric
     fld = fields.get(up)
     numeric = bool(fld and fld.get("category") == "numeric")
     return f"context[{_js_str(up)}]", numeric
@@ -394,11 +436,17 @@ def _strip_meta(obj):
 
 
 def _js_context(config: dict, fields: Dict[str, dict]) -> dict:
+    def _num_str(x):
+        return format(x, "f") if isinstance(x, float) else str(x)
+
     ctx = dict(config.get("context", {}))
     for k, v in list(ctx.items()):
         fld = fields.get(k)
-        if fld and fld.get("category") == "numeric" and not isinstance(v, str):
-            ctx[k] = format(v, "f") if isinstance(v, float) else str(v)
+        numeric = fld and fld.get("category") == "numeric"
+        if isinstance(v, list):  # an OCCURS table
+            ctx[k] = [_num_str(e) if numeric and not isinstance(e, str) else e for e in v]
+        elif numeric and not isinstance(v, str):
+            ctx[k] = _num_str(v)
     return ctx
 
 

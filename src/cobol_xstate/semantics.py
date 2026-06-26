@@ -23,6 +23,14 @@ from typing import Dict, List, Optional
 
 _NUM = re.compile(r"^[+-]?\d+(\.\d+)?$")
 
+# Single-dimension OCCURS subscript: collapse `NAME ( SUB )` -> `NAME(SUB)` so the
+# reference survives whitespace splitting downstream (SUB = one identifier or integer).
+_SUBNORM = re.compile(r"([A-Za-z][A-Za-z0-9-]*)\s*\(\s*([A-Za-z0-9-]+)\s*\)")
+
+
+def _norm_subscripts(s: str) -> str:
+    return _SUBNORM.sub(r"\1(\2)", s)
+
 
 def _operands(s: str) -> List[str]:
     return [t for t in re.split(r"[\s,]+", s.strip()) if t]
@@ -53,7 +61,7 @@ def parse_operation(text: str, data: Optional[Dict] = None) -> Optional[dict]:
     no data/effect meaning worth recording.
     """
     data = data or {}
-    s = text.strip().rstrip(".")
+    s = _norm_subscripts(text.strip().rstrip("."))
     verb = (s.split() or [""])[0].upper()
     core, rounded, size_err = _strip_arith_clauses(s)
 
@@ -219,7 +227,10 @@ _SIGN = {"POSITIVE", "NEGATIVE", "ZERO"}
 
 
 def _ctokens(s: str) -> List[str]:
-    return re.findall(r"'[^']*'|\"[^\"]*\"|>=|<=|<>|[=><]|[A-Za-z0-9][A-Za-z0-9-]*", s)
+    # NAME(SUB) is one token (an OCCURS subscript) so a relational operand keeps it whole.
+    return re.findall(
+        r"'[^']*'|\"[^\"]*\"|[A-Za-z][A-Za-z0-9-]*\([A-Za-z0-9-]+\)"
+        r"|>=|<=|<>|[=><]|[A-Za-z0-9][A-Za-z0-9-]*", s)
 
 
 def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
@@ -234,7 +245,7 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
     silently lost.
     """
     data = data or {}
-    toks = _ctokens(text)
+    toks = _ctokens(_norm_subscripts(text))
     pos = 0
     # COBOL abbreviation: the last *stated* subject and relational operator are implied
     # when omitted after AND/OR. Tracked across the whole condition in textual order.

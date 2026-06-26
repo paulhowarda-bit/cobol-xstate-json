@@ -549,11 +549,19 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
 
     # Seed the machine memory (context) with each elementary item's start-of-run value
     # - the data the actions assign to and the guards test (alter switches were already
-    # added by _compute_alter_targets and are preserved).
+    # added by _compute_alter_targets and are preserved). An elementary OCCURS item is an
+    # n-element table -> seeded as an array.
     for it in program.data_items:
+        if it.is_group and it.occurs:
+            ctx.flag(it.section or "DATA", it.line,
+                     f"OCCURS on group {it.name}: subscripting its subordinate items "
+                     f"is not modeled (only elementary-item OCCURS is)")
         if it.level in (88, 66) or it.is_group or it.pic is None:
             continue
-        ctx.context.setdefault(it.name, _initial_value(it))
+        val = _initial_value(it)
+        if it.occurs:
+            val = [val for _ in range(it.occurs)]
+        ctx.context.setdefault(it.name, val)
 
     paras = program.paragraphs
     names = [p.name for p in paras]

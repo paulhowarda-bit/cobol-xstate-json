@@ -169,7 +169,12 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   `semantics` carries the `target := expr` / Boolean-tree logic, but the bare config
   can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must
   implement these over a decimal type (COMP-3/zoned/binary per `data`), not float.
-  `OCCURS`/`REDEFINES` are recorded but subscript/alias addressing isn't resolved.
+  Single-dimension elementary `OCCURS` is resolved: a table is an array, `TBL(I)` reads
+  (`elem`) and writes (`setElem`) by a literal or single-variable subscript, 1-based.
+  Group `OCCURS`, multi-dimension subscripts, and arithmetic subscripts (`TBL(I + 1)`)
+  are flagged / fall back, not guessed. `REDEFINES` is recorded but byte-aliasing (one
+  storage area read through a different PICTURE) is **not** modeled — flagged, never
+  silently reinterpreted.
   Conditions cover relational/class/sign/88/AND-OR-NOT, COBOL *abbreviated* combined
   relations (`IF A = 1 OR 2` → `A = 1 OR A = 2`, with the subject and operator — NOT
   included — implied from the prior relation), and 88-level `VALUE lo THRU hi` ranges
@@ -185,7 +190,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 85 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 91 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -201,7 +206,8 @@ examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
                     accum.cbl / nestperf.cbl (PERFORM-UNTIL & nested PERFORM call-return)
-tests/              one module per pipeline stage (85 tests)
+                    tblsum.cbl (OCCURS table: subscripted reads/writes)
+tests/              one module per pipeline stage (91 tests)
 ```
 
 ## License

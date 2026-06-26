@@ -152,6 +152,31 @@ export function store(value, spec) {
   return d.toString();
 }
 
+// ---- OCCURS table subscripting (1-based, like COBOL) --------------------- //
+
+// Coerce a subscript value (Dec / decimal string / number) to a 0-based JS index.
+function _idx0(i) {
+  const n = i instanceof Dec ? Number(i.rescale(0, false).toString()) : Math.trunc(Number(i));
+  if (!Number.isFinite(n)) notModeled('non-numeric subscript');
+  return n - 1; // COBOL subscripts start at 1
+}
+
+// Read TBL(i): the i-th element of a table (array) in context.
+export function elem(arr, i) {
+  const k = _idx0(i);
+  if (!Array.isArray(arr) || k < 0 || k >= arr.length) notModeled('subscript out of range');
+  return arr[k];
+}
+
+// Write TBL(i) := v immutably: return a copy of the table with element i replaced.
+export function setElem(arr, i, v) {
+  const k = _idx0(i);
+  if (k < 0) notModeled('subscript out of range');
+  const copy = Array.isArray(arr) ? arr.slice() : [];
+  copy[k] = v;
+  return copy;
+}
+
 // Store into an alphanumeric field: left-justify, space-pad / truncate to `len`.
 export function storeStr(value, spec) {
   let s = value == null ? '' : String(value);

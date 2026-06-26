@@ -169,6 +169,28 @@ def test_88_range_emits_bounded_guard():
             'rel(context["WS-CODE"], "<=", "9", true))') in mod
 
 
+def test_occurs_seeds_context_as_array():
+    machine = _machine((EXAMPLES / "tblsum.cbl").read_text())
+    assert machine.config["context"]["TBL-AMT"] == [0, 0, 0, 0, 0]
+    assert machine.data["TBL-AMT"]["occurs"] == 5
+
+
+def test_group_occurs_is_flagged_not_silently_modeled():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. GRP.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  TBL-ENTRY OCCURS 3.\n"
+        "           05  TE-AMT  PIC 9(3).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           STOP RUN.\n"
+    )
+    machine = _machine(src)
+    assert any("OCCURS on group" in f["message"] for f in machine.flags)
+
+
 def test_end_to_end_compute_overflow_and_sign_flagged_and_captured():
     src = (
         "       DATA DIVISION.\n"
