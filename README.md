@@ -35,6 +35,7 @@ cobol-xstate prog.cbl -o prog.machine.json        # write to a file
 cobol-xstate prog.cbl --machine-only              # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin
 cobol-xstate prog.cbl --format free                # force free-format source
+cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
 
 ### Output
@@ -83,9 +84,12 @@ not binary float. `--machine-only` emits just the config.
 raw source
   → normalizer  fixed/free format, column-7 comment/continuation/debug, *> comments,
                 continuation-literal stitching, Area-A detection            (normalizer.py)
+  → preprocess  COPY / REPLACING / EXEC SQL INCLUDE expansion via a configurable
+                copybook resolver (search paths, exts, missing policy)   (preprocessor.py)
   → lexer       words / numbers / string literals / period / operators,
                 each carrying its source line                              (lexer.py)
   → parser      DATA DIVISION → typed data dictionary (PIC/USAGE/sign, 88-levels);
+                EXEC SQL/CICS/DLI extracted (host vars, LINK/XCTL/RETURN/HANDLE);
                 PROCEDURE DIVISION → sections/paragraphs (Area-A headers) +
                 a control-flow statement AST (IF / EVALUATE / PERFORM / GO TO /
                 I-O handlers / CALL / ALTER / terminators)
@@ -146,9 +150,12 @@ against the source," not "skipped."
 This is a **heuristic control-flow recovery**, not a conformant COBOL parser. It is
 deliberately explicit about the gap (the skill's core principle — don't pretend):
 
-- **No copybook preprocessor** (`COPY`/`REPLACE`), **no embedded-language extraction**
-  (`EXEC SQL`/`CICS`/`DLI`). A production parser needs both (see `parsing-cobol.md`);
-  add them before trusting this on real source with copybooks.
+- **Copybooks must be resolvable.** `COPY`/`REPLACING`/`EXEC SQL INCLUDE` are expanded
+  via the resolver (`-I DIR`, `--copybook-ext`); a member that can't be found is listed
+  in `notes` as **missing** (its data/logic isn't in the model) rather than silently
+  dropped. Embedded `EXEC SQL/CICS/DLI` is extracted opaquely — host vars preserved,
+  `LINK`/`XCTL`/`RETURN`/`HANDLE` mapped to call/transfer/terminate/flag — but the SQL/
+  CICS sub-language itself isn't interpreted.
 - **PERFORM is a call-return action, not a synthesized return edge.** `perform_p` runs
   the separately-compiled paragraph `p` and continues; the literal jump-and-return pair
   isn't drawn (it needs a call stack XState doesn't have). `p`'s full logic is still
@@ -170,17 +177,17 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 43 tests: normalizer, lexer, parser, data, semantics, analysis, statechart
+PYTHONPATH=src python -m pytest -q     # 51 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart
 ```
 
 Layout:
 
 ```
-src/cobol_xstate/   normalizer · lexer · model · parser · data_division · semantics · analysis · naming · statechart · cli
+src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · cli
 examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
-tests/              one module per pipeline stage (43 tests)
+tests/              one module per pipeline stage (51 tests)
 ```
 
 ## License

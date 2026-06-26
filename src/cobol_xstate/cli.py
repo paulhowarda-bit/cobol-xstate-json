@@ -9,6 +9,7 @@ from typing import List, Optional
 
 from .normalizer import SourceFormat
 from .parser import parse_program
+from .preprocessor import CopybookResolver
 from .statechart import build_machine
 
 
@@ -28,6 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", help="write JSON here (default: stdout)")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
+    p.add_argument("-I", "--copybook-path", action="append", default=[],
+                   metavar="DIR", help="copybook search directory (repeatable)")
+    p.add_argument("--copybook-ext", action="append", default=[], metavar="EXT",
+                   help="extra copybook extension to try, e.g. .cpy (repeatable)")
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
@@ -39,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 def run(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
+    search_paths = list(args.copybook_path)
     if args.source == "-":
         source = sys.stdin.read()
         source_name = "<stdin>"
@@ -49,8 +55,14 @@ def run(argv: Optional[List[str]] = None) -> int:
             return 2
         source = path.read_text(errors="replace")
         source_name = path.name
+        search_paths.append(str(path.parent))  # look beside the source by default
 
-    program = parse_program(source, _format(args.format))
+    default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
+    resolver = CopybookResolver(
+        paths=search_paths,
+        exts=tuple(args.copybook_ext) + default_exts,
+    )
+    program = parse_program(source, _format(args.format), resolver=resolver)
     machine = build_machine(program, source_name=source_name)
     text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
 

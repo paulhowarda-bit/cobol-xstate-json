@@ -31,6 +31,7 @@ class CodeLine:
     text: str          # code only (no sequence area, indicator, or id area)
     line: int          # 1-based physical line number where this line *starts*
     area_a: bool = False  # first token begins in Area A (cols 8-11) -> header candidate
+    origin: Optional[str] = None  # copybook member name if expanded from a COPY
 
     def is_blank(self) -> bool:
         return not self.text.strip()

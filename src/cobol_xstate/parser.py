@@ -26,12 +26,14 @@ from typing import List, Optional, Set
 from .normalizer import CodeLine, SourceFormat, normalize
 from .lexer import Token, tokenize
 from .data_division import parse_data_division
+from .preprocessor import CopybookResolver, preprocess
 from .model import (
     Action,
     AlterStmt,
     CallStmt,
     ContinueStmt,
     EvaluateStmt,
+    ExecStmt,
     ExitStmt,
     GoToStmt,
     IfStmt,
@@ -51,7 +53,7 @@ ACTION_VERBS: Set[str] = {
 }
 CONTROL_VERBS: Set[str] = {
     "IF", "EVALUATE", "PERFORM", "GO", "READ", "WRITE", "REWRITE", "DELETE", "START",
-    "RETURN", "CALL", "ALTER", "EXIT", "CONTINUE", "NEXT", "STOP", "GOBACK",
+    "RETURN", "CALL", "ALTER", "EXIT", "CONTINUE", "NEXT", "STOP", "GOBACK", "EXEC",
 }
 STARTERS: Set[str] = ACTION_VERBS | CONTROL_VERBS
 
@@ -125,9 +127,18 @@ def _procedure_lines(lines: List[CodeLine]) -> List[CodeLine]:
     return lines[j + 1:]
 
 
-def parse_program(source: str, fmt: Optional[SourceFormat] = None) -> Program:
+def parse_program(source: str, fmt: Optional[SourceFormat] = None,
+                  resolver: Optional[CopybookResolver] = None) -> Program:
     lines = normalize(source, fmt)
+    pre = preprocess(lines, resolver)
+    lines = pre.lines
     prog = Program(program_id=_find_program_id(lines))
+    if pre.expanded:
+        prog.notes.append("Expanded copybooks: " + ", ".join(sorted(set(pre.expanded))))
+    for member in sorted(set(pre.missing)):
+        prog.notes.append(
+            f"COPY {member}: not found - data/logic it defines is missing from the model")
+    prog.notes.extend(n for n in pre.notes if "not found" not in n and "recursive" in n)
 
     if any(re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I) for cl in lines):
         prog.has_procedure_division = True
@@ -252,6 +263,8 @@ class StmtParser:
             self._next()
             return None
         v = t.up
+        if v == "EXEC":
+            return self.parse_exec()
         if v == "IF":
             return self.parse_if()
         if v == "EVALUATE":
@@ -541,6 +554,66 @@ class StmtParser:
             self._next()
             return ExitStmt(line=line, kind="SECTION")
         return ExitStmt(line=line, kind="PLAIN")
+
+    # -- EXEC SQL / CICS / DLI ---------------------------------------------
+    def parse_exec(self) -> Stmt:
+        line = self._next().line  # EXEC
+        lang = "?"
+        if self._peek() and self._peek().kind == "word":
+            lang = self._next().up
+        toks: List[Token] = []
+        while not self._eof():
+            t = self._peek()
+            if t.kind == "word" and t.up == "END-EXEC":
+                self._next()
+                break
+            toks.append(self._next())
+        # optional terminating period
+        if self._at_period():
+            self._next()
+        words = [t.up for t in toks if t.kind == "word"]
+        verb = words[0] if words else "?"
+        text = " ".join(t.text for t in toks)
+        # host variables: ':' immediately followed by a word
+        host_vars: List[str] = []
+        for idx, t in enumerate(toks):
+            if t.kind == "punct" and t.text == ":" and idx + 1 < len(toks) \
+                    and toks[idx + 1].kind == "word":
+                host_vars.append(":" + toks[idx + 1].text.upper())
+
+        kind, target, conditions = "effect", None, []
+        if lang == "CICS":
+            if verb in ("RETURN", "ABEND"):
+                kind = "terminate"
+            elif verb == "XCTL":
+                kind, target = "transfer", self._exec_program(toks)
+            elif verb == "LINK":
+                kind, target = "call", self._exec_program(toks)
+            elif verb == "HANDLE":
+                kind = "handle"
+                conditions = self._exec_handle_conditions(toks)
+        elif lang == "SQL" and verb == "WHENEVER":
+            kind = "handle"
+        return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
+                        target=target, host_vars=host_vars, conditions=conditions)
+
+    @staticmethod
+    def _exec_program(toks: List[Token]) -> Optional[str]:
+        """Pull PROGRAM('NAME') or PROGRAM(NAME) from a CICS command."""
+        for idx, t in enumerate(toks):
+            if t.kind == "word" and t.up == "PROGRAM":
+                for k in range(idx + 1, min(idx + 4, len(toks))):
+                    if toks[k].kind == "string":
+                        return toks[k].text.strip("'\"").strip()
+                    if toks[k].kind == "word":
+                        return toks[k].up
+        return None
+
+    @staticmethod
+    def _exec_handle_conditions(toks: List[Token]) -> List[str]:
+        names = [t.up for t in toks if t.kind == "word"
+                 and t.up not in ("HANDLE", "CONDITION", "AID")]
+        return names
 
     # -- I/O ---------------------------------------------------------------
     def parse_io(self) -> Stmt:

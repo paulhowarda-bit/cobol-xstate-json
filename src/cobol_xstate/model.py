@@ -101,6 +101,27 @@ class IoStmt(Stmt):
 
 
 @dataclass
+class ExecStmt(Stmt):
+    """An embedded ``EXEC SQL|CICS|DLI ... END-EXEC`` block, extracted opaquely.
+
+    kind classifies its COBOL control effect:
+      'effect'    - no COBOL control transfer (most SQL/CICS/DLI commands)
+      'call'      - CICS LINK (call-return into another program)
+      'transfer'  - CICS XCTL (transfers out, no return)
+      'terminate' - CICS RETURN / ABEND (control leaves this program)
+      'handle'    - CICS HANDLE CONDITION/AID (registers implicit later transfer)
+    """
+
+    lang: str                   # 'SQL' | 'CICS' | 'DLI'
+    verb: str
+    text: str                   # raw inner command text
+    kind: str = "effect"
+    target: Optional[str] = None            # program name for LINK/XCTL
+    host_vars: List[str] = field(default_factory=list)   # :WS-FOO references
+    conditions: List[str] = field(default_factory=list)  # HANDLE condition names
+
+
+@dataclass
 class TerminateStmt(Stmt):
     kind: str                   # 'STOP_RUN' | 'GOBACK' | 'EXIT_PROGRAM'
 

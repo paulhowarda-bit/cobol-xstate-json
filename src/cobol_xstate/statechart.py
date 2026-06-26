@@ -41,6 +41,7 @@ from .model import (
     CallStmt,
     ContinueStmt,
     EvaluateStmt,
+    ExecStmt,
     ExitStmt,
     GoToStmt,
     IfStmt,
@@ -268,6 +269,8 @@ class _ParaCompiler:
             return st.kind == "call" and st.target is not None  # simple PERFORM p [THRU q]
         if isinstance(st, IoStmt):
             return not st.handlers
+        if isinstance(st, ExecStmt):
+            return st.kind in ("effect", "call", "handle")
         if isinstance(st, ContinueStmt):
             return not st.next_sentence
         if isinstance(st, ExitStmt):
@@ -286,6 +289,8 @@ class _ParaCompiler:
             return [self._perform_action(st)]
         if isinstance(st, IoStmt):
             return [_io_action(st, reg)]
+        if isinstance(st, ExecStmt):
+            return [self._exec_action(st)]
         if isinstance(st, AlterStmt):
             names = []
             for altered, target in st.pairs:
@@ -305,6 +310,21 @@ class _ParaCompiler:
         return self.reg.action_named(
             f"perform_{st.target}", f"PERFORM {st.target}{thru}{ctrl}".strip(), st.line)
 
+    def _exec_action(self, st: ExecStmt) -> str:
+        base = f"link_{st.target}" if st.kind == "call" and st.target else \
+            f"exec_{st.lang.lower()}_{st.verb.lower()}"
+        name = self.reg.action_named(base, f"EXEC {st.lang} {st.text} END-EXEC", st.line)
+        self.ctx.action_sem.setdefault(name, {
+            "verb": st.verb, "kind": f"exec-{st.lang.lower()}",
+            "hostVars": st.host_vars, "raw": f"EXEC {st.lang} {st.text} END-EXEC",
+        })
+        if st.kind == "handle":
+            self.ctx.flag(self.pname, st.line,
+                          f"EXEC {st.lang} {st.verb} registers implicit handler(s) "
+                          f"{st.conditions or ''} - later transfer is invisible at this "
+                          f"site; model as an orthogonal handler region and verify")
+        return name
+
     # -- control constructs ------------------------------------------------
     def compile_control(self, st: Stmt, after: str, root: Optional[str]) -> str:
         if isinstance(st, IfStmt):
@@ -323,6 +343,17 @@ class _ParaCompiler:
             return self._emit(name, {"type": "final", "meta": {"kind": st.kind, "cobolLine": st.line}})
         if isinstance(st, IoStmt):
             return self.compile_io(st, after, root)
+        if isinstance(st, ExecStmt):       # terminate (RETURN/ABEND) or transfer (XCTL)
+            name = root or self._fresh("exec")
+            self.reg.state(name, f"EXEC {st.lang} {st.verb} ({st.kind})", st.line)
+            if st.kind == "transfer":
+                self.ctx.flag(self.pname, st.line,
+                              f"EXEC {st.lang} XCTL to {st.target or '?'} - control "
+                              f"transfers out with no return")
+            meta = {"kind": f"cics-{st.verb.lower()}", "cobolLine": st.line}
+            if st.target:
+                meta["target"] = st.target
+            return self._emit(name, {"type": "final", "meta": meta})
         if isinstance(st, ContinueStmt):  # NEXT SENTENCE (plain CONTINUE is straight-line)
             self.ctx.flag(self.pname, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")
             name = root or self._fresh("next")
