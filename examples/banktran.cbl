@@ -9,7 +9,8 @@
        DATA DIVISION.
        WORKING-STORAGE SECTION.
        01  WS-TRAN-TYPE        PIC X.
-       01  WS-STATUS           PIC XX.
+       01  WS-STATUS           PIC XX VALUE 'OK'.
+       01  WS-COUNT            PIC 9(4) VALUE ZERO.
        01  WS-SUBPGM           PIC X(8) VALUE 'POSTLOG '.
        01  WS-EOF              PIC X VALUE 'N'.
        PROCEDURE DIVISION.
@@ -34,13 +35,13 @@
                AT END MOVE 'Y' TO WS-EOF
            END-READ.
        2100-DEPOSIT.
-           ADD 1 TO WS-STATUS
+           ADD 1 TO WS-COUNT
            CALL WS-SUBPGM USING WS-TRAN-TYPE.
        2200-WITHDRAW.
            IF WS-STATUS = 'NG'
                GO TO 2900-ERROR
            END-IF
-           SUBTRACT 1 FROM WS-STATUS.
+           SUBTRACT 1 FROM WS-COUNT.
        2300-INQUIRY.
            DISPLAY 'INQUIRY'.
        2900-ERROR.

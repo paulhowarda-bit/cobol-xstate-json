@@ -1,13 +1,15 @@
 # cobol-xstate
 
-Parse IBM Enterprise COBOL and emit its control flow as an **XState v5 JSON Harel
+Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 statechart** — a *rewrite contract* for mainframe modernization.
 
-The recovered statechart asserts what the legacy program provably does, against which
-a rewrite can be validated (golden-master / equivalence testing). The guiding rule is
-**no invented logic**: states, guards, and actions are names that trace back to the
-COBOL source via a provenance table, and constructs a static pass cannot resolve are
-*flagged*, never smoothed over.
+Because a Harel/STATEMATE statechart holds more than control flow — typed data items,
+actions as assignments, conditions as expressions — the recovery captures **all** the
+program logic: the paragraph control flow *and* the data layer (`PIC`/`USAGE`/sign
+types, `MOVE`/`COMPUTE` as `target := expr`, conditions as Boolean trees). The guiding
+rule is **no invented logic**: every state, guard, action, and expression is a faithful
+translation of source that traces back via a provenance table, and what genuinely rides
+on runtime data is *flagged*, never smoothed over.
 
 > Built with the `ibm-cobol` skill. The mapping follows its
 > `references/cobol-to-statecharts.md` (COBOL → XState v5) and
@@ -43,17 +45,37 @@ The default output is a JSON **bundle**:
 {
   "format": "xstate-v5-config",
   "metadata": { "program": "...", "disclaimer": "..." },
-  "machine":  { "id": "...", "initial": "...", "context": {}, "states": { ... } },
+  "machine":  { "id": "...", "initial": "...", "context": { /* typed initial values */ }, "states": { ... } },
+  "data":     { "WS-TOTAL": { "type": { "category": "numeric", "usage": "DISPLAY", "digits": 13, "scale": 2, "signed": false }, ... } },
+  "semantics": {
+    "actions": { "ADD_CUST-AMT_TO_WS-TOTAL": { "kind": "arith", "assignments": [ { "target": "WS-TOTAL", "expr": "WS-TOTAL + CUST-AMT" } ] } },
+    "guards":  { "UNTIL_WS-EOF_eq_Y": { "op": "rel", "left": "WS-EOF", "rel": "=", "right": "'Y'" } }
+  },
   "provenance": { "<name>": { "kind": "state|guard|action", "cobol": "...", "line": N } },
   "flags":    [ { "paragraph": "...", "line": N, "message": "..." } ],
   "notes":    [ "..." ]
 }
 ```
 
-`machine` is a bare XState v5 `createMachine` **config** (serializable data — no
-function bodies). Feed it to XState with a `setup({ guards, actions })` block whose
-stubs you implement *deliberately against the COBOL* named in `provenance` — never
-from a generated guess. `--machine-only` emits just that config.
+`machine` is a bare XState v5 `createMachine` **config**. The logic that a Harel/
+STATEMATE statechart holds beyond control flow travels alongside it:
+
+- **`data`** — the typed data dictionary recovered from the DATA DIVISION: every item's
+  `PIC`, `USAGE` (DISPLAY / COMP / COMP-3 packed / …), digit count, decimal `scale`, and
+  `signed` flag, plus 88-level condition-names resolved to `(parent == values)`. This is
+  the type information that governs COBOL's fixed-point decimal arithmetic.
+- **`semantics.actions`** — each action's actual operation: `MOVE`/`ADD`/`COMPUTE`/… as
+  `target := expression` assignments (with `rounded`/`onSizeError` annotations), not just
+  a name. `semantics.guards` — each guard's Boolean expression tree (relational / class /
+  sign / 88-level / AND-OR-NOT).
+- **`machine.context`** — seeded with each elementary item's start-of-run value (its
+  `VALUE` clause, else the typed default).
+
+Nothing is invented — every action/guard expression is a faithful translation of the
+COBOL the `provenance` entry points to. The one thing the bare config can't embed is the
+*decimal evaluator*: feed the machine to XState with a `setup({ guards, actions })` block
+that implements these expressions over a **decimal** type (COMP-3/zoned/binary per `data`),
+not binary float. `--machine-only` emits just the config.
 
 ## How it works (the pipeline)
 
@@ -63,13 +85,16 @@ raw source
                 continuation-literal stitching, Area-A detection            (normalizer.py)
   → lexer       words / numbers / string literals / period / operators,
                 each carrying its source line                              (lexer.py)
-  → parser      PROCEDURE DIVISION → sections/paragraphs (Area-A headers) +
+  → parser      DATA DIVISION → typed data dictionary (PIC/USAGE/sign, 88-levels);
+                PROCEDURE DIVISION → sections/paragraphs (Area-A headers) +
                 a control-flow statement AST (IF / EVALUATE / PERFORM / GO TO /
-                I-O handlers / CALL / ALTER / terminators)            (parser.py, model.py)
+                I-O handlers / CALL / ALTER / terminators)
+                                  (parser.py, model.py, data_division.py)
   → statechart  recursively compile each paragraph's full statement tree to faithful
-                guarded states/loops/handlers; constant-propagate dynamic CALL;
-                provenance for every name; flag runtime-data constructs
-                                            (statechart.py, analysis.py, naming.py)
+                guarded states/loops/handlers; translate MOVE/COMPUTE/… to
+                target := expr and conditions to Boolean trees; type the context;
+                constant-propagate dynamic CALL; provenance + flags
+                          (statechart.py, semantics.py, analysis.py, naming.py)
 ```
 
 ### What maps to what
@@ -128,9 +153,13 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   the separately-compiled paragraph `p` and continues; the literal jump-and-return pair
   isn't drawn (it needs a call stack XState doesn't have). `p`'s full logic is still
   captured as its own region. `GO TO` (no return) *is* drawn as a transition.
-- **No data-division semantics yet** — `context` holds only recovered control flags
-  (e.g. ALTER switches); USAGE/PICTURE/sign are not modeled. Guard/action *meaning*
-  must be filled in against the COBOL (the `setup()` stubs).
+- **Data semantics are captured but not *evaluated*.** `data` carries the types and
+  `semantics` carries the `target := expr` / Boolean-tree logic, but the bare config
+  can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must
+  implement these over a decimal type (COMP-3/zoned/binary per `data`), not float.
+  `OCCURS`/`REDEFINES` are recorded but subscript/alias addressing isn't resolved, and
+  conditions beyond relational/class/sign/88/AND-OR-NOT fall back to `{op:'raw'}`
+  (nothing dropped — flagged shape).
 - **Step semantics:** one record cycle = one macrostep, STATEMATE next-step sensing
   (a flag set this cycle is sensed next cycle). Same-cycle cross-region dependencies
   should be reviewed.
@@ -141,17 +170,17 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 31 tests: normalizer, lexer, parser, analysis, statechart
+PYTHONPATH=src python -m pytest -q     # 43 tests: normalizer, lexer, parser, data, semantics, analysis, statechart
 ```
 
 Layout:
 
 ```
-src/cobol_xstate/   normalizer · lexer · model · parser · analysis · naming · statechart · cli
+src/cobol_xstate/   normalizer · lexer · model · parser · data_division · semantics · analysis · naming · statechart · cli
 examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
-tests/              one module per pipeline stage (31 tests)
+tests/              one module per pipeline stage (43 tests)
 ```
 
 ## License

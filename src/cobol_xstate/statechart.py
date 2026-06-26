@@ -29,10 +29,12 @@ statement tree is compiled recursively:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .analysis import CallAnalysis, analyze_calls
+from .semantics import parse_condition, parse_operation
 from .model import (
     Action,
     AlterStmt,
@@ -68,6 +70,8 @@ class Machine:
     notes: List[str]
     program_id: str
     source_name: str = "<source>"
+    data: Dict[str, dict] = field(default_factory=dict)
+    semantics: Dict[str, dict] = field(default_factory=dict)
 
     def bundle(self) -> dict:
         return {
@@ -78,15 +82,21 @@ class Machine:
                 "generator": "cobol-xstate 0.1.0",
                 "disclaimer": (
                     "Each paragraph's full statement tree is compiled to faithful "
-                    "guarded structure (IF/EVALUATE/loops/I-O handlers), so the "
-                    "program's control logic is captured rather than flattened. "
-                    "Guards/actions are names only (no invented bodies); meaning lives "
-                    "in 'provenance'. PERFORM is modeled as a call-return action into a "
-                    "separately-compiled paragraph (no synthesized return edge). Items "
-                    "under 'flags' depend on runtime data - verify against source."
+                    "guarded structure (IF/EVALUATE/loops/I-O handlers), and the data "
+                    "transformation logic is captured too: 'data' is the typed data "
+                    "dictionary (PIC/USAGE/sign), 'semantics.actions' give each action's "
+                    "target := expression, and 'semantics.guards' give each guard's "
+                    "Boolean expression tree - all traced to source in 'provenance', "
+                    "nothing invented. COBOL arithmetic is fixed-point DECIMAL: a "
+                    "rewrite must honor the data types, not use binary float. PERFORM is "
+                    "a call-return action into a separately-compiled paragraph. Items "
+                    "under 'flags' need verification against source."
                 ),
             },
             "machine": self.config,
+            "data": self.data,
+            "semantics": {"actions": self.semantics.get("actions", {}),
+                          "guards": self.semantics.get("guards", {})},
             "provenance": self.provenance,
             "flags": self.flags,
             "notes": self.notes,
@@ -104,11 +114,14 @@ class Machine:
 class _BuildCtx:
     reg: NameRegistry
     calls: CallAnalysis
+    data: Dict[str, object] = field(default_factory=dict)   # name -> DataItem
     states: Dict[str, dict] = field(default_factory=dict)
     counter: int = 0
     # altered-paragraph -> ordered candidate exit targets (orig GO TO + PROCEED-TOs)
     alter_targets: Dict[str, List[str]] = field(default_factory=dict)
     context: Dict[str, object] = field(default_factory=dict)
+    action_sem: Dict[str, dict] = field(default_factory=dict)  # action name -> operation
+    guard_sem: Dict[str, dict] = field(default_factory=dict)   # guard name  -> condition tree
     flags: List[dict] = field(default_factory=list)
     _seen_flags: set = field(default_factory=set)
 
@@ -118,6 +131,34 @@ class _BuildCtx:
             return
         self._seen_flags.add(key)
         self.flags.append({"paragraph": para, "line": line, "message": message})
+
+    def record_action(self, name: str, text: str, line: int, para: str) -> None:
+        if name in self.action_sem:
+            return
+        spec = parse_operation(text, self.data)
+        if spec is None:
+            return
+        self.action_sem[name] = spec
+        # The global decimal-arithmetic caveat is a note; only flag genuine per-site
+        # concerns: arithmetic writing a known non-numeric item, or an ON SIZE ERROR
+        # overflow path the rewrite must replicate.
+        if spec.get("kind") in ("arith", "compute"):
+            for a in spec.get("assignments", []):
+                di = self.data.get(a["target"].upper())
+                cat = getattr(getattr(di, "type", None), "category", "") if di else ""
+                if di is not None and not cat.startswith("numeric"):
+                    self.flag(para, line,
+                              f"{spec['verb']} writes non-numeric {a['target']} "
+                              f"({cat or 'unknown'}) - verify type (S0C7 risk)")
+            if spec.get("onSizeError"):
+                self.flag(para, line,
+                          f"{spec['verb']} ON SIZE ERROR - the overflow path must be "
+                          f"replicated in the rewrite")
+
+    def record_guard(self, name: str, cond_text: str) -> None:
+        if name in self.guard_sem or not cond_text.strip():
+            return
+        self.guard_sem[name] = parse_condition(cond_text, self.data)
 
 
 def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
@@ -236,7 +277,9 @@ class _ParaCompiler:
     def _straight_actions(self, st: Stmt) -> List[str]:
         reg = self.reg
         if isinstance(st, Action):
-            return [reg.action(st.text, st.line)]
+            name = reg.action(st.text, st.line)
+            self.ctx.record_action(name, st.text, st.line, self.pname)
+            return [name]
         if isinstance(st, CallStmt):
             return [_call_action(st, self.ctx, self.pname)]
         if isinstance(st, PerformStmt):
@@ -296,6 +339,8 @@ class _ParaCompiler:
     def compile_if(self, st: IfStmt, after: str, root: Optional[str]) -> str:
         name = root or self._fresh("if")
         g = self.reg.guard(st.cond_text, st.line) if st.cond_text.strip() else None
+        if g:
+            self.ctx.record_guard(g, st.cond_text)
         then_e = self.compile_block(st.then_body, after)
         else_e = self.compile_block(st.else_body, after) if st.else_body else after
         edges = [self._edge(then_e, "if-then", st.line, guard=g),
@@ -308,6 +353,8 @@ class _ParaCompiler:
         for cond, body in st.whens:
             full = f"{st.subject} = {cond}" if st.subject and cond else (cond or st.subject)
             g = self.reg.guard(full, st.line) if full.strip() else None
+            if g:
+                self.ctx.record_guard(g, full)
             tgt = self.compile_block(body, after) if body else after
             edges.append(self._edge(tgt, "when", st.line, guard=g))
         if st.other_body is not None:
@@ -320,6 +367,9 @@ class _ParaCompiler:
 
     def compile_loop(self, st: PerformStmt, after: str, root: Optional[str]) -> str:
         g = self.reg.guard(st.control_text or f"{st.kind} clause", st.line)
+        m = re.search(r"\bUNTIL\b\s*(.+)$", st.control_text, re.I)
+        if m:
+            self.ctx.record_guard(g, m.group(1))
         if st.test_after:                      # do-while: run body, then test
             head = self._fresh("loop")
             body_root = root
@@ -409,9 +459,67 @@ def _compute_alter_targets(program: Program, ctx: _BuildCtx) -> None:
         ctx.context[f"alt_{_slug(altered)}"] = orig
 
 
+def _initial_value(item) -> object:
+    """The start-of-run value of an elementary item: its VALUE clause, else a typed
+    default (0 for numeric, '' for text)."""
+    t = getattr(item, "type", None)
+    if item.value is not None:
+        v = item.value
+        if v[:1] in ("'", '"'):
+            return v.strip("'\"")
+        up = v.upper()
+        if up in ("ZERO", "ZEROS", "ZEROES"):
+            return 0
+        if up in ("SPACE", "SPACES"):
+            return ""
+        if re.match(r"^[+-]?\d+(\.\d+)?$", v):
+            return float(v) if "." in v else int(v)
+        return v
+    if t is not None and t.category.startswith("numeric"):
+        return 0
+    if t is not None and t.category == "group":
+        return None
+    return ""
+
+
+def _data_dictionary(program: Program) -> Dict[str, dict]:
+    out: Dict[str, dict] = {}
+    for it in program.data_items:
+        if it.level == 88:
+            out[it.name] = {"kind": "condition-name", "of": it.cond_parent,
+                            "values": it.condition_values, "line": it.line}
+            continue
+        entry = {"level": it.level, "line": it.line}
+        if it.section:
+            entry["section"] = it.section
+        if it.parent:
+            entry["parent"] = it.parent
+        if it.redefines:
+            entry["redefines"] = it.redefines
+        if it.occurs:
+            entry["occurs"] = it.occurs
+        if it.value is not None:
+            entry["value"] = it.value
+        if it.is_group:
+            entry["type"] = {"category": "group"}
+        elif it.type is not None:
+            entry["type"] = it.type.to_dict()
+        out[it.name] = entry
+    return out
+
+
 def build_machine(program: Program, source_name: str = "<source>") -> Machine:
-    ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program))
+    ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
+                    data=program.data_by_name)
     _compute_alter_targets(program, ctx)
+
+    # Seed the machine memory (context) with each elementary item's start-of-run value
+    # - the data the actions assign to and the guards test (alter switches were already
+    # added by _compute_alter_targets and are preserved).
+    for it in program.data_items:
+        if it.level in (88, 66) or it.is_group or it.pic is None:
+            continue
+        ctx.context.setdefault(it.name, _initial_value(it))
 
     paras = program.paragraphs
     names = [p.name for p in paras]
@@ -446,6 +554,13 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         "Step semantics: one record cycle = one macrostep; flags set in one cycle are "
         "sensed next cycle (STATEMATE next-step sensing). See cobol-to-statecharts.md."
     )
+    if program.data_items:
+        notes.append(
+            "Data items are typed in 'data' (PIC/USAGE/sign). COBOL numerics are "
+            "fixed-point decimal (COMP-3 packed, DISPLAY zoned, COMP binary); guard/"
+            "action expressions in 'semantics' must be evaluated with decimal, not "
+            "binary-float, arithmetic to stay faithful."
+        )
 
     return Machine(
         config=config,
@@ -454,4 +569,6 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         notes=notes,
         program_id=program.program_id,
         source_name=source_name,
+        data=_data_dictionary(program),
+        semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem},
     )

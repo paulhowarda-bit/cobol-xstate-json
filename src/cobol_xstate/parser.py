@@ -25,6 +25,7 @@ from typing import List, Optional, Set
 
 from .normalizer import CodeLine, SourceFormat, normalize
 from .lexer import Token, tokenize
+from .data_division import parse_data_division
 from .model import (
     Action,
     AlterStmt,
@@ -137,6 +138,7 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None) -> Program:
         )
 
     prog.working_values = _scan_value_clauses(lines)
+    prog.data_items, prog.data_by_name = parse_data_division(lines)
 
     body = _procedure_lines(lines)
     if not body:

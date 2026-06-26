@@ -132,6 +132,9 @@ class Program:
     # data-name -> initial literal from a WORKING-STORAGE `VALUE 'lit'` clause, used
     # by constant propagation to resolve dynamic CALL targets.
     working_values: Dict[str, str] = field(default_factory=dict)
+    # DATA DIVISION recovery (data_division.DataItem); duck-typed to avoid coupling.
+    data_items: List = field(default_factory=list)
+    data_by_name: Dict[str, object] = field(default_factory=dict)
 
 
 def walk_statements(stmts: List[Stmt]):
