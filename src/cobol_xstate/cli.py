@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from .emitter import emit_setup_module
 from .normalizer import SourceFormat
 from .parser import parse_program
 from .preprocessor import CopybookResolver
@@ -26,7 +27,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "XState v5 JSON Harel statechart (a modernization rewrite contract).",
     )
     p.add_argument("source", help="path to a COBOL source file ('-' for stdin)")
-    p.add_argument("-o", "--output", help="write JSON here (default: stdout)")
+    p.add_argument("-o", "--output", help="write output here (default: stdout)")
+    p.add_argument("--target", choices=["json", "js"], default="json",
+                   help="json = the XState config bundle (default); js = a runnable "
+                        "XState v5 setup() ES module backed by the decimal runtime")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
     p.add_argument("-I", "--copybook-path", action="append", default=[],
@@ -64,12 +68,25 @@ def run(argv: Optional[List[str]] = None) -> int:
     )
     program = parse_program(source, _format(args.format), resolver=resolver)
     machine = build_machine(program, source_name=source_name)
-    text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
 
-    if args.output:
-        Path(args.output).write_text(text + "\n")
+    if args.target == "js":
+        text = emit_setup_module(machine)
+        if args.output:
+            out_path = Path(args.output)
+            out_path.write_text(text)
+            # Drop the decimal runtime beside the module so its import resolves.
+            runtime_src = Path(__file__).resolve().parents[2] / "runtime" / "cobolRuntime.mjs"
+            if runtime_src.exists():
+                (out_path.parent / "cobolRuntime.mjs").write_text(
+                    runtime_src.read_text())
+        else:
+            print(text)
     else:
-        print(text)
+        text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
+        if args.output:
+            Path(args.output).write_text(text + "\n")
+        else:
+            print(text)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))

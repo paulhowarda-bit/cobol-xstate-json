@@ -1,0 +1,10 @@
+{
+  "name": "cobol-xstate-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Decimal runtime + emitted XState v5 machines for cobol-xstate",
+  "dependencies": {
+    "xstate": "^5.0.0"
+  }
+}
