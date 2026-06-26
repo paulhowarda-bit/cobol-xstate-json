@@ -92,6 +92,21 @@ def _header_name(cl: CodeLine) -> Optional[str]:
     return name
 
 
+_VALUE_RE = re.compile(
+    r"^\s*\d+\s+([A-Z0-9][A-Z0-9-]*)\b.*?\bVALUE\b\s+(?:IS\s+)?(['\"])(.*?)\2", re.I)
+
+
+def _scan_value_clauses(lines: List[CodeLine]) -> dict:
+    """Capture `<level> NAME ... VALUE 'lit'` initial values (string literals only)
+    from the DATA DIVISION, for constant propagation of CALL targets."""
+    out = {}
+    for cl in lines:
+        m = _VALUE_RE.match(cl.text)
+        if m:
+            out[m.group(1).upper()] = m.group(3).rstrip()
+    return out
+
+
 def _procedure_lines(lines: List[CodeLine]) -> List[CodeLine]:
     """Return body lines after the PROCEDURE DIVISION header clause (skipping any
     ``USING ...`` continuation up to its terminating period)."""
@@ -120,6 +135,8 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None) -> Program:
             "DECLARATIVES present: USE-procedure error handlers form an implicit "
             "orthogonal region; recovered chart does not model the implicit transfer."
         )
+
+    prog.working_values = _scan_value_clauses(lines)
 
     body = _procedure_lines(lines)
     if not body:
@@ -486,9 +503,21 @@ class StmtParser:
     def parse_alter(self) -> Stmt:
         line = self._next().line  # ALTER
         parts = ["ALTER"]
+        words: List[str] = []
+        # ALTER operands are only paragraph-names + TO/PROCEED; stop at the next
+        # statement (there may be no period before it, e.g. a following GO TO).
         while not self._eof() and not self._at_period():
-            parts.append(self._next().text)
-        return AlterStmt(line=line, text=" ".join(parts))
+            t = self._peek()
+            if t.kind == "word" and (t.up in STARTERS or self._is_end_word(t)
+                                     or t.up in {"ELSE", "WHEN"}):
+                break
+            self._next()
+            parts.append(t.text)
+            if t.kind == "word" and t.up not in {"TO", "PROCEED"}:
+                words.append(t.up)
+        # words arrive as [altered, target, altered, target, ...]
+        pairs = [(words[i], words[i + 1]) for i in range(0, len(words) - 1, 2)]
+        return AlterStmt(line=line, text=" ".join(parts), pairs=pairs)
 
     # -- EXIT --------------------------------------------------------------
     def parse_exit(self) -> Stmt:

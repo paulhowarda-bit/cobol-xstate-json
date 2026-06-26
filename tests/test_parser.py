@@ -103,6 +103,24 @@ def test_alter_and_dynamic_call_recovered():
     assert isinstance(stmts[0], CallStmt)
     assert stmts[0].dynamic is True
     assert isinstance(stmts[1], AlterStmt)
+    assert stmts[1].pairs == [("100-X", "200-Y")]
+
+
+def test_alter_stops_at_following_goto_without_period():
+    # ALTER and a following GO TO share a sentence (no period between them).
+    prog = parse_program(_wrap(
+        "       1000-SWITCH.\n"
+        "           GO TO 1100-FIRST.\n"
+        "       1100-FIRST.\n"
+        "           ALTER 1000-SWITCH TO PROCEED TO 1200-NORMAL\n"
+        "           GO TO 1900-DONE.\n"
+    ))
+    first = prog.paragraphs[1]
+    alter, goto = first.statements[0], first.statements[1]
+    assert isinstance(alter, AlterStmt)
+    assert alter.pairs == [("1000-SWITCH", "1200-NORMAL")]
+    assert isinstance(goto, GoToStmt)
+    assert goto.targets == ["1900-DONE"]
 
 
 def test_static_call_is_not_dynamic():

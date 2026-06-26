@@ -73,7 +73,10 @@ class GoToStmt(Stmt):
 
 @dataclass
 class AlterStmt(Stmt):
-    text: str                   # runtime-mutable GO TO target; always FLAGGED
+    text: str                   # original spelling
+    # (altered-paragraph, new-proceed-to-target) pairs. ALTER rewrites the GO TO at
+    # the *head* of `altered` so it proceeds to `target` - i.e. a switchable exit.
+    pairs: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -126,3 +129,26 @@ class Program:
     paragraphs: List[Paragraph] = field(default_factory=list)
     has_procedure_division: bool = False
     notes: List[str] = field(default_factory=list)  # parser-level remarks
+    # data-name -> initial literal from a WORKING-STORAGE `VALUE 'lit'` clause, used
+    # by constant propagation to resolve dynamic CALL targets.
+    working_values: Dict[str, str] = field(default_factory=dict)
+
+
+def walk_statements(stmts: List[Stmt]):
+    """Yield every statement, descending into IF / EVALUATE / PERFORM-inline / I-O
+    handler bodies (needed by whole-program analyses like constant propagation)."""
+    for st in stmts:
+        yield st
+        if isinstance(st, IfStmt):
+            yield from walk_statements(st.then_body)
+            yield from walk_statements(st.else_body)
+        elif isinstance(st, EvaluateStmt):
+            for _cond, body in st.whens:
+                yield from walk_statements(body)
+            if st.other_body:
+                yield from walk_statements(st.other_body)
+        elif isinstance(st, PerformStmt):
+            yield from walk_statements(st.inline_body)
+        elif isinstance(st, IoStmt):
+            for body in st.handlers.values():
+                yield from walk_statements(body)

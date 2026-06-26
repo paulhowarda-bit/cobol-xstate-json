@@ -57,11 +57,53 @@ def test_terminator_marks_final():
     assert machine.config["states"]["0000-MAIN"].get("type") == "final"
 
 
-def test_banktran_flags_alter_and_dynamic_call():
+def test_dynamic_call_resolved_by_constant_propagation():
+    # WS-SUBPGM has VALUE 'POSTLOG' and is never reassigned, so the CALL target
+    # resolves statically and is NOT flagged.
     machine = _machine((EXAMPLES / "banktran.cbl").read_text())
-    messages = " ".join(f["message"] for f in machine.flags)
-    assert "ALTER" in messages
-    assert "dynamic CALL" in messages
+    assert machine.flags == []
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "call_POSTLOG" in actions
+    assert any("POSTLOG" in p.get("cobol", "") for p in machine.provenance.values())
+
+
+def test_dynamic_call_from_variable_stays_flagged():
+    machine = _machine((EXAMPLES / "altswitch.cbl").read_text())
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "dynamic CALL WS-PGM" in msgs
+    assert "runtime-determined" in msgs
+
+
+def test_alter_modeled_as_context_driven_guard_switch():
+    machine = _machine((EXAMPLES / "altswitch.cbl").read_text())
+    # The altered paragraph's exit is a guard set over its candidate targets...
+    switch = machine.config["states"]["1000-SWITCH"]["always"]
+    targets = {e["target"] for e in switch}
+    assert targets == {"1100-FIRST", "1200-NORMAL"}
+    assert all("guard" in e for e in switch)
+    # ...seeded from a context variable holding the initial (head GO TO) target...
+    assert machine.config["context"]["alt_1000-SWITCH"] == "1100-FIRST"
+    # ...the ALTER itself is the set-action that flips the switch...
+    first = machine.config["states"]["1100-FIRST"]["entry"]
+    assert any(a.startswith("set_alt_1000-SWITCH_to_1200-NORMAL") for a in first)
+    # ...and it is still flagged as runtime-switched (verify, don't trust blindly).
+    assert any("ALTER-switched" in f["message"] for f in machine.flags)
+
+
+def test_goto_is_exit_transition_suppressing_fallthrough():
+    machine = _machine(
+        "       PROCEDURE DIVISION.\n"
+        "       0000-A.\n"
+        "           GO TO 9000-Z.\n"
+        "       1000-B.\n"
+        "           DISPLAY 'B'.\n"
+        "       9000-Z.\n"
+        "           STOP RUN.\n"
+    )
+    a = machine.config["states"]["0000-A"]["always"]
+    kinds = {e["meta"]["kind"] for e in a}
+    assert kinds == {"goto"}                       # exit transition only
+    assert all(e["target"] == "9000-Z" for e in a)  # no fall-through to 1000-B
 
 
 def test_evaluate_produces_guarded_transitions():

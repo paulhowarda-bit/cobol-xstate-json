@@ -28,6 +28,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .analysis import CallAnalysis, analyze_calls
 from .model import (
     Action,
     AlterStmt,
@@ -43,8 +44,9 @@ from .model import (
     Program,
     Stmt,
     TerminateStmt,
+    walk_statements,
 )
-from .naming import NameRegistry
+from .naming import NameRegistry, _slug
 
 _IO_GUARD_KEY = {
     "AT_END": "atEnd",
@@ -95,10 +97,35 @@ class Machine:
 @dataclass
 class _BuildCtx:
     reg: NameRegistry
+    calls: CallAnalysis
+    # altered-paragraph -> ordered candidate exit targets (orig GO TO + PROCEED-TOs)
+    alter_targets: Dict[str, List[str]] = field(default_factory=dict)
+    context: Dict[str, object] = field(default_factory=dict)
     flags: List[dict] = field(default_factory=list)
+    _seen_flags: set = field(default_factory=set)
 
     def flag(self, para: str, line: int, message: str) -> None:
+        key = (para, message)
+        if key in self._seen_flags:
+            return
+        self._seen_flags.add(key)
         self.flags.append({"paragraph": para, "line": line, "message": message})
+
+
+def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
+    """Action name for a CALL, resolving a dynamic target by constant propagation
+    where the program proves it constant (else flag, don't guess)."""
+    reg = ctx.reg
+    if not st.dynamic:
+        return reg.action_named("call_" + st.target, f"CALL '{st.target}'", st.line)
+    res = ctx.calls.resolve(st.target)
+    if res.confident and res.resolved:
+        return reg.action_named(
+            "call_" + res.resolved,
+            f"CALL {st.target} -> resolved '{res.resolved}' ({res.reason})", st.line)
+    # Unresolved or ambiguous: keep the identifier name and flag it.
+    ctx.flag(para, st.line, f"dynamic CALL {st.target} - {res.reason}")
+    return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}", st.line)
 
 
 def _summarize_transfer(body: List[Stmt], reg: NameRegistry,
@@ -115,9 +142,7 @@ def _summarize_transfer(body: List[Stmt], reg: NameRegistry,
         if isinstance(st, Action):
             actions.append(reg.action(st.text, st.line))
         elif isinstance(st, CallStmt):
-            actions.append(reg.action_named("call_" + st.target, _call_cobol(st), st.line))
-            if st.dynamic:
-                ctx.flag(para, st.line, f"dynamic CALL {st.target} - target not statically known")
+            actions.append(_call_action(st, ctx, para))
         elif isinstance(st, IoStmt):
             actions.append(_io_action(st, reg))
         elif isinstance(st, PerformStmt):
@@ -137,10 +162,6 @@ def _summarize_transfer(body: List[Stmt], reg: NameRegistry,
             if st.next_sentence:
                 ctx.flag(para, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")
     return actions, target, final
-
-
-def _call_cobol(st: CallStmt) -> str:
-    return f"CALL {'(dynamic) ' if st.dynamic else ''}{st.target}"
 
 
 def _io_action(st: IoStmt, reg: NameRegistry) -> str:
@@ -194,9 +215,7 @@ def _build_state(para: Paragraph, next_name: Optional[str], ctx: _BuildCtx) -> d
             entry.append(reg.action(st.text, st.line))
 
         elif isinstance(st, CallStmt):
-            entry.append(reg.action_named("call_" + st.target, _call_cobol(st), st.line))
-            if st.dynamic:
-                ctx.flag(para.name, st.line, f"dynamic CALL {st.target} - target not statically known")
+            entry.append(_call_action(st, ctx, para.name))
 
         elif isinstance(st, IoStmt):
             entry.append(_io_action(st, reg))
@@ -237,12 +256,26 @@ def _build_state(para: Paragraph, next_name: Optional[str], ctx: _BuildCtx) -> d
                     final_line = st.line
 
         elif isinstance(st, GoToStmt):
-            if st.depending:
+            if para.name in ctx.alter_targets:
+                # This paragraph's head GO TO is ALTER-switched: emit a context-driven
+                # guard set over every candidate exit (the skill's encoding).
+                slug_p = _slug(para.name)
+                for t in ctx.alter_targets[para.name]:
+                    g = reg.guard_named(f"alt_{slug_p}_is_{_slug(t)}",
+                                        f"ALTER-switched exit of {para.name} -> {t} "
+                                        f"(context.alt_{slug_p})", st.line)
+                    edge(t, "alter-switch", st.line, guard=g)
+                ctx.flag(para.name, st.line,
+                         f"ALTER-switched exit: target of {para.name} is set at runtime; "
+                         f"verify context.alt_{slug_p}")
+                ends_unconditionally = True
+            elif st.depending:
                 ctx.flag(para.name, st.line, "GO TO ... DEPENDING ON - computed multi-target; verify")
                 for idx, t in enumerate(st.targets, start=1):
                     g = reg.guard_named(f"depending_eq_{idx}",
                                         f"GO TO DEPENDING ON selects target {idx} ({t})", st.line)
                     edge(t, "goto-depending", st.line, guard=g)
+                ends_unconditionally = True
             else:
                 for t in st.targets:
                     edge(t, "goto", st.line, note="GO TO - no return")
@@ -265,8 +298,18 @@ def _build_state(para: Paragraph, next_name: Optional[str], ctx: _BuildCtx) -> d
             _emit_selection(whens, st.other_body, st.line, para, ctx, entry, edge)
 
         elif isinstance(st, AlterStmt):
-            ctx.flag(para.name, st.line,
-                     "ALTER - runtime-mutable GO TO target; NOT statically resolvable")
+            # The ALTER itself is the switch-flip: a set-action on this state that
+            # rewrites the altered paragraph's exit (which is drawn as a guard set).
+            for altered, target in st.pairs:
+                slug_p = _slug(altered)
+                act = reg.action_named(
+                    f"set_alt_{slug_p}_to_{_slug(target)}",
+                    f"ALTER {altered} TO PROCEED TO {target}", st.line)
+                entry.append(act)
+                if altered not in ctx.alter_targets:
+                    ctx.flag(para.name, st.line,
+                             f"ALTER {altered} TO PROCEED TO {target} - altered paragraph "
+                             f"has no head GO TO; non-idiomatic, switch not modeled")
 
         elif isinstance(st, ContinueStmt):
             if st.next_sentence:
@@ -326,8 +369,38 @@ def _emit_selection(branches: List[Tuple[str, List[Stmt]]],
             entry.extend(acts)
 
 
+def _compute_alter_targets(program: Program, ctx: _BuildCtx) -> None:
+    """Map each ALTER'd paragraph to its ordered candidate exit targets and seed the
+    machine context with the initial (head GO TO) target."""
+    by_name = {p.name: p for p in program.paragraphs}
+    proceeds: Dict[str, List[str]] = {}
+    for para in program.paragraphs:
+        for st in walk_statements(para.statements):
+            if isinstance(st, AlterStmt):
+                for altered, target in st.pairs:
+                    proceeds.setdefault(altered, [])
+                    if target not in proceeds[altered]:
+                        proceeds[altered].append(target)
+    for altered, targets in proceeds.items():
+        para = by_name.get(altered)
+        orig = None
+        if para is not None:
+            for st in para.statements:
+                if isinstance(st, GoToStmt) and st.targets:
+                    orig = st.targets[0]
+                    break
+        if orig is None:
+            # No head GO TO to switch - non-idiomatic; leave unmodeled (flagged at use).
+            continue
+        ordered = [orig] + [t for t in targets if t != orig]
+        ctx.alter_targets[altered] = ordered
+        ctx.context[f"alt_{_slug(altered)}"] = orig
+
+
 def build_machine(program: Program, source_name: str = "<source>") -> Machine:
-    ctx = _BuildCtx(reg=NameRegistry())
+    ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program))
+    _compute_alter_targets(program, ctx)
+
     states: Dict[str, dict] = {}
     paras = program.paragraphs
     names = [p.name for p in paras]
@@ -338,7 +411,7 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
 
     config: dict = {
         "id": program.program_id,
-        "context": {},
+        "context": ctx.context,
         "states": states,
     }
     if names:

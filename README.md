@@ -83,7 +83,29 @@ raw source
 | Fall-through to next paragraph | eventless `always` edge |
 | `READ … AT END` / `INVALID KEY` | guarded `always` edge on the I/O condition |
 | `STOP RUN` / `GOBACK` / `EXIT PROGRAM` | `type: 'final'` |
-| `ALTER`, `GO TO … DEPENDING ON`, dynamic `CALL`, `NEXT SENTENCE`, `DECLARATIVES` | **flagged**, not modeled |
+| `GO TO … DEPENDING ON` | guarded fan-out (`depending_eq_1…n`) + flag |
+| dynamic `CALL ident` | resolved to a literal where constant-provable, else flagged |
+| `ALTER … TO PROCEED TO` | context-driven guard switch on the altered exit + flag |
+
+### Resolving the "un-mappable" — drawn but flagged
+
+Most constructs that a naive pass would drop are actually *mappable*; the real
+question is whether a **static** parse can pin the behavior. This tool draws the shape
+and flags what rides on runtime data, rather than skipping it:
+
+- **Dynamic `CALL ident`** — [analysis.py](src/cobol_xstate/analysis.py) runs
+  constant propagation: a `VALUE 'POSTLOG'` clause or `MOVE 'POSTLOG' TO ident` with no
+  conflicting assignment resolves the target (`call_POSTLOG`, no flag). If a non-literal
+  assignment can also reach the call, it stays flagged — genuinely runtime.
+- **`ALTER … TO PROCEED TO`** — the altered one-line `GO TO` becomes a guard set over
+  its candidate targets, the initial target is seeded into `context`, and the `ALTER`
+  statement becomes the `set_alt_…` action that flips it. Drawn faithfully, then flagged
+  as runtime-switched (verify the active target).
+- **`GO TO`** — an unconditional exit transition (no return); it suppresses the
+  fall-through edge, since it *is* how the paragraph exits.
+
+A flag now means "the shape is drawn, but its behavior depends on runtime data — verify
+against the source," not "skipped."
 
 ## Honest limitations
 
@@ -108,15 +130,17 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 26 tests: normalizer, lexer, parser, statechart
+PYTHONPATH=src python -m pytest -q     # 30 tests: normalizer, lexer, parser, analysis, statechart
 ```
 
 Layout:
 
 ```
-src/cobol_xstate/   normalizer · lexer · model · parser · naming · statechart · cli
-examples/           custrpt.cbl (canonical batch loop) · banktran.cbl (dispatch + flags)
-tests/              one module per pipeline stage
+src/cobol_xstate/   normalizer · lexer · model · parser · analysis · naming · statechart · cli
+examples/           custrpt.cbl  (canonical batch loop)
+                    banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
+                    altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
+tests/              one module per pipeline stage (30 tests)
 ```
 
 ## License

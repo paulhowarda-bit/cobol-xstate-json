@@ -1,7 +1,8 @@
       *================================================================*
-      * BANKTRAN - transaction dispatch with EVALUATE, a GO TO, a      *
-      * dynamic CALL, and an ALTER, to exercise guarded transitions    *
-      * and the FLAGGING of constructs a static pass cannot resolve.   *
+      * BANKTRAN - transaction dispatch with EVALUATE and a GO TO.     *
+      * The dynamic CALL WS-SUBPGM resolves by constant propagation     *
+      * (WS-SUBPGM has VALUE 'POSTLOG' and is never reassigned), so it  *
+      * is NOT flagged - the target is recovered statically.            *
       *================================================================*
        IDENTIFICATION DIVISION.
        PROGRAM-ID. BANKTRAN.
@@ -43,7 +44,6 @@
        2300-INQUIRY.
            DISPLAY 'INQUIRY'.
        2900-ERROR.
-           DISPLAY 'BAD TRAN'
-           ALTER 2300-INQUIRY TO PROCEED TO 2900-ERROR.
+           DISPLAY 'BAD TRAN'.
        9000-CLOSE.
            CLOSE TRAN-FILE.
