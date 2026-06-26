@@ -6,27 +6,31 @@ lists, and eventless ``always`` transitions, with guards and actions referenced 
 name as strings only**. No guard or action body is invented (references/
 cobol-to-statecharts.md).
 
-Modeling decisions (stated, because honesty is the contract):
+The goal is to capture **all** of the program's logic - which is why the target is a
+Harel statechart (XState), not a UML-subset flattening. Each paragraph's *entire*
+statement tree is compiled recursively:
 
-* **One state per paragraph/section** (OR-state siblings). This is the altitude of
-  the skill's own ``cfg_extract.py`` reference skeleton.
-* **Every control transfer becomes an ``always`` transition** - PERFORM (call-return),
-  GO TO (no return), fall-through, and the transfers inside IF / EVALUATE / I-O
-  handler branches (which carry **guards** recovered from the COBOL condition). Each
-  transition records its ``meta.kind`` and the COBOL line.
-* Because XState evaluates ``always`` edges in document order and a PERFORM's *return*
-  edge cannot be inferred statically, the result is an honest **review skeleton**, not
-  a guaranteed-equivalent machine. The disclaimer travels in the output.
-* Constructs a static pass cannot resolve - ``ALTER``, ``GO TO ... DEPENDING ON``,
-  dynamic ``CALL``, ``NEXT SENTENCE``, ``DECLARATIVES`` - are **flagged**, never
-  smoothed.
+* A run of genuinely straight-line statements folds into one state's ``entry`` action
+  list (the reduction principle) - this is the *only* thing collapsed.
+* Every **conditional** or **order-bearing** construct becomes real structure that
+  preserves the logic: ``IF``/``EVALUATE`` become guarded ``always`` branches that
+  converge on the continuation; ``PERFORM UNTIL/VARYING/TIMES`` and inline ``PERFORM``
+  become loop states; ``READ ... AT END`` becomes a guarded handler branch (so the
+  conditional flag-set is conditional, not unconditional); ``GO TO`` is an exit
+  transition; terminators reach a shared ``final`` state. Nested branches nest.
+* Guards and actions are still **names only** - no invented bodies; meaning lives in
+  the provenance table.
+* Constructs whose behavior rides on runtime data - resolved where provable (dynamic
+  ``CALL`` via constant propagation, ``ALTER`` as a context-driven exit switch) and
+  otherwise **flagged** (``GO TO ... DEPENDING ON``, ``NEXT SENTENCE``, ``DECLARATIVES``)
+  - are drawn *and* flagged, never silently smoothed.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .analysis import CallAnalysis, analyze_calls
 from .model import (
@@ -73,11 +77,13 @@ class Machine:
                 "source": self.source_name,
                 "generator": "cobol-xstate 0.1.0",
                 "disclaimer": (
-                    "Heuristic control-flow recovery, not a conformant COBOL parse. "
-                    "Guards/actions are names only (no invented logic); meaning lives "
-                    "in 'provenance'. PERFORM return edges are not inferred and "
-                    "'always' edges are document-ordered, so review this as a "
-                    "skeleton. Items under 'flags' are not statically resolvable."
+                    "Each paragraph's full statement tree is compiled to faithful "
+                    "guarded structure (IF/EVALUATE/loops/I-O handlers), so the "
+                    "program's control logic is captured rather than flattened. "
+                    "Guards/actions are names only (no invented bodies); meaning lives "
+                    "in 'provenance'. PERFORM is modeled as a call-return action into a "
+                    "separately-compiled paragraph (no synthesized return edge). Items "
+                    "under 'flags' depend on runtime data - verify against source."
                 ),
             },
             "machine": self.config,
@@ -98,6 +104,8 @@ class Machine:
 class _BuildCtx:
     reg: NameRegistry
     calls: CallAnalysis
+    states: Dict[str, dict] = field(default_factory=dict)
+    counter: int = 0
     # altered-paragraph -> ordered candidate exit targets (orig GO TO + PROCEED-TOs)
     alter_targets: Dict[str, List[str]] = field(default_factory=dict)
     context: Dict[str, object] = field(default_factory=dict)
@@ -128,54 +136,9 @@ def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
     return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}", st.line)
 
 
-def _summarize_transfer(body: List[Stmt], reg: NameRegistry,
-                        ctx: _BuildCtx, para: str) -> Tuple[List[str], Optional[str], bool]:
-    """Reduce a branch/handler body to (action-names, transfer-target, is_final).
-
-    Looks one level deep: leading straight-line work becomes action names, the first
-    PERFORM/GO TO sets the target, a terminator sets is_final.
-    """
-    actions: List[str] = []
-    target: Optional[str] = None
-    final = False
-    for st in body:
-        if isinstance(st, Action):
-            actions.append(reg.action(st.text, st.line))
-        elif isinstance(st, CallStmt):
-            actions.append(_call_action(st, ctx, para))
-        elif isinstance(st, IoStmt):
-            actions.append(_io_action(st, reg))
-        elif isinstance(st, PerformStmt):
-            if st.target and target is None:
-                target = st.target
-            break
-        elif isinstance(st, GoToStmt):
-            if st.depending:
-                ctx.flag(para, st.line, "GO TO ... DEPENDING ON - computed multi-target; verify")
-            if st.targets and target is None:
-                target = st.targets[0]
-            break
-        elif isinstance(st, TerminateStmt):
-            final = True
-            break
-        elif isinstance(st, ContinueStmt):
-            if st.next_sentence:
-                ctx.flag(para, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")
-    return actions, target, final
-
-
 def _io_action(st: IoStmt, reg: NameRegistry) -> str:
-    """A combined action name for an I/O verb incl. any set-flag handler bodies."""
     base = f"{st.verb.lower()}_{st.file or 'file'}"
-    suffix = ""
-    if "AT_END" in st.handlers:
-        suffix += "_atEnd"
-    if "INVALID_KEY" in st.handlers:
-        suffix += "_invalidKey"
-    cobol = f"{st.verb} {st.file or ''}".strip()
-    if st.handlers:
-        cobol += " [" + ", ".join(sorted(st.handlers.keys())) + " handlers]"
-    return reg.action_named(base + suffix, cobol, st.line)
+    return reg.action_named(base, f"{st.verb} {st.file or ''}".strip(), st.line)
 
 
 def _io_guard(st: IoStmt, key: str, reg: NameRegistry) -> str:
@@ -183,190 +146,239 @@ def _io_guard(st: IoStmt, key: str, reg: NameRegistry) -> str:
     return reg.guard_named(base, f"{st.verb} {st.file or ''} {key.replace('_', ' ')}".strip(), st.line)
 
 
-def _build_state(para: Paragraph, next_name: Optional[str], ctx: _BuildCtx) -> dict:
-    reg = ctx.reg
-    reg.state(para.name, f"paragraph {para.name}"
-              + (f" (section {para.section})" if para.section else ""), para.line)
+# Terminal-transfer node into the shared final state.
+_END = "__END__"
 
-    entry: List[str] = []
-    always: List[dict] = []
-    final = False
-    final_line: Optional[int] = None
-    ends_unconditionally = False
 
-    def edge(target: Optional[str], kind: str, line: int,
-             guard: Optional[str] = None, actions: Optional[List[str]] = None,
-             note: str = "") -> None:
+class _ParaCompiler:
+    """Compile one paragraph's full statement tree into a hierarchy-free set of XState
+    states. Every branch / loop / handler becomes real guarded structure - the only
+    thing collapsed is a run of genuinely straight-line statements (the skill's
+    reduction principle), which fold into one state's ``entry`` action list. Nothing
+    conditional or order-bearing is folded away, so the whole program logic survives.
+    """
+
+    def __init__(self, ctx: _BuildCtx, para: Paragraph):
+        self.ctx = ctx
+        self.reg = ctx.reg
+        self.para = para
+        self.pname = para.name
+
+    # -- emit / name -------------------------------------------------------
+    def _fresh(self, hint: str) -> str:
+        self.ctx.counter += 1
+        return f"{self.pname}__{hint}{self.ctx.counter}"
+
+    def _emit(self, name: str, state: dict) -> str:
+        if name not in self.reg.entries:
+            self.reg.state(name, f"structural state in {self.pname}", self.para.line)
+        self.ctx.states[name] = state
+        return name
+
+    @staticmethod
+    def _edge(target: str, kind: str, line: int, guard: Optional[str] = None,
+              note: str = "") -> dict:
         e: dict = {}
         if guard:
             e["guard"] = guard
-        if actions:
-            e["actions"] = actions
-        if target:
-            e["target"] = target
+        e["target"] = target
         meta = {"kind": kind, "cobolLine": line}
         if note:
             meta["note"] = note
         e["meta"] = meta
-        always.append(e)
+        return e
 
-    for st in para.statements:
+    # -- entry point -------------------------------------------------------
+    def compile(self, cont: str) -> str:
+        return self.compile_block(self.para.statements, cont, root=self.pname)
+
+    # -- a sequence of statements -----------------------------------------
+    def compile_block(self, stmts: List[Stmt], cont: str, root: Optional[str] = None) -> str:
+        if not stmts:
+            if root is not None:
+                return self._emit(root, {"always": [self._edge(
+                    cont, "fallthrough", self.para.line, note="fall-through")]})
+            return cont
+        # Peel a leading run of straight-line statements into one state's entry list.
+        run: List[Stmt] = []
+        idx = 0
+        while idx < len(stmts) and self._is_straightline(stmts[idx]):
+            run.append(stmts[idx])
+            idx += 1
+        if run:
+            rest = self.compile_block(stmts[idx:], cont)
+            name = root if root is not None else self._fresh("seq")
+            actions: List[str] = []
+            for s in run:
+                actions.extend(self._straight_actions(s))
+            state: dict = {}
+            if actions:
+                state["entry"] = actions
+            state["always"] = [self._edge(rest, "seq", run[0].line, note="continue")]
+            return self._emit(name, state)
+        first = stmts[0]
+        rest = self.compile_block(stmts[1:], cont)
+        return self.compile_control(first, rest, root)
+
+    def _is_straightline(self, st: Stmt) -> bool:
+        if isinstance(st, (Action, CallStmt, AlterStmt)):
+            return True
+        if isinstance(st, PerformStmt):
+            return st.kind == "call" and st.target is not None  # simple PERFORM p [THRU q]
+        if isinstance(st, IoStmt):
+            return not st.handlers
+        if isinstance(st, ContinueStmt):
+            return not st.next_sentence
+        if isinstance(st, ExitStmt):
+            return st.kind == "PLAIN"
+        return False
+
+    def _straight_actions(self, st: Stmt) -> List[str]:
+        reg = self.reg
         if isinstance(st, Action):
-            entry.append(reg.action(st.text, st.line))
-
-        elif isinstance(st, CallStmt):
-            entry.append(_call_action(st, ctx, para.name))
-
-        elif isinstance(st, IoStmt):
-            entry.append(_io_action(st, reg))
-            for key, body in st.handlers.items():
-                acts, tgt, fin = _summarize_transfer(body, reg, ctx, para.name)
-                if tgt or fin or acts:
-                    g = _io_guard(st, key, reg)
-                    if fin:
-                        edge(None, "io-handler", st.line, guard=g, actions=acts,
-                             note=f"{key} handler reaches termination")
-                        final = True
-                        final_line = st.line
-                    elif tgt:
-                        edge(tgt, "io-handler", st.line, guard=g, actions=acts,
-                             note=f"{key} handler transfers")
-                    # acts-only handlers fold into the combined I/O action name above.
-
-        elif isinstance(st, PerformStmt):
-            if st.target:
-                note = "PERFORM call-return - add explicit return edge"
-                if st.kind in ("until", "varying", "times"):
-                    g = reg.guard(st.control_text or f"{st.kind} clause", st.line)
-                    note = (f"PERFORM {st.kind} ({st.control_text}); loop body, "
-                            f"exits when guard '{g}' holds - add return edge")
-                    edge(st.target, "perform-loop", st.line, guard=None,
-                         note=note)
-                else:
-                    edge(st.target, "perform", st.line, note=note)
-            elif st.inline_body:
-                acts, tgt, fin = _summarize_transfer(st.inline_body, reg, ctx, para.name)
-                entry.extend(acts)
-                if st.control_text:
-                    reg.guard(st.control_text, st.line)
-                if tgt:
-                    edge(tgt, "perform-inline", st.line, note="inline PERFORM body transfer")
-                if fin:
-                    final = True
-                    final_line = st.line
-
-        elif isinstance(st, GoToStmt):
-            if para.name in ctx.alter_targets:
-                # This paragraph's head GO TO is ALTER-switched: emit a context-driven
-                # guard set over every candidate exit (the skill's encoding).
-                slug_p = _slug(para.name)
-                for t in ctx.alter_targets[para.name]:
-                    g = reg.guard_named(f"alt_{slug_p}_is_{_slug(t)}",
-                                        f"ALTER-switched exit of {para.name} -> {t} "
-                                        f"(context.alt_{slug_p})", st.line)
-                    edge(t, "alter-switch", st.line, guard=g)
-                ctx.flag(para.name, st.line,
-                         f"ALTER-switched exit: target of {para.name} is set at runtime; "
-                         f"verify context.alt_{slug_p}")
-                ends_unconditionally = True
-            elif st.depending:
-                ctx.flag(para.name, st.line, "GO TO ... DEPENDING ON - computed multi-target; verify")
-                for idx, t in enumerate(st.targets, start=1):
-                    g = reg.guard_named(f"depending_eq_{idx}",
-                                        f"GO TO DEPENDING ON selects target {idx} ({t})", st.line)
-                    edge(t, "goto-depending", st.line, guard=g)
-                ends_unconditionally = True
-            else:
-                for t in st.targets:
-                    edge(t, "goto", st.line, note="GO TO - no return")
-                if st.targets:
-                    ends_unconditionally = True
-
-        elif isinstance(st, TerminateStmt):
-            final = True
-            final_line = st.line
-            ends_unconditionally = True
-
-        elif isinstance(st, IfStmt):
-            _emit_selection(
-                [(st.cond_text, st.then_body)], st.else_body, st.line,
-                para, ctx, entry, edge)
-
-        elif isinstance(st, EvaluateStmt):
-            whens = [(f"{st.subject} = {c}" if st.subject and c else (c or st.subject), b)
-                     for c, b in st.whens]
-            _emit_selection(whens, st.other_body, st.line, para, ctx, entry, edge)
-
-        elif isinstance(st, AlterStmt):
-            # The ALTER itself is the switch-flip: a set-action on this state that
-            # rewrites the altered paragraph's exit (which is drawn as a guard set).
+            return [reg.action(st.text, st.line)]
+        if isinstance(st, CallStmt):
+            return [_call_action(st, self.ctx, self.pname)]
+        if isinstance(st, PerformStmt):
+            return [self._perform_action(st)]
+        if isinstance(st, IoStmt):
+            return [_io_action(st, reg)]
+        if isinstance(st, AlterStmt):
+            names = []
             for altered, target in st.pairs:
-                slug_p = _slug(altered)
-                act = reg.action_named(
-                    f"set_alt_{slug_p}_to_{_slug(target)}",
-                    f"ALTER {altered} TO PROCEED TO {target}", st.line)
-                entry.append(act)
-                if altered not in ctx.alter_targets:
-                    ctx.flag(para.name, st.line,
-                             f"ALTER {altered} TO PROCEED TO {target} - altered paragraph "
-                             f"has no head GO TO; non-idiomatic, switch not modeled")
+                names.append(reg.action_named(
+                    f"set_alt_{_slug(altered)}_to_{_slug(target)}",
+                    f"ALTER {altered} TO PROCEED TO {target}", st.line))
+                if altered not in self.ctx.alter_targets:
+                    self.ctx.flag(self.pname, st.line,
+                                  f"ALTER {altered} TO PROCEED TO {target} - altered "
+                                  f"paragraph has no head GO TO; switch not modeled")
+            return names
+        return []  # ContinueStmt / ExitStmt PLAIN: no-op
 
-        elif isinstance(st, ContinueStmt):
-            if st.next_sentence:
-                ctx.flag(para.name, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")
+    def _perform_action(self, st: PerformStmt) -> str:
+        thru = f" THRU {st.thru}" if st.thru else ""
+        ctrl = f" {st.control_text}" if st.control_text else ""
+        return self.reg.action_named(
+            f"perform_{st.target}", f"PERFORM {st.target}{thru}{ctrl}".strip(), st.line)
 
-        elif isinstance(st, ExitStmt):
+    # -- control constructs ------------------------------------------------
+    def compile_control(self, st: Stmt, after: str, root: Optional[str]) -> str:
+        if isinstance(st, IfStmt):
+            return self.compile_if(st, after, root)
+        if isinstance(st, EvaluateStmt):
+            return self.compile_eval(st, after, root)
+        if isinstance(st, PerformStmt):
+            if st.kind == "inline":  # PERFORM ... END-PERFORM with no loop control
+                return self.compile_block(st.inline_body, after, root=root)
+            return self.compile_loop(st, after, root)
+        if isinstance(st, GoToStmt):
+            return self.compile_goto(st, after, root)
+        if isinstance(st, TerminateStmt):
+            name = root or self._fresh("end")
+            self.reg.state(name, f"{st.kind} (terminator)", st.line)
+            return self._emit(name, {"type": "final", "meta": {"kind": st.kind, "cobolLine": st.line}})
+        if isinstance(st, IoStmt):
+            return self.compile_io(st, after, root)
+        if isinstance(st, ContinueStmt):  # NEXT SENTENCE (plain CONTINUE is straight-line)
+            self.ctx.flag(self.pname, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")
+            name = root or self._fresh("next")
+            return self._emit(name, {"always": [self._edge(after, "next-sentence", st.line)]})
+        if isinstance(st, ExitStmt):
             if st.kind in ("PERFORM", "PERFORM_CYCLE"):
-                ctx.flag(para.name, st.line, f"EXIT {st.kind.replace('_', ' ')} - inline-PERFORM break/continue")
+                self.ctx.flag(self.pname, st.line,
+                              f"EXIT {st.kind.replace('_', ' ')} - inline-PERFORM break/continue; verify")
+            name = root or self._fresh("exit")
+            return self._emit(name, {"always": [self._edge(after, "exit", st.line)]})
+        name = root or self._fresh("stmt")
+        return self._emit(name, {"always": [self._edge(after, "seq", getattr(st, "line", 0))]})
 
-    # Fall-through to the next paragraph unless this one ends with an unconditional
-    # transfer or termination (category 8: falling off the end is easy to forget).
-    if not ends_unconditionally and next_name is not None:
-        edge(next_name, "fallthrough", para.line, note="fall-through to next paragraph")
+    def compile_if(self, st: IfStmt, after: str, root: Optional[str]) -> str:
+        name = root or self._fresh("if")
+        g = self.reg.guard(st.cond_text, st.line) if st.cond_text.strip() else None
+        then_e = self.compile_block(st.then_body, after)
+        else_e = self.compile_block(st.else_body, after) if st.else_body else after
+        edges = [self._edge(then_e, "if-then", st.line, guard=g),
+                 self._edge(else_e, "if-else", st.line)]
+        return self._emit(name, {"always": edges})
 
-    state: dict = {}
-    if entry:
-        state["entry"] = entry
-    if always:
-        state["always"] = always
-    if final:
-        if not always:
-            state["type"] = "final"
+    def compile_eval(self, st: EvaluateStmt, after: str, root: Optional[str]) -> str:
+        name = root or self._fresh("eval")
+        edges = []
+        for cond, body in st.whens:
+            full = f"{st.subject} = {cond}" if st.subject and cond else (cond or st.subject)
+            g = self.reg.guard(full, st.line) if full.strip() else None
+            tgt = self.compile_block(body, after) if body else after
+            edges.append(self._edge(tgt, "when", st.line, guard=g))
+        if st.other_body is not None:
+            edges.append(self._edge(self.compile_block(st.other_body, after),
+                                    "when-other", st.line))
         else:
-            state.setdefault("meta", {})["reachesTermination"] = True
-            state["meta"]["terminationLine"] = final_line
-    if not state:
-        state["meta"] = {"note": "no recovered control flow"}
-    return state
+            edges.append(self._edge(after, "when-fallthrough", st.line,
+                                    note="no WHEN OTHER; falls through"))
+        return self._emit(name, {"always": edges})
 
+    def compile_loop(self, st: PerformStmt, after: str, root: Optional[str]) -> str:
+        g = self.reg.guard(st.control_text or f"{st.kind} clause", st.line)
+        if st.test_after:                      # do-while: run body, then test
+            head = self._fresh("loop")
+            body_root = root
+        else:                                  # while: test, then body (default)
+            head = root or self._fresh("loop")
+            body_root = None
+        if st.inline_body:
+            body_entry = self.compile_block(st.inline_body, head, root=body_root)
+        else:
+            nm = body_root or self._fresh("iter")
+            state = {"always": [self._edge(head, "loop-iter", st.line)]}
+            if st.target:
+                state["entry"] = [self._perform_action(st)]
+            body_entry = self._emit(nm, state)
+        self._emit(head, {"always": [
+            self._edge(after, "loop-exit", st.line, guard=g),
+            self._edge(body_entry, "loop-body", st.line),
+        ]})
+        return body_entry if st.test_after else head
 
-def _emit_selection(branches: List[Tuple[str, List[Stmt]]],
-                    other_body: Optional[List[Stmt]],
-                    line: int, para: Paragraph, ctx: _BuildCtx,
-                    entry: List[str], edge) -> None:
-    """Emit guarded edges for IF/EVALUATE branches that transfer; fold pure-action
-    branches into the state entry (conditional work has no separate state)."""
-    reg = ctx.reg
-    for cond, body in branches:
-        acts, tgt, fin = _summarize_transfer(body, reg, ctx, para.name)
-        g = reg.guard(cond, line) if cond.strip() else None
-        if fin:
-            edge(None, "select", line, guard=g, actions=acts, note="branch reaches termination")
-        elif tgt:
-            edge(tgt, "select", line, guard=g, actions=acts)
-        else:
-            # Pure-action branch: fold, but note the guard for traceability.
-            if cond.strip():
-                reg.guard(cond, line)
-            entry.extend(acts)
-    if other_body is not None:
-        acts, tgt, fin = _summarize_transfer(other_body, reg, ctx, para.name)
-        if fin:
-            edge(None, "select-other", line, actions=acts, note="WHEN OTHER reaches termination")
-        elif tgt:
-            edge(tgt, "select-other", line, actions=acts, note="WHEN OTHER / ELSE")
-        else:
-            entry.extend(acts)
+    def compile_goto(self, st: GoToStmt, after: str, root: Optional[str]) -> str:
+        reg = self.reg
+        name = root or self._fresh("goto")
+        if self.pname in self.ctx.alter_targets:
+            slug_p = _slug(self.pname)
+            edges = []
+            for t in self.ctx.alter_targets[self.pname]:
+                gg = reg.guard_named(f"alt_{slug_p}_is_{_slug(t)}",
+                                     f"ALTER-switched exit of {self.pname} -> {t} "
+                                     f"(context.alt_{slug_p})", st.line)
+                edges.append(self._edge(t, "alter-switch", st.line, guard=gg))
+            self.ctx.flag(self.pname, st.line,
+                          f"ALTER-switched exit: target of {self.pname} is set at runtime; "
+                          f"verify context.alt_{slug_p}")
+            return self._emit(name, {"always": edges})
+        if st.depending:
+            self.ctx.flag(self.pname, st.line, "GO TO ... DEPENDING ON - computed multi-target; verify")
+            edges = []
+            for idx, t in enumerate(st.targets, start=1):
+                gg = reg.guard_named(f"depending_eq_{idx}",
+                                     f"GO TO DEPENDING ON selects target {idx} ({t})", st.line)
+                edges.append(self._edge(t, "goto-depending", st.line, guard=gg))
+            edges.append(self._edge(after, "goto-depending-oob", st.line,
+                                    note="index out of range falls through"))
+            return self._emit(name, {"always": edges})
+        edges = [self._edge(t, "goto", st.line, note="GO TO - no return") for t in st.targets]
+        if not edges:
+            edges = [self._edge(after, "goto-empty", st.line)]
+        return self._emit(name, {"always": edges})
+
+    def compile_io(self, st: IoStmt, after: str, root: Optional[str]) -> str:
+        name = root or self._fresh("io")
+        edges = []
+        for key, body in st.handlers.items():
+            g = _io_guard(st, key, self.reg)
+            tgt = self.compile_block(body, after) if body else after
+            edges.append(self._edge(tgt, "io-handler", st.line, guard=g, note=key))
+        edges.append(self._edge(after, "io-continue", st.line, note="normal (no condition)"))
+        return self._emit(name, {"entry": [_io_action(st, self.reg)], "always": edges})
 
 
 def _compute_alter_targets(program: Program, ctx: _BuildCtx) -> None:
@@ -401,18 +413,28 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program))
     _compute_alter_targets(program, ctx)
 
-    states: Dict[str, dict] = {}
     paras = program.paragraphs
     names = [p.name for p in paras]
 
     for idx, para in enumerate(paras):
-        next_name = names[idx + 1] if idx + 1 < len(names) else None
-        states[para.name] = _build_state(para, next_name, ctx)
+        # Register the paragraph name with its own provenance before compiling so the
+        # compiler's structural-state default does not overwrite it.
+        ctx.reg.state(para.name, f"paragraph {para.name}"
+                      + (f" (section {para.section})" if para.section else ""), para.line)
+        cont = names[idx + 1] if idx + 1 < len(names) else _END
+        _ParaCompiler(ctx, para).compile(cont)
+
+    # The shared final state (reached by falling off the physical end, or by any
+    # paragraph whose continuation is end-of-program).
+    if any(tr.get("target") == _END
+           for s in ctx.states.values() for tr in s.get("always", [])):
+        ctx.reg.state(_END, "end of program (fall-off / STOP RUN target)", 0)
+        ctx.states[_END] = {"type": "final"}
 
     config: dict = {
         "id": program.program_id,
         "context": ctx.context,
-        "states": states,
+        "states": ctx.states,
     }
     if names:
         config["initial"] = names[0]

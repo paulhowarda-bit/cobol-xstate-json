@@ -11,16 +11,46 @@ def _machine(src: str):
     return build_machine(parse_program(src))
 
 
+def _all_edges(machine):
+    return [(name, e) for name, s in machine.config["states"].items()
+            for e in s.get("always", [])]
+
+
 def test_custrpt_machine_shape():
     machine = _machine((EXAMPLES / "custrpt.cbl").read_text())
     cfg = machine.config
     assert cfg["id"] == "CUSTRPT"
     assert cfg["initial"] == "0000-MAIN"
     states = cfg["states"]
-    assert set(states) == {"0000-MAIN", "1000-INIT", "2000-PROCESS", "3000-TERM"}
-    # The driver performs the three phase paragraphs.
-    targets = {e["target"] for e in states["0000-MAIN"]["always"]}
-    assert {"1000-INIT", "2000-PROCESS", "3000-TERM"} <= targets
+    # Each paragraph is an entry state; the body compiles to faithful sub-states.
+    assert {"0000-MAIN", "1000-INIT", "2000-PROCESS", "3000-TERM"} <= set(states)
+    # The driver PERFORM ... UNTIL is a real loop (exit guard + body that loops back).
+    assert any(e["meta"]["kind"] == "loop-exit" and "guard" in e for _, e in _all_edges(machine))
+    assert any(e["meta"]["kind"] == "loop-body" for _, e in _all_edges(machine))
+    # The three phase paragraphs are performed as call-return actions.
+    actions = [a for s in states.values() for a in s.get("entry", [])]
+    assert {"perform_1000-INIT", "perform_2000-PROCESS", "perform_3000-TERM"} <= set(actions)
+    # Termination reaches a final state.
+    assert any(s.get("type") == "final" for s in states.values())
+
+
+def test_conditional_logic_stays_conditional():
+    # READ ... AT END MOVE 'Y' TO WS-EOF: the flag-set must be reachable ONLY via the
+    # guarded AT_END branch, never folded into an unconditional entry list. This is
+    # the whole reason for a Harel statechart over a flattened model.
+    machine = _machine((EXAMPLES / "custrpt.cbl").read_text())
+    states = machine.config["states"]
+    # The READ state runs only the read action unconditionally...
+    read_states = [s for s in states.values()
+                   if any(a.startswith("read_CUST-FILE") for a in s.get("entry", []))]
+    assert read_states
+    for s in read_states:
+        assert "MOVE_Y_TO_WS-EOF" not in s.get("entry", [])
+        # ...and exposes the EOF set behind a guarded AT_END edge.
+        at_end = [e for e in s["always"] if e["meta"].get("note") == "AT_END"]
+        assert at_end and "guard" in at_end[0]
+        target = states[at_end[0]["target"]]
+        assert "MOVE_Y_TO_WS-EOF" in target.get("entry", [])
 
 
 def test_no_invented_logic_guards_and_actions_are_strings():

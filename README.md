@@ -66,24 +66,33 @@ raw source
   → parser      PROCEDURE DIVISION → sections/paragraphs (Area-A headers) +
                 a control-flow statement AST (IF / EVALUATE / PERFORM / GO TO /
                 I-O handlers / CALL / ALTER / terminators)            (parser.py, model.py)
-  → statechart  one state per paragraph; transfers → `always` transitions;
-                guards from conditions; flags for the un-modelable;
-                a provenance table for every name              (statechart.py, naming.py)
+  → statechart  recursively compile each paragraph's full statement tree to faithful
+                guarded states/loops/handlers; constant-propagate dynamic CALL;
+                provenance for every name; flag runtime-data constructs
+                                            (statechart.py, analysis.py, naming.py)
 ```
 
 ### What maps to what
 
+The goal is to capture **all** the program logic — which is why the target is a Harel
+statechart (XState), not a UML-subset flattening. Each paragraph's *entire* statement
+tree is compiled recursively; the only thing collapsed is a run of genuinely
+straight-line statements (the reduction principle). Conditional and order-bearing
+constructs become real structure, so nothing is folded away.
+
 | COBOL | XState v5 |
 |---|---|
-| Paragraph / section | a state (OR-state sibling) |
-| Straight-line `MOVE`/`ADD`/`OPEN`/… | folded into the state's `entry` action-name list |
-| `IF` / `EVALUATE` branch that transfers | guarded `always` edge (`guard` from the condition) |
-| `PERFORM p` (all forms) | `always` edge to `p`, tagged call-return |
-| `GO TO p` | `always` edge to `p` (no return) |
-| Fall-through to next paragraph | eventless `always` edge |
-| `READ … AT END` / `INVALID KEY` | guarded `always` edge on the I/O condition |
+| Paragraph / section | an entry state; its body compiles to sub-states |
+| Straight-line run of `MOVE`/`ADD`/`OPEN`/… | one state's `entry` action-name list |
+| `IF … ELSE … END-IF` (incl. nested) | guarded `always` split to Then/Else sub-states converging on the continuation |
+| `EVALUATE … WHEN … WHEN OTHER` | guarded `always` per WHEN; each branch returns to the continuation |
+| `READ … AT END` / `INVALID KEY` | a guarded handler branch — the conditional flag-set is **conditional**, not folded |
+| `PERFORM p UNTIL/VARYING/TIMES`, inline `PERFORM` | a **loop** state (exit guard + body that loops back); `TEST AFTER` ⇒ do-while |
+| `PERFORM p` (simple) | call-return `entry` action `perform_p`; `p` is compiled as its own region |
+| `GO TO p` | exit `always` edge to `p` (no return); suppresses fall-through |
+| Fall-through / end of paragraph | eventless `always` edge to the next paragraph (or the shared `final`) |
 | `STOP RUN` / `GOBACK` / `EXIT PROGRAM` | `type: 'final'` |
-| `GO TO … DEPENDING ON` | guarded fan-out (`depending_eq_1…n`) + flag |
+| `GO TO … DEPENDING ON` | guarded fan-out (`depending_eq_1…n`) + out-of-range edge + flag |
 | dynamic `CALL ident` | resolved to a literal where constant-provable, else flagged |
 | `ALTER … TO PROCEED TO` | context-driven guard switch on the altered exit + flag |
 
@@ -115,11 +124,13 @@ deliberately explicit about the gap (the skill's core principle — don't preten
 - **No copybook preprocessor** (`COPY`/`REPLACE`), **no embedded-language extraction**
   (`EXEC SQL`/`CICS`/`DLI`). A production parser needs both (see `parsing-cobol.md`);
   add them before trusting this on real source with copybooks.
-- **PERFORM return edges are not inferred.** A `PERFORM` becomes a forward edge tagged
-  "add explicit return edge"; the chart is a **review skeleton**, and `always` edges
-  are document-ordered. Review ordering and returns before treating it as executable.
-- **No data-division semantics** — `context` is emitted empty; USAGE/PICTURE/sign are
-  not modeled. Guard/action *meaning* must be filled in against the COBOL.
+- **PERFORM is a call-return action, not a synthesized return edge.** `perform_p` runs
+  the separately-compiled paragraph `p` and continues; the literal jump-and-return pair
+  isn't drawn (it needs a call stack XState doesn't have). `p`'s full logic is still
+  captured as its own region. `GO TO` (no return) *is* drawn as a transition.
+- **No data-division semantics yet** — `context` holds only recovered control flags
+  (e.g. ALTER switches); USAGE/PICTURE/sign are not modeled. Guard/action *meaning*
+  must be filled in against the COBOL (the `setup()` stubs).
 - **Step semantics:** one record cycle = one macrostep, STATEMATE next-step sensing
   (a flag set this cycle is sensed next cycle). Same-cycle cross-region dependencies
   should be reviewed.
@@ -130,7 +141,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 30 tests: normalizer, lexer, parser, analysis, statechart
+PYTHONPATH=src python -m pytest -q     # 31 tests: normalizer, lexer, parser, analysis, statechart
 ```
 
 Layout:
@@ -140,7 +151,7 @@ src/cobol_xstate/   normalizer · lexer · model · parser · analysis · naming
 examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
-tests/              one module per pipeline stage (30 tests)
+tests/              one module per pipeline stage (31 tests)
 ```
 
 ## License
