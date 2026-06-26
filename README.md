@@ -177,17 +177,22 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 51 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart
+PYTHONPATH=src python -m pytest -q     # 75 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
+
+The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
+install (`npm install`); they skip cleanly when those are absent.
 
 Layout:
 
 ```
-src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · cli
+src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · emitter · cli
+runtime/            cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
+                    cobolDriver.mjs  (reference driver: PERFORM call-return + file I/O for golden-master)
 examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
-tests/              one module per pipeline stage (51 tests)
+tests/              one module per pipeline stage (75 tests)
 ```
 
 ## License
