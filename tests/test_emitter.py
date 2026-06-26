@@ -6,6 +6,7 @@ the decimal data-ops and a full machine run - they skip cleanly when node / xsta
 not available.
 """
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -119,7 +120,7 @@ def test_guard_raw_is_external():
 def test_module_has_setup_and_createmachine():
     mod = emit_setup_module(_machine("banktran.cbl"))
     assert "import { setup, assign } from 'xstate';" in mod
-    assert "setup({ actions, guards }).createMachine(machineConfig)" in mod
+    assert "setup({ actions, guards, actors }).createMachine(machineConfig)" in mod
     assert "export const ops" in mod and "export const guardFns" in mod
     # ADD becomes a decimal store into the receiver's type
     assert ('"ADD_1_TO_WS-COUNT": (context) => ({ "WS-COUNT": '
@@ -138,6 +139,24 @@ def test_module_strips_provenance_meta_from_config():
     mod = emit_setup_module(_machine("custrpt.cbl"))
     # 'meta' (cobolLine/kind/note) is provenance; the runnable config must not carry it
     assert '"cobolLine"' not in mod
+
+
+# --------------------------------------------------------------------------- #
+# PERFORM -> invoke (call-return via actors)
+# --------------------------------------------------------------------------- #
+
+def test_perform_becomes_invoke_of_actor():
+    mod = emit_setup_module(_machine("accum.cbl"))
+    assert "export const actorConfigs" in mod
+    assert '"src": "actor:1000-STEP"' in mod   # PERFORM 1000-STEP -> invoke its actor
+    assert '"onDone"' in mod                    # ...and returns to the caller
+    assert "perform_" not in mod                # no no-op PERFORM action survives
+
+
+def test_nested_perform_builds_nested_actors():
+    mod = emit_setup_module(_machine("nestperf.cbl"))
+    assert '"actor:1000-OUTER"' in mod and '"actor:2000-INNER"' in mod
+    assert '"__RET__"' in mod                   # each actor returns via a final state
 
 
 # --------------------------------------------------------------------------- #
@@ -217,3 +236,36 @@ def test_emitted_money_accumulation_is_exact_decimal(repo_tmp):
     r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
                        cwd=str(tmp_path), timeout=30)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _run_to_done(tmp_path, name, expect):
+    """Emit `name`, run it under *stock* createActor (no reference driver), and assert the
+    final context equals `expect`. This is the end-to-end proof of PERFORM call-return."""
+    _emit_to(tmp_path, name)
+    driver = tmp_path / "run.mjs"
+    driver.write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n"
+        "const s = a.getSnapshot();\n"
+        "if (s.status !== 'done') { console.error('status', s.status); process.exit(1); }\n"
+        f"const want = {json.dumps(expect)};\n"
+        "for (const k in want) if (String(s.context[k]) !== want[k]) "
+        "{ console.error(k, 'got', s.context[k], 'want', want[k]); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
+                       cwd=str(tmp_path), timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_until_call_return_runs_under_stock_xstate(repo_tmp):
+    # PERFORM 1000-STEP UNTIL WS-I = 5, each call invoking the actor and threading context.
+    _run_to_done(repo_tmp, "accum.cbl", {"WS-I": "5", "WS-SUM": "15"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_nested_perform_threads_context_under_stock_xstate(repo_tmp):
+    # 1000-OUTER performs 2000-INNER: context must thread back up two call levels.
+    _run_to_done(repo_tmp, "nestperf.cbl", {"WS-SUM": "11"})

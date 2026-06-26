@@ -156,10 +156,15 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   dropped. Embedded `EXEC SQL/CICS/DLI` is extracted opaquely — host vars preserved,
   `LINK`/`XCTL`/`RETURN`/`HANDLE` mapped to call/transfer/terminate/flag — but the SQL/
   CICS sub-language itself isn't interpreted.
-- **PERFORM is a call-return action, not a synthesized return edge.** `perform_p` runs
-  the separately-compiled paragraph `p` and continues; the literal jump-and-return pair
-  isn't drawn (it needs a call stack XState doesn't have). `p`'s full logic is still
-  captured as its own region. `GO TO` (no return) *is* drawn as a transition.
+- **PERFORM call-return: a no-op marker in the JSON contract, a real `invoke` in the
+  runnable JS.** In the `--target json` bundle a `PERFORM p` is the flat marker
+  `perform_p` (the review contract; the literal jump-and-return pair isn't drawn there).
+  The `--target js` module *does* synthesize call-return: each performed paragraph becomes
+  an XState actor, the PERFORM site `invoke`s it with the context as input and assigns the
+  output back on `onDone`, so WORKING-STORAGE threads through nested calls and the machine
+  runs end-to-end under stock `createActor`. `GO TO` into another paragraph can't be told
+  apart from fall-through once provenance is stripped, so inside an actor it is modeled as
+  a return (flagged in the JSON `flags`).
 - **Data semantics are captured but not *evaluated*.** `data` carries the types and
   `semantics` carries the `target := expr` / Boolean-tree logic, but the bare config
   can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must
@@ -177,7 +182,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 75 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 79 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -188,11 +193,12 @@ Layout:
 ```
 src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · emitter · cli
 runtime/            cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
-                    cobolDriver.mjs  (reference driver: PERFORM call-return + file I/O for golden-master)
+                    cobolDriver.mjs  (reference driver: invoke interpreter + file I/O for golden-master)
 examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
-tests/              one module per pipeline stage (75 tests)
+                    accum.cbl / nestperf.cbl (PERFORM-UNTIL & nested PERFORM call-return)
+tests/              one module per pipeline stage (79 tests)
 ```
 
 ## License

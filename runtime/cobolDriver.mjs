@@ -1,51 +1,44 @@
 // cobol-xstate reference driver — executes an emitted machine end-to-end so the
 // recovered contract can be golden-mastered against recorded COBOL I/O.
 //
-// WHY THIS EXISTS. The emitted XState machine is a *control-flow contract*: its
-// `ops`/`guardFns` carry the decimal data semantics, but the effect actions
-// (`perform_*`, `read_*`, OPEN/CLOSE/DISPLAY) are no-ops and PERFORM has no
-// call-return (XState has no call stack — see README "Honest limitations"). So
-// `createActor` alone cannot reproduce a batch run. This driver supplies exactly
-// the missing pieces — PERFORM call-return and sequential file I/O — and nothing
-// else: every data mutation still flows through the emitted `ops`, every branch
-// through the emitted guards. If the driver reproduces the COBOL outputs, the
-// recovered ops+guards+control-flow ARE the program.
+// WHY THIS EXISTS. The emitted machine now models PERFORM as a real call-return
+// (`invoke` of a per-paragraph actor, see emitter.py), so its control flow IS runnable
+// under stock XState. What it still cannot express is sequential file I/O: `read_F` is a
+// no-op and there is no record source. This driver runs the same config and supplies
+// exactly that missing piece — feeding recorded records on READ, raising the AT-END
+// external guard, and capturing DISPLAY — while every data mutation still flows through
+// the emitted `ops` and every branch through the emitted guards. A match against the
+// golden values is evidence the recovered ops+guards+control-flow reproduce the program.
 //
-// It is a deliberately small interpreter, faithful to the emitted shape:
-//   * Paragraphs are top-level states; a paragraph's sub-states are `PARA__suffix`.
-//   * `perform_P` runs paragraph P and RETURNS when control would fall through to a
-//     different paragraph (COBOL PERFORM call-return). A `final` state reached at top
-//     level ends the program; reached inside a PERFORM it is a return.
+// The interpreter is deliberately tiny because call-return is explicit in the config:
+//   * Each state runs its `entry` actions, then either invokes (run the named actor to
+//     its final, sharing context — equivalent to XState's input/output threading — and
+//     continue at onDone.target), reaches a `final` (return / program end), or takes the
+//     first enabled `always` transition.
 //   * `read_F` consumes the next record of file F into context; at end it sets the
 //     external guard `F_atEnd` (COBOL leaves the record area unchanged at end).
-//   * Transitions are `always` only (these batch contracts are autonomous). Guards
-//     resolve against guardFns, then external flags, else false.
 //
-// Honest scope: GO TO into another paragraph is indistinguishable from fall-through
-// once provenance `meta` is stripped, so this driver models the PERFORM/fall-through
-// closed loop (the canonical batch program); it does not chase cross-paragraph GO TO
-// or record-area→WORKING-STORAGE moves that the contract doesn't capture.
-
-const paraOf = (key) => key.split('__')[0];
+// Honest scope: records are supplied field-canonical (the driver does not re-quantize the
+// record area on READ); GO TO into another paragraph is modeled as a return (the emitter
+// cannot distinguish it from fall-through once provenance is stripped).
 
 const HALT_ACTIONS = new Set(['STOP_RUN', 'STOPRUN', 'GOBACK', 'EXIT_PROGRAM']);
 
 /**
  * Run an emitted machine module against recorded inputs.
  *
- * @param {object} mod  the emitted module: { machineConfig, ops, guardFns, externalGuards }
+ * @param {object} mod  the emitted module: { machineConfig, actorConfigs, ops, guardFns, externalGuards }
  * @param {object} opts
- *   files:     { [FILE]: Array<Record> }  records keyed by SELECT name (e.g. "CUST-FILE")
- *   guards:    { [name]: (context)=>bool } overrides for external/unknown guards
- *   maxSteps:  safety bound against a non-terminating contract
+ *   files:    { [FILE]: Array<Record> }  records keyed by SELECT name (e.g. "CUST-FILE")
+ *   guards:   { [name]: (context)=>bool } overrides for external/unknown guards
+ *   maxSteps: safety bound against a non-terminating contract
  * @returns {{ context, display, cycles, halted, steps }}
  *   context: final business context (no __cobol_external)
  *   display: array of DISPLAY outputs in order
  *   cycles:  context snapshot after each READ (the per-record-cycle trace)
  */
 export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {}) {
-  const { machineConfig, ops, guardFns, externalGuards = [] } = mod;
-  const states = machineConfig.states;
+  const { machineConfig, actorConfigs = {}, ops, guardFns, externalGuards = [] } = mod;
   const context = { ...machineConfig.context, __cobol_external: {} };
   const display = [];
   const cycles = [];
@@ -69,8 +62,7 @@ export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {
   }
 
   function doOpen(action) {
-    // OPEN_INPUT_FOO / OPEN_OUTPUT_FOO / OPEN_I-O_FOO / OPEN_FOO — file is the last segment.
-    const file = action.split('_').pop();
+    const file = action.split('_').pop(); // OPEN_INPUT_FOO / OPEN_FOO — file is last segment
     cursors[file] = 0;
     delete context.__cobol_external[file + '_atEnd'];
   }
@@ -88,7 +80,6 @@ export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {
   }
 
   function doDisplay(rest) {
-    // operand is either a field name (resolve from context) or a literal (spaces→_).
     if (Object.prototype.hasOwnProperty.call(context, rest)) display.push(String(context[rest]));
     else display.push(rest.replace(/_/g, ' '));
   }
@@ -97,56 +88,48 @@ export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {
     if (halted) return;
     if (ops[name]) { Object.assign(context, ops[name](context)); return; }
     if (HALT_ACTIONS.has(name)) { halted = true; return; }
-    if (name.startsWith('perform_')) { perform(name.slice(8)); return; }
     if (name.startsWith('read_')) { doRead(name.slice(5)); return; }
     if (name.startsWith('OPEN_')) { doOpen(name); return; }
     if (name.startsWith('DISPLAY_')) { doDisplay(name.slice(8)); return; }
     // CLOSE_*, call_*, WRITE_*, and other effects are no-ops for a read-driven golden master.
   }
 
-  // Run from `startKey`, owned by paragraph `owner`. isTop distinguishes the program's
-  // main flow (a final state ends the run) from a PERFORMed body (a final / fall-through
-  // to another paragraph is a return to the caller).
-  function runFrom(startKey, owner, isTop) {
+  // Run a states map from `startKey` until a final state (a PERFORMed actor's __RET__,
+  // or the program's end). Context is shared across scopes — the same net effect as
+  // XState threading the actor's input/output, but without copying.
+  function runScope(states, startKey) {
     let cur = startKey;
     for (;;) {
-      if (halted) return { done: true };
+      if (halted) return;
       if (++steps > maxSteps) throw new Error('cobol-xstate driver: step limit exceeded (non-terminating contract?)');
       const st = states[cur];
       if (!st) throw new Error('cobol-xstate driver: unknown state ' + cur);
 
       for (const a of st.entry || []) {
         applyAction(a);
-        if (halted) return { done: true };
+        if (halted) return;
       }
 
-      if (st.type === 'final') return isTop ? { done: true } : { leave: true };
+      if (st.type === 'final') return;
+
+      if (st.invoke) {
+        const sub = actorConfigs[st.invoke.src];
+        if (!sub) throw new Error('cobol-xstate driver: unknown actor ' + st.invoke.src);
+        runScope(sub.states, sub.initial);
+        if (halted) return;
+        cur = st.invoke.onDone.target;
+        continue;
+      }
 
       let chosen;
       for (const t of st.always || []) {
         if (evalGuard(t.guard)) { chosen = t; break; }
       }
-      if (!chosen) return { leave: true }; // nothing enabled: fall out of this region
-
-      const target = chosen.target;
-      const tgt = states[target];
-      if (tgt && tgt.type === 'final') {
-        if (isTop) return { done: true };
-        return { leave: true }; // performed body fell off the end → return
-      }
-      if (paraOf(target) !== owner) return { leave: true }; // fall-through to next paragraph → return
-      cur = target;
+      if (!chosen) return; // nothing enabled: fall out of this scope
+      cur = chosen.target;
     }
   }
 
-  function perform(para) {
-    if (halted) return;
-    const res = runFrom(para, para, false);
-    if (res.done) halted = true; // STOP RUN / program end reached inside the performed body
-  }
-
-  const initial = machineConfig.initial;
-  runFrom(initial, paraOf(initial), true);
-
+  runScope(machineConfig.states, machineConfig.initial);
   return { context: snapshot(), display, cycles, halted, steps };
 }

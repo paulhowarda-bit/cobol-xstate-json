@@ -17,9 +17,12 @@ What is and isn't modeled (kept honest):
   decimal arithmetic and stored through the receiver's type. COBOL arithmetic
   expressions are parsed here (``+ - * / **``, parens, refs, literals, figuratives).
 * Conditions (relational / class / sign / 88-level / AND-OR-NOT) become guard functions.
-* Effects (``DISPLAY``/``OPEN``/``READ``/exec) and the call-return ``PERFORM`` action are
-  emitted as no-ops - they change no modeled data (``PERFORM``'s target is its own
-  region; a flat no-op does not execute it - the documented limitation).
+* ``PERFORM`` is rewritten into a real call-return: each performed paragraph becomes an
+  XState actor, the PERFORM site ``invoke``s it (context in as ``input``, result assigned
+  back on ``onDone``), so the machine runs end-to-end under stock ``createActor`` with
+  WORKING-STORAGE threaded through nested calls. See the ``PERFORM -> invoke`` section.
+* Other effects (``DISPLAY``/``OPEN``/``READ``/exec) are emitted as no-ops - they change
+  no modeled data; sequential file I/O is supplied by the golden-master driver.
 * Conditions that ride on runtime/external state (I-O ``AT END``/``INVALID KEY``,
   ALTER-switch, ``GO TO ... DEPENDING ON``, and any ``{op:'raw'}`` fallback) become
   **external guards**: they read an explicit ``context.__cobol_external`` channel
@@ -415,6 +418,145 @@ def _collect_referenced(config: dict) -> Tuple[set, set]:
 
 
 # --------------------------------------------------------------------------- #
+# PERFORM -> invoke: call-return via per-paragraph actor machines
+# --------------------------------------------------------------------------- #
+#
+# The flat config models a PERFORM as a no-op `perform_X` entry action: the target
+# paragraph's states are reachable only by fall-through, never by the PERFORM, so the
+# call never executes its body (XState has no call stack). Here we rebuild the runnable
+# machine so a PERFORM is a real call-return: each performed paragraph becomes an XState
+# actor; a PERFORM site `invoke`s it, passing the whole context as input and assigning
+# the actor's output back on `onDone`. WORKING-STORAGE therefore threads through every
+# (possibly nested) call exactly as COBOL's shared storage would. A paragraph "returns"
+# when control would fall through to a *different* paragraph (rerouted to a final
+# `__RET__` state). GO TO into another paragraph is indistinguishable from fall-through
+# once provenance is stripped, so it is modeled as a return too (documented limitation).
+
+def _para_of(key: str) -> str:
+    return key.split("__", 1)[0]
+
+
+def _transition_targets(state: dict) -> List[str]:
+    out: List[str] = []
+    for t in state.get("always", []) or []:
+        if "target" in t:
+            out.append(t["target"])
+    inv = state.get("invoke")
+    if inv and inv.get("onDone", {}).get("target"):
+        out.append(inv["onDone"]["target"])
+    return out
+
+
+def _emit_split(key: str, st: dict, out: dict, buildable: set, needed: set) -> None:
+    """Rewrite one state into a chain so each PERFORM of a buildable paragraph becomes an
+    `invoke` sub-state. Non-PERFORM entry actions and PERFORMs of non-buildable targets
+    stay as ordinary (no-op) actions. The state's control (always/type/...) rides on the
+    last node so inbound transitions to `key` still land on the first executed node."""
+    entry = st.get("entry", []) or []
+    has_invoke_perform = any(
+        a.startswith("perform_") and a[len("perform_"):] in buildable for a in entry)
+    if not has_invoke_perform:
+        out[key] = st
+        return
+
+    segments: List[Tuple[str, object]] = []
+    cur: List[str] = []
+    for a in entry:
+        para = a[len("perform_"):] if a.startswith("perform_") else None
+        if para is not None and para in buildable:
+            segments.append(("ops", cur)); cur = []
+            segments.append(("perform", para))
+            needed.add(para)
+        else:
+            cur.append(a)
+    segments.append(("ops", cur))
+
+    steps = [s for s in segments if s[0] == "perform" or (s[0] == "ops" and s[1])]
+    control = {k: v for k, v in st.items() if k != "entry"}
+    if steps and steps[-1][0] == "ops":  # fold trailing ops into the control node
+        control = {"entry": steps[-1][1], **control}
+        steps = steps[:-1]
+
+    n = len(steps)
+    ids = [key] + [f"{key}__k{i}" for i in range(1, n + 1)]
+    for i, step in enumerate(steps):
+        sid, nxt = ids[i], ids[i + 1]
+        if step[0] == "ops":
+            out[sid] = {"entry": step[1], "always": [{"target": nxt}]}
+        else:
+            out[sid] = {"invoke": {"src": f"actor:{step[1]}", "onDone": {"target": nxt}}}
+    out[ids[n]] = control
+
+
+def _reroute_to_return(states: dict, owner: str) -> None:
+    """Inside an actor, any transition leaving the owning paragraph (fall-through, GO TO,
+    or the program-end sentinel) is the paragraph's return point."""
+    def leaves(tgt: str) -> bool:
+        return bool(tgt) and (_para_of(tgt) != owner or tgt == "__END__")
+
+    for st in states.values():
+        for t in st.get("always", []) or []:
+            if leaves(t.get("target")):
+                t["target"] = "__RET__"
+        inv = st.get("invoke")
+        if inv and inv.get("onDone") and leaves(inv["onDone"].get("target")):
+            inv["onDone"]["target"] = "__RET__"
+
+
+def _prune(states: dict, initial: str) -> dict:
+    seen: set = set()
+    stack = [initial]
+    while stack:
+        k = stack.pop()
+        if k in seen or k not in states:
+            continue
+        seen.add(k)
+        stack.extend(_transition_targets(states[k]))
+    return {k: v for k, v in states.items() if k in seen}
+
+
+def _invoke_transform(orig_states: dict, initial: str) -> Tuple[dict, Dict[str, dict]]:
+    """Return (main_states, actor_configs). Performs become invokes of actor machines;
+    main is pruned to what is reachable from `initial` (the un-performed paragraph copies
+    fall away). Each actor config is {initial, states} with a `__RET__` final."""
+    all_performed = set()
+    for st in orig_states.values():
+        for a in st.get("entry", []) or []:
+            if a.startswith("perform_"):
+                all_performed.add(a[len("perform_"):])
+    buildable = {p for p in all_performed if p in orig_states}
+
+    main_src = copy.deepcopy(orig_states)
+    main_new: dict = {}
+    sink: set = set()
+    for k, st in main_src.items():
+        _emit_split(k, st, main_new, buildable, sink)
+    main_new = _prune(main_new, initial)
+
+    actor_configs: Dict[str, dict] = {}
+    work = [p for p in buildable if any(  # only those actually reached from main
+        f"actor:{p}" == inv.get("src")
+        for s in main_new.values() for inv in [s.get("invoke") or {}])]
+    while work:
+        para = work.pop()
+        name = f"actor:{para}"
+        if name in actor_configs:
+            continue
+        own = copy.deepcopy({k: v for k, v in orig_states.items() if _para_of(k) == para})
+        if para not in own:
+            continue
+        needed: set = set()
+        states: dict = {}
+        for k, st in own.items():
+            _emit_split(k, st, states, buildable, needed)
+        _reroute_to_return(states, para)
+        states["__RET__"] = {"type": "final"}
+        actor_configs[name] = {"initial": para, "states": states}
+        work.extend(needed)
+    return main_new, actor_configs
+
+
+# --------------------------------------------------------------------------- #
 # module assembly
 # --------------------------------------------------------------------------- #
 
@@ -423,7 +565,15 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     config = _strip_meta(copy.deepcopy(machine.config))
     config["context"] = _js_context(config, fields)
 
-    ref_actions, ref_guards = _collect_referenced(config)
+    # PERFORM -> invoke: rebuild the runnable flow with real call-return.
+    actor_configs: Dict[str, dict] = {}
+    if config.get("states") and config.get("initial"):
+        main_states, actor_configs = _invoke_transform(config["states"], config["initial"])
+        config["states"] = main_states
+
+    # collect referenced names across the main machine AND every actor body
+    scan = {"main": config, "actors": {n: c["states"] for n, c in actor_configs.items()}}
+    ref_actions, ref_guards = _collect_referenced(scan)
     ops, sem_effects = _build_ops(machine, fields)
     # every referenced action that is not a data op is an effect no-op
     effect_actions = sorted((ref_actions | set(sem_effects)) - set(ops))
@@ -432,12 +582,16 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     out: List[str] = []
     out.append(f"// Generated by cobol-xstate from {machine.source_name} "
                f"(program {machine.program_id}).")
-    out.append("// Runnable XState v5 machine: setup({ guards, actions }) over the "
-               "fixed-point")
+    out.append("// Runnable XState v5 machine: setup({ actions, guards, actors }) over "
+               "the fixed-point")
     out.append("// DECIMAL runtime (cobolRuntime.mjs). Do not edit by hand; see the JSON "
                "bundle")
-    out.append("// for provenance, flags, and notes. Effects and PERFORM are no-ops; "
-               "I-O / ALTER /")
+    out.append("// for provenance, flags, and notes. PERFORM is a real call-return: each "
+               "performed")
+    out.append("// paragraph is an actor invoked with the context as input, its output "
+               "assigned back")
+    out.append("// on return. Other effects (DISPLAY/OPEN/READ/exec) are no-ops; I-O / "
+               "ALTER /")
     out.append("// DEPENDING-ON / raw conditions read context.__cobol_external (default "
                "false).")
     out.append("import { setup, assign } from 'xstate';")
@@ -476,9 +630,34 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
                "&& context.__cobol_external[k]);")
     out.append("")
 
-    out.append("export const machineConfig = " + json.dumps(config, indent=2) + ";")
+    # PERFORM-target paragraphs, each an invokable actor machine. Context threads in via
+    # `input` and back out via the final state's `output`; the call site assigns it on
+    # onDone. The shared `actors` object is filled before use (XState also resolves the
+    # string `src` lazily, so order is not load-bearing).
+    out.append("const actors = {};")
+    out.append("export const actorConfigs = " + json.dumps(actor_configs, indent=2) + ";")
+    out.append("function wireInvokes(states) {")
+    out.append("  for (const k in states) {")
+    out.append("    const inv = states[k].invoke;")
+    out.append("    if (inv) {")
+    out.append("      inv.input = ({ context }) => context;")
+    out.append("      if (inv.onDone) inv.onDone.actions = assign(({ event }) => event.output);")
+    out.append("    }")
+    out.append("  }")
+    out.append("}")
+    out.append("for (const [name, cfg] of Object.entries(actorConfigs)) {")
+    out.append("  wireInvokes(cfg.states);")
+    out.append("  actors[name] = setup({ actions, guards, actors }).createMachine({")
+    out.append("    ...cfg, context: ({ input }) => ({ ...(input || {}) }), "
+               "output: ({ context }) => context,")
+    out.append("  });")
+    out.append("}")
     out.append("")
-    out.append("export const machine = setup({ actions, guards })"
+
+    out.append("export const machineConfig = " + json.dumps(config, indent=2) + ";")
+    out.append("wireInvokes(machineConfig.states);")
+    out.append("")
+    out.append("export const machine = setup({ actions, guards, actors })"
                ".createMachine(machineConfig);")
     out.append("export default machine;")
     out.append("")
