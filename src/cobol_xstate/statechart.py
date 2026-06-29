@@ -566,9 +566,13 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
                        "values": it.condition_values, "line": it.line}
             if it.condition_ranges:
                 entry88["ranges"] = it.condition_ranges
+            if it.origin:
+                entry88["member"] = it.origin
             out[it.name] = entry88
             continue
         entry = {"level": it.level, "line": it.line}
+        if it.origin:
+            entry["member"] = it.origin
         if it.section:
             entry["section"] = it.section
         if it.parent:
@@ -615,7 +619,8 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         # Register the paragraph name with its own provenance before compiling so the
         # compiler's structural-state default does not overwrite it.
         ctx.reg.state(para.name, f"paragraph {para.name}"
-                      + (f" (section {para.section})" if para.section else ""), para.line)
+                      + (f" (section {para.section})" if para.section else ""),
+                      para.line, member=para.origin)
         cont = names[idx + 1] if idx + 1 < len(names) else _END
         _ParaCompiler(ctx, para).compile(cont)
 

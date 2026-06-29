@@ -59,6 +59,7 @@ class DataItem:
     level: int
     name: str
     line: int
+    origin: Optional[str] = None   # copybook member name if from a COPY-expanded line
     section: Optional[str] = None
     pic: Optional[str] = None
     usage: Optional[str] = None
@@ -146,17 +147,18 @@ def _data_region(lines: List[CodeLine]) -> List[CodeLine]:
 
 
 def _entries(region: List[CodeLine]):
-    """Yield (text, line, section) for each level-numbered data entry."""
+    """Yield (text, line, section, origin) for each level-numbered data entry."""
     section = None
     buf: List[str] = []
     first_line = 0
+    first_origin = None
     for cl in region:
         t = cl.text.strip()
         up = t.upper()
         sec = next((s for s in _SECTIONS if up.startswith(s + " SECTION")), None)
         if sec:
             if buf:
-                yield " ".join(buf), first_line, section
+                yield " ".join(buf), first_line, section, first_origin
                 buf = []
             section = sec
             continue
@@ -165,14 +167,15 @@ def _entries(region: List[CodeLine]):
             continue
         if _LEVEL_START.match(cl.text) and re.match(r"^\s*\d", cl.text):
             if buf:
-                yield " ".join(buf), first_line, section
+                yield " ".join(buf), first_line, section, first_origin
             buf = [t]
             first_line = cl.line
+            first_origin = cl.origin
         else:
             if buf:
                 buf.append(t)
     if buf:
-        yield " ".join(buf), first_line, section
+        yield " ".join(buf), first_line, section, first_origin
 
 
 def parse_data_division(lines: List[CodeLine]):
@@ -182,14 +185,14 @@ def parse_data_division(lines: List[CodeLine]):
     parent_stack: List[DataItem] = []  # (group items by level)
     last_elementary: Dict[int, DataItem] = {}
 
-    for text, line, section in _entries(region):
+    for text, line, section, origin in _entries(region):
         m = re.match(r"^(\d{1,2})\s+([A-Z0-9][A-Z0-9-]*|FILLER)\b(.*)$", text, re.I)
         if not m:
             continue
         level = int(m.group(1))
         name = m.group(2).upper()
         rest = m.group(3)
-        item = DataItem(level=level, name=name, line=line, section=section)
+        item = DataItem(level=level, name=name, line=line, section=section, origin=origin)
 
         pm = re.search(r"\bPIC(?:TURE)?\b\s+(?:IS\s+)?(\S+)", rest, re.I)
         if pm:

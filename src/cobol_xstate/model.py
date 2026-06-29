@@ -162,6 +162,7 @@ class Paragraph:
     name: str
     line: int
     section: Optional[str] = None
+    origin: Optional[str] = None  # copybook member name if the header came from a COPY
     statements: List[Stmt] = field(default_factory=list)
 
 

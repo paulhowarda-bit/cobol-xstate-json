@@ -11,7 +11,7 @@ Every token keeps the source line it came from for provenance.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from .normalizer import CodeLine
 
@@ -21,6 +21,7 @@ class Token:
     text: str   # original spelling
     line: int   # 1-based source line
     kind: str   # 'word' | 'number' | 'string' | 'period' | 'punct'
+    origin: Optional[str] = None  # copybook member name if from a COPY-expanded line
 
     @property
     def up(self) -> str:
@@ -44,6 +45,10 @@ def tokenize(lines: List[CodeLine]) -> List[Token]:
     tokens: List[Token] = []
     for cl in lines:
         s = cl.text
+
+        def emit(text: str, kind: str) -> None:
+            tokens.append(Token(text, cl.line, kind, cl.origin))
+
         i, n = 0, len(s)
         while i < n:
             ch = s[i]
@@ -65,18 +70,18 @@ def tokenize(lines: List[CodeLine]) -> List[Token]:
                         j += 1
                         break
                     j += 1
-                tokens.append(Token("".join(buf), cl.line, "string"))
+                emit("".join(buf), "string")
                 i = j
                 continue
             # Period: significant in COBOL (sentence/scope terminator). A standalone
             # '.' is a real period; a decimal point is handled inside number scanning.
             if ch == ".":
-                tokens.append(Token(".", cl.line, "period"))
+                emit(".", "period")
                 i += 1
                 continue
             # Two-char operators.
             if s[i:i + 2] in _TWO_CHAR:
-                tokens.append(Token(s[i:i + 2], cl.line, "punct"))
+                emit(s[i:i + 2], "punct")
                 i += 2
                 continue
             # Identifier or number. COBOL data-names may START with a digit and
@@ -95,19 +100,19 @@ def tokenize(lines: List[CodeLine]) -> List[Token]:
                         j += 1
                         while j < n and s[j].isdigit():
                             j += 1
-                        tokens.append(Token(s[i:j], cl.line, "number"))
+                        emit(s[i:j], "number")
                     else:
-                        tokens.append(Token(run, cl.line, "number"))
+                        emit(run, "number")
                 else:
-                    tokens.append(Token(run, cl.line, "word"))
+                    emit(run, "word")
                 i = j
                 continue
             # Single punctuation/operator.
             if ch in _SINGLE_PUNCT:
-                tokens.append(Token(ch, cl.line, "punct"))
+                emit(ch, "punct")
                 i += 1
                 continue
             # Anything else: emit as punctuation so nothing is silently dropped.
-            tokens.append(Token(ch, cl.line, "punct"))
+            emit(ch, "punct")
             i += 1
     return tokens

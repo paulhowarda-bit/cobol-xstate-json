@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 _OP_WORDS = {
     "=": "eq", ">": "gt", "<": "lt", ">=": "ge", "<=": "le", "<>": "ne",
@@ -39,6 +39,7 @@ class ProvenanceEntry:
     kind: str        # 'state' | 'guard' | 'action'
     cobol: str       # the exact COBOL text / condition / statement
     line: int
+    member: Optional[str] = None  # copybook member, if this came from a COPY expansion
 
 
 @dataclass
@@ -79,17 +80,21 @@ class NameRegistry:
     def guard_named(self, base: str, cobol: str, line: int) -> str:
         return self.register("guard", _slug(base), cobol, line)
 
-    def state(self, name: str, cobol: str, line: int) -> str:
+    def state(self, name: str, cobol: str, line: int, member: Optional[str] = None) -> str:
         # State ids keep the COBOL paragraph/section name verbatim (XState keys may
         # contain hyphens); only register provenance.
         if name not in self.entries:
-            self.entries[name] = ProvenanceEntry(name=name, kind="state", cobol=cobol, line=line)
+            self.entries[name] = ProvenanceEntry(name=name, kind="state", cobol=cobol,
+                                                 line=line, member=member)
         return name
 
     def provenance_dict(self) -> Dict[str, Dict[str, object]]:
         out: Dict[str, Dict[str, object]] = {}
         for name, e in self.entries.items():
-            out[name] = {"kind": e.kind, "cobol": e.cobol, "line": e.line}
+            entry: Dict[str, object] = {"kind": e.kind, "cobol": e.cobol, "line": e.line}
+            if e.member:
+                entry["member"] = e.member
+            out[name] = entry
         return out
 
     def names_of(self, kind: str) -> List[str]:

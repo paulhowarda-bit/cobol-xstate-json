@@ -169,7 +169,8 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
             is_section = bool(re.search(r"\bSECTION\b", cl.text, re.I))
             section = name if is_section else section
             current = Paragraph(name=name, line=cl.line,
-                                section=None if is_section else section)
+                                section=None if is_section else section,
+                                origin=cl.origin)
             buckets.append(current)
             bucket_lines.append([])
             if is_section:
