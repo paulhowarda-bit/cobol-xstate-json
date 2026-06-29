@@ -125,6 +125,7 @@ constructs become real structure, so nothing is folded away.
 | `GO TO … DEPENDING ON` | guarded fan-out (`depending_eq_1…n`) + out-of-range edge + flag |
 | dynamic `CALL ident` | resolved to a literal where constant-provable, else flagged |
 | `ALTER … TO PROCEED TO` | context-driven guard switch on the altered exit + flag |
+| `DECLARATIVES` USE / CICS `HANDLE CONDITION` | top-level `type:'parallel'`: a `PROGRAM` region + an orthogonal `HANDLERS` region that watches a trigger event (`IO.ERROR.file` / `CICS.cond`) and performs the handler |
 
 ### Resolving the "un-mappable" — drawn but flagged
 
@@ -160,6 +161,14 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   (Statement-level action/guard `member` is not yet threaded.) Embedded `EXEC SQL/CICS/DLI`
   is extracted opaquely — host vars preserved, `LINK`/`XCTL`/`RETURN`/`HANDLE` mapped to
   call/transfer/terminate/flag — but the SQL/CICS sub-language itself isn't interpreted.
+- **DECLARATIVES & CICS HANDLE are an orthogonal handler region, not main-flow code.** A
+  `USE AFTER ERROR` procedure or a `HANDLE CONDITION` registration becomes a `type:'parallel'`
+  machine: the `PROGRAM` region is the normal flow, and a `HANDLERS` region watches the
+  trigger event and performs the handler (threading the shared context). The triggering
+  errors are *runtime* events, so those edges are reactive — the autonomous run / golden
+  master exercises the `PROGRAM` region, and the handler fires only when its event is sent
+  (flagged). USE `THRU` ranges and multi-paragraph sections perform the section's first
+  body paragraph.
 - **PERFORM call-return: a no-op marker in the JSON contract, a real `invoke` in the
   runnable JS.** In the `--target json` bundle a `PERFORM p` is the flat marker
   `perform_p` (the review contract; the literal jump-and-return pair isn't drawn there).
@@ -194,7 +203,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 99 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 104 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -212,7 +221,8 @@ examples/           custrpt.cbl  (canonical batch loop)
                     accum.cbl / nestperf.cbl (PERFORM-UNTIL & nested PERFORM call-return)
                     tblsum.cbl (OCCURS table: subscripted reads/writes)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
-tests/              one module per pipeline stage (99 tests)
+                    fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
+tests/              one module per pipeline stage (104 tests)
 ```
 
 ## License

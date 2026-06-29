@@ -201,6 +201,25 @@ def test_sort_is_flagged_opaque():
 
 
 # --------------------------------------------------------------------------- #
+# DECLARATIVES / CICS HANDLE -> orthogonal parallel handler region
+# --------------------------------------------------------------------------- #
+
+def test_declaratives_become_parallel_handler_region():
+    mod = emit_setup_module(_machine("fileerr.cbl"))
+    assert '"type": "parallel"' in mod
+    assert '"PROGRAM"' in mod and '"HANDLERS"' in mod
+    assert '"IO.ERROR.CUST-FILE"' in mod                 # the watcher's trigger event
+    assert '"src": "actor:IO-ERR-HANDLER"' in mod        # the USE procedure as an actor
+
+
+def test_cics_handle_becomes_parallel_handler_region():
+    mod = emit_setup_module(_machine("cicsinq.cbl"))
+    assert '"type": "parallel"' in mod
+    assert '"CICS.NOTFND"' in mod                         # HANDLE CONDITION NOTFND
+    assert '"src": "actor:8000-NOTFOUND"' in mod          # ...dispatches to the target
+
+
+# --------------------------------------------------------------------------- #
 # Node integration (skipped when node / xstate are unavailable)
 # --------------------------------------------------------------------------- #
 
@@ -322,3 +341,24 @@ def test_occurs_table_sum_runs_under_stock_xstate(repo_tmp):
 def test_sort_runs_input_then_output_under_stock_xstate(repo_tmp):
     # INPUT PROCEDURE 1000-FILL (WS-IN=5) runs, then OUTPUT PROCEDURE 2000-EMIT (WS-OUT=7).
     _run_to_done(repo_tmp, "sorter.cbl", {"WS-IN": "5", "WS-OUT": "7"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_declarative_handler_fires_on_its_event(repo_tmp):
+    # The USE procedure is orthogonal: it runs only when its error event is sent, and its
+    # effect threads back into the shared context.
+    _emit_to(repo_tmp, "fileerr.cbl")
+    driver = repo_tmp / "run.mjs"
+    driver.write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n"
+        "if (a.getSnapshot().context['WS-ERR-COUNT'] !== '0') process.exit(1);\n"
+        "a.send({ type: 'IO.ERROR.CUST-FILE' });\n"        # simulate the I/O error
+        "if (a.getSnapshot().context['WS-ERR-COUNT'] !== '1') "
+        "{ console.error(a.getSnapshot().context); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
+                       cwd=str(repo_tmp), timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr

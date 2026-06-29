@@ -164,12 +164,19 @@ class Paragraph:
     section: Optional[str] = None
     origin: Optional[str] = None  # copybook member name if the header came from a COPY
     statements: List[Stmt] = field(default_factory=list)
+    # DECLARATIVES handler metadata (set only on the section head of a USE procedure):
+    use_trigger: Optional[str] = None   # 'ERROR' | 'EXCEPTION' | 'DEBUGGING' | ...
+    use_files: List[str] = field(default_factory=list)  # files it applies to ([]=global)
 
 
 @dataclass
 class Program:
     program_id: str
     paragraphs: List[Paragraph] = field(default_factory=list)
+    # DECLARATIVES USE-procedure sections (kept OUT of the main flow; entered on error).
+    declaratives: List[Paragraph] = field(default_factory=list)
+    # CICS HANDLE CONDITION registrations: (condition-name, target-paragraph).
+    cics_handlers: List[tuple] = field(default_factory=list)
     has_procedure_division: bool = False
     notes: List[str] = field(default_factory=list)  # parser-level remarks
     # data-name -> initial literal from a WORKING-STORAGE `VALUE 'lit'` clause, used

@@ -163,5 +163,9 @@ def test_cics_program_flags_handle_and_xctl():
     machine = build_machine(parse_program(src))
     msgs = " ".join(f["message"] for f in machine.flags)
     assert "HANDLE" in msgs and "XCTL" in msgs
-    # RETURN compiles to a final state.
-    assert any(s.get("type") == "final" for s in machine.config["states"].values())
+    # CICS HANDLE makes the machine parallel: PROGRAM flow + an orthogonal HANDLERS region.
+    assert machine.config["type"] == "parallel"
+    program = machine.config["states"]["PROGRAM"]["states"]
+    assert any(s.get("type") == "final" for s in program.values())  # RETURN -> final
+    # the HANDLE target is dispatched from the watcher.
+    assert "CICS.NOTFND" in machine.config["states"]["HANDLERS"]["states"]["__WATCH__"]["on"]

@@ -130,6 +130,13 @@ export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {
     }
   }
 
-  runScope(machineConfig.states, machineConfig.initial);
+  // A parallel machine (DECLARATIVES/CICS HANDLE) runs its PROGRAM region; the orthogonal
+  // HANDLERS region is reactive (its edges fire on runtime error events), so it idles here.
+  if (machineConfig.type === 'parallel') {
+    const prog = machineConfig.states.PROGRAM;
+    runScope(prog.states, prog.initial);
+  } else {
+    runScope(machineConfig.states, machineConfig.initial);
+  }
   return { context: snapshot(), display, cycles, halted, steps };
 }

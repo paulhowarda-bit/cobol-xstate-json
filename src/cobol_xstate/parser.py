@@ -44,6 +44,7 @@ from .model import (
     SortStmt,
     Stmt,
     TerminateStmt,
+    walk_statements,
 )
 
 # Verbs that begin a statement. Used to bound opaque actions and conditions.
@@ -156,7 +157,37 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     if not body:
         return prog
 
-    # Group body lines into paragraphs by Area-A headers.
+    # DECLARATIVES ... END DECLARATIVES is an orthogonal error-handler region, not part of
+    # the main sequential flow - split it out so its USE sections don't pollute it.
+    decl_lines, main_lines = _split_declaratives(body)
+    prog.paragraphs = _group_paragraphs(main_lines)
+    if decl_lines:
+        prog.declaratives = _mark_use_handlers(_group_paragraphs(decl_lines))
+
+    # Collect CICS HANDLE CONDITION registrations across all statements.
+    prog.cics_handlers = _collect_cics_handlers(prog.paragraphs + prog.declaratives)
+    return prog
+
+
+def _split_declaratives(body: List[CodeLine]):
+    """Return (declaratives_lines, main_lines), splitting at DECLARATIVES/END DECLARATIVES."""
+    start = end = None
+    for i, cl in enumerate(body):
+        u = cl.text.strip().upper()
+        if start is None and re.match(r"^DECLARATIVES\s*\.?$", u):
+            start = i
+        elif re.match(r"^END\s+DECLARATIVES\s*\.?$", u):
+            end = i
+            break
+    if start is None or end is None:
+        return [], body
+    return body[start + 1:end], body[:start] + body[end + 1:]
+
+
+def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
+    """Group body lines into paragraphs by Area-A headers and parse each one's statements."""
+    if not body:
+        return []
     current = Paragraph(name="_ENTRY_", line=body[0].line)
     section: Optional[str] = None
     buckets: List[Paragraph] = [current]
@@ -164,8 +195,6 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     for cl in body:
         name = _header_name(cl)
         if name is not None:
-            if cl.text.strip().upper().endswith("SECTION ."):
-                section = name
             is_section = bool(re.search(r"\bSECTION\b", cl.text, re.I))
             section = name if is_section else section
             current = Paragraph(name=name, line=cl.line,
@@ -174,21 +203,54 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
             buckets.append(current)
             bucket_lines.append([])
             if is_section:
-                # A SECTION header is itself a state boundary but has no body of its
-                # own beyond following paragraphs; keep it as an empty paragraph.
                 continue
         else:
             bucket_lines[-1].append(cl)
 
     for para, plines in zip(buckets, bucket_lines):
-        toks = tokenize(plines)
-        para.statements = StmtParser(toks).parse_paragraph()
+        para.statements = StmtParser(tokenize(plines)).parse_paragraph()
 
-    # Drop the synthetic entry bucket if it carried no statements.
     if buckets and buckets[0].name == "_ENTRY_" and not buckets[0].statements:
         buckets.pop(0)
-    prog.paragraphs = buckets
-    return prog
+    return buckets
+
+
+_USE_RE = re.compile(
+    r"\bUSE\b\s+(?:GLOBAL\s+)?(?:AFTER\s+)?(?:STANDARD\s+)?"
+    r"(?:(ERROR|EXCEPTION)\s+PROCEDURE|FOR\s+DEBUGGING)\s*(?:ON\s+(.+))?", re.I)
+
+
+def _mark_use_handlers(paras: List[Paragraph]) -> List[Paragraph]:
+    """A declarative section head carries a USE statement; pull its trigger/files onto the
+    section paragraph and drop the USE from the statement list (it is not executable)."""
+    for p in paras:
+        for st in p.statements:
+            if isinstance(st, Action) and st.verb == "USE":
+                m = _USE_RE.search(st.text)
+                if m:
+                    p.use_trigger = (m.group(1) or "DEBUGGING").upper()
+                    if m.group(2):
+                        p.use_files = [w.upper() for w in re.split(r"[\s,]+", m.group(2).strip())
+                                       if w and w.upper() not in ("INPUT", "OUTPUT", "I-O", "EXTEND")]
+                else:
+                    p.use_trigger = "EXCEPTION"
+                p.statements = [s for s in p.statements
+                                if not (isinstance(s, Action) and s.verb == "USE")]
+                break
+    return paras
+
+
+def _collect_cics_handlers(paras: List[Paragraph]):
+    """Pull (condition, target) pairs out of every EXEC CICS HANDLE CONDITION statement."""
+    out = []
+    for p in paras:
+        for st in walk_statements(p.statements):
+            if isinstance(st, ExecStmt) and st.kind == "handle" and st.lang == "CICS" \
+                    and st.verb == "HANDLE":
+                names = st.conditions
+                for i in range(0, len(names) - 1, 2):  # interleaved cond, target, ...
+                    out.append((names[i], names[i + 1]))
+    return out
 
 
 # --------------------------------------------------------------------------- #

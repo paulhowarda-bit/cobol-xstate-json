@@ -191,6 +191,7 @@ def _io_guard(st: IoStmt, key: str, reg: NameRegistry) -> str:
 
 # Terminal-transfer node into the shared final state.
 _END = "__END__"
+_DECL_END = "__DECL_END__"
 
 
 class _ParaCompiler:
@@ -591,6 +592,82 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
     return out
 
 
+def _build_handlers_region(program: Program, ctx: "_BuildCtx"):
+    """The orthogonal error-handler region for DECLARATIVES USE procedures and CICS HANDLE
+    CONDITION. Returns an XState region {initial, states} watching for trigger events and
+    dispatching to the handler paragraph, or None when there is nothing to model.
+
+    The triggering errors are *runtime* events, so the watch->handler edges are reactive
+    (they are not driven by the autonomous run); this is the faithful Harel shape, flagged
+    as such. Declarative handler paragraphs are compiled here and lifted out of the main
+    flow; CICS handler targets are ordinary main paragraphs."""
+    decl = program.declaratives
+    cics = program.cics_handlers
+    if not decl and not cics:
+        return None
+
+    # Compile the declarative paragraphs into ctx.states, then lift them out so they live
+    # in the handler region rather than the main PROGRAM flow.
+    before = set(ctx.states)
+    dnames = [p.name for p in decl]
+    for idx, para in enumerate(decl):
+        ctx.reg.state(para.name, f"declarative {para.name}"
+                      + (f" (section {para.section})" if para.section else ""),
+                      para.line, member=para.origin)
+        cont = dnames[idx + 1] if idx + 1 < len(dnames) else _DECL_END
+        _ParaCompiler(ctx, para).compile(cont)
+    decl_states = {k: ctx.states.pop(k) for k in (set(ctx.states) - before)}
+    if any(tr.get("target") == _DECL_END
+           for s in decl_states.values() for tr in s.get("always", [])):
+        decl_states[_DECL_END] = {"type": "final"}
+
+    handler_states: dict = {}
+    watch_on: dict = {}
+
+    def add_handler(event: str, target: str) -> None:
+        hkey = f"__H_{_slug(target)}"
+        watch_on[event] = hkey
+        handler_states[hkey] = {
+            "entry": [ctx.reg.action_named(f"perform_{target}",
+                                           f"PERFORM {target} (error handler)", 0)],
+            "always": [{"target": "__WATCH__"}],
+        }
+
+    # DECLARATIVES USE sections: each section's trigger -> its first body paragraph.
+    i = 0
+    while i < len(decl):
+        p = decl[i]
+        if p.use_trigger:
+            target = None
+            j = i
+            while j < len(decl) and (j == i or not decl[j].use_trigger):
+                if decl[j].statements:
+                    target = decl[j].name
+                    break
+                j += 1
+            if target:
+                for f in (p.use_files or ["*"]):
+                    ev = f"IO.{p.use_trigger}" + ("" if f == "*" else f".{f}")
+                    add_handler(ev, target)
+        i += 1
+
+    # CICS HANDLE CONDITION: condition -> target paragraph (a main-flow paragraph).
+    for cond, target in cics:
+        add_handler(f"CICS.{cond}", target)
+
+    if not watch_on:                       # nothing modelable; restore and bail
+        ctx.states.update(decl_states)
+        return None
+
+    handler_states["__WATCH__"] = {"on": watch_on}
+    handler_states.update(decl_states)
+    ctx.flag("DECLARATIVES", 0,
+             "DECLARATIVES / CICS HANDLE modeled as an orthogonal parallel handler region; "
+             "the triggering errors are runtime events, so the watch->handler edges are not "
+             "driven by the autonomous run - verify against the source")
+    return {"initial": "__WATCH__", "states": handler_states}
+
+
 def build_machine(program: Program, source_name: str = "<source>") -> Machine:
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
                     data=program.data_by_name)
@@ -631,13 +708,31 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         ctx.reg.state(_END, "end of program (fall-off / STOP RUN target)", 0)
         ctx.states[_END] = {"type": "final"}
 
-    config: dict = {
-        "id": program.program_id,
-        "context": ctx.context,
-        "states": ctx.states,
-    }
-    if names:
-        config["initial"] = names[0]
+    program_states = ctx.states
+    program_initial = names[0] if names else None
+
+    # DECLARATIVES + CICS HANDLE: an orthogonal error-handler region (Harel parallel
+    # state). Built only when handlers exist, so ordinary programs keep their flat shape.
+    handlers_region = _build_handlers_region(program, ctx)
+
+    if handlers_region is not None and program_initial is not None:
+        config: dict = {
+            "id": program.program_id,
+            "context": ctx.context,
+            "type": "parallel",
+            "states": {
+                "PROGRAM": {"initial": program_initial, "states": program_states},
+                "HANDLERS": handlers_region,
+            },
+        }
+    else:
+        config = {
+            "id": program.program_id,
+            "context": ctx.context,
+            "states": program_states,
+        }
+        if program_initial:
+            config["initial"] = program_initial
 
     notes = list(program.notes)
     if not program.has_procedure_division:

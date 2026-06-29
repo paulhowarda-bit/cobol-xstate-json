@@ -500,6 +500,14 @@ def _transition_targets(state: dict) -> List[str]:
     inv = state.get("invoke")
     if inv and inv.get("onDone", {}).get("target"):
         out.append(inv["onDone"]["target"])
+    on = state.get("on")
+    if isinstance(on, dict):  # event-driven handler edges (orthogonal HANDLERS region)
+        for v in on.values():
+            for item in (v if isinstance(v, list) else [v]):
+                if isinstance(item, str):
+                    out.append(item)
+                elif isinstance(item, dict) and item.get("target"):
+                    out.append(item["target"])
     return out
 
 
@@ -612,6 +620,57 @@ def _invoke_transform(orig_states: dict, initial: str) -> Tuple[dict, Dict[str, 
     return main_new, actor_configs
 
 
+def _build_actors(pool: dict, buildable: set, seed: set) -> Dict[str, dict]:
+    """Build actor configs for every performed paragraph reachable from `seed`, slicing
+    each paragraph's states out of the shared `pool` (so cross-region PERFORMs resolve)."""
+    actor_configs: Dict[str, dict] = {}
+    work = list(seed)
+    while work:
+        para = work.pop()
+        name = f"actor:{para}"
+        if name in actor_configs:
+            continue
+        own = copy.deepcopy({k: v for k, v in pool.items() if _para_of(k) == para})
+        if para not in own:
+            continue
+        needed: set = set()
+        states: dict = {}
+        for k, st in own.items():
+            _emit_split(k, st, states, buildable, needed)
+        _reroute_to_return(states, para)
+        states["__RET__"] = {"type": "final"}
+        actor_configs[name] = {"initial": para, "states": states}
+        work.extend(needed)
+    return actor_configs
+
+
+def _invoke_transform_parallel(regions: dict) -> Tuple[dict, Dict[str, dict]]:
+    """Parallel (DECLARATIVES/HANDLE) machine: transform each region's flow into invokes,
+    building actors from a pool unioned across all regions so a handler can PERFORM a
+    main-flow paragraph and vice versa."""
+    pool: dict = {}
+    for r in regions.values():
+        pool.update(r.get("states", {}))
+    all_performed = {a[len("perform_"):] for st in pool.values()
+                     for a in (st.get("entry", []) or []) if a.startswith("perform_")}
+    buildable = {p for p in all_performed if p in pool}
+
+    new_regions: dict = {}
+    seed: set = set()
+    for name, r in regions.items():
+        src = copy.deepcopy(r.get("states", {}))
+        new_states: dict = {}
+        sink: set = set()
+        for k, st in src.items():
+            _emit_split(k, st, new_states, buildable, sink)
+        nr = dict(r)
+        nr["states"] = _prune(new_states, r["initial"])
+        new_regions[name] = nr
+        seed |= sink
+
+    return new_regions, _build_actors(pool, buildable, seed)
+
+
 # --------------------------------------------------------------------------- #
 # module assembly
 # --------------------------------------------------------------------------- #
@@ -623,7 +682,10 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
 
     # PERFORM -> invoke: rebuild the runnable flow with real call-return.
     actor_configs: Dict[str, dict] = {}
-    if config.get("states") and config.get("initial"):
+    if config.get("type") == "parallel":
+        new_regions, actor_configs = _invoke_transform_parallel(config["states"])
+        config["states"] = new_regions
+    elif config.get("states") and config.get("initial"):
         main_states, actor_configs = _invoke_transform(config["states"], config["initial"])
         config["states"] = main_states
 
@@ -699,6 +761,7 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     out.append("      inv.input = ({ context }) => context;")
     out.append("      if (inv.onDone) inv.onDone.actions = assign(({ event }) => event.output);")
     out.append("    }")
+    out.append("    if (states[k].states) wireInvokes(states[k].states);  // nested regions")
     out.append("  }")
     out.append("}")
     out.append("for (const [name, cfg] of Object.entries(actorConfigs)) {")

@@ -49,6 +49,39 @@ def test_sort_captures_input_and_output_procedures():
     assert st.using == [] and st.giving == []
 
 
+def test_declaratives_split_out_with_use_trigger():
+    prog = parse_program(_wrap(
+        "       DECLARATIVES.\n"
+        "       IO-ERR SECTION.\n"
+        "           USE AFTER STANDARD ERROR PROCEDURE ON CUST-FILE.\n"
+        "       IO-ERR-HANDLER.\n"
+        "           ADD 1 TO WS-ERR.\n"
+        "       END DECLARATIVES.\n"
+        "       0000-MAIN.\n"
+        "           STOP RUN.\n"
+    ))
+    # the USE section is NOT in the main flow
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]
+    decl_names = [p.name for p in prog.declaratives]
+    assert "IO-ERR" in decl_names and "IO-ERR-HANDLER" in decl_names
+    io_err = next(p for p in prog.declaratives if p.name == "IO-ERR")
+    assert io_err.use_trigger == "ERROR"
+    assert io_err.use_files == ["CUST-FILE"]
+    # the USE statement itself is not executable and is dropped
+    assert io_err.statements == []
+
+
+def test_cics_handle_condition_pairs_captured():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC CICS HANDLE CONDITION NOTFND(9000-NF) END-EXEC\n"
+        "           STOP RUN.\n"
+        "       9000-NF.\n"
+        "           DISPLAY 'NF'.\n"
+    ))
+    assert prog.cics_handlers == [("NOTFND", "9000-NF")]
+
+
 def test_sort_using_giving_files():
     prog = parse_program(_wrap(
         "       0000-MAIN.\n"
