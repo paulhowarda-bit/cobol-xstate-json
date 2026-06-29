@@ -156,10 +156,26 @@
     if (label.ac) t.append("tspan").attr("class", "ac lod-l2").text(" " + label.ac);
   });
 
+  // Display-only prettifier: the emitter slugs COBOL conditions into
+  // identifier-safe guard NAMES — relational operators become lowercase words
+  // (= -> eq, < -> lt, …) and separators become underscores, while data names
+  // stay UPPER-CASE and hyphenated (see naming.py `_slug`). This restores the
+  // readable form for captions/tooltips WITHOUT touching the stored guard name
+  // (search and provenance still use the raw name). Operator words are matched
+  // lowercase/word-bounded, so UPPER-CASE field names are never rewritten.
+  function prettyGuard(g) {
+    if (!g) return g;
+    return g.replace(/_/g, " ")
+      .replace(/\beq\b/g, "=").replace(/\bne\b/g, "≠")
+      .replace(/\bge\b/g, "≥").replace(/\ble\b/g, "≤")
+      .replace(/\bgt\b/g, ">").replace(/\blt\b/g, "<")
+      .replace(/\s+/g, " ").trim();
+  }
+
   // caption: the meaningful part of the transition. For automatic edges the
   // guard IS the caption ("ε(always)" is suppressed); real events show the event.
   function labelFor(e) {
-    const guard = e.guard ? `[${e.guard}]` : "";
+    const guard = e.guard ? `[${prettyGuard(e.guard)}]` : "";
     let cap = "", capClass = "ev";
     if (isAuto(e)) { cap = guard; capClass = "gd"; }
     else { cap = e.event + (guard ? " " + guard : ""); capClass = "ev"; }
@@ -170,7 +186,7 @@
   function tooltipFor(e) {
     const nm = id => (nodeById[id] ? nodeById[id].label : id);
     let s = nm(e.source) + "  →  " + nm(e.target);
-    if (e.guard) s += "\nwhen [" + e.guard + "]";
+    if (e.guard) s += "\nwhen [" + prettyGuard(e.guard) + "]";
     else if (isAuto(e)) s += "\n(unconditional — always)";
     if (e.event && !isAuto(e)) s += "\non " + e.event;
     if (e.actions && e.actions.length) s += "\ndo " + e.actions.join("; ");

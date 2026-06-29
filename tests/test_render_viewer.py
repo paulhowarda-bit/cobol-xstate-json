@@ -42,6 +42,7 @@ from cobol_xstate.parser import parse_program  # noqa: E402
 from cobol_xstate.statechart import build_machine  # noqa: E402
 
 VIEWER_JS = (VENDOR / "viewer.js").read_text(encoding="utf-8")
+VIEWER_CSS = (VENDOR / "viewer.css").read_text(encoding="utf-8")
 LAYOUT_JS = (VENDOR / "layout_boot.js").read_text(encoding="utf-8")
 
 EXAMPLE_SRCS = ["banktran", "custrpt", "cicsinq"]
@@ -87,6 +88,41 @@ def test_behavior_labels_not_regated_to_l3():
     assert 'compartment ${cls} lod-l3' not in VIEWER_JS
     assert '"activity-badge lod-l3"' not in VIEWER_JS
     assert '"ac lod-l3"' not in VIEWER_JS
+
+
+# -- conditional vs sequential edge encoding -------------------------------
+
+def test_conditional_edges_are_classed_distinctly():
+    """Guarded transitions get a `conditional` class; unguarded autos `seq`."""
+    assert '" conditional"' in VIEWER_JS and '" seq"' in VIEWER_JS
+    # and the CSS must style them differently (decision color + dashed vs plumbing)
+    assert ".edge.conditional path" in VIEWER_CSS
+    assert ".edge.seq path" in VIEWER_CSS
+    cond_rule = VIEWER_CSS.split(".edge.conditional path", 1)[1].split("}", 1)[0]
+    assert "stroke-dasharray" in cond_rule, "conditional edges must be dashed"
+
+
+def test_always_noise_is_suppressed_as_a_label():
+    """ε(always) must not be rendered as a caption; only meaningful text shows."""
+    assert "isAuto" in VIEWER_JS
+    assert "if (!label.cap && !label.ac) return;" in VIEWER_JS
+
+
+def test_edges_have_tooltip_with_condition():
+    """Every edge carries a <title> tooltip; guarded ones state the condition."""
+    assert 'edgeSel.append("title")' in VIEWER_JS
+    assert 'when [' in VIEWER_JS  # tooltip phrasing for the guard
+
+
+def test_guard_operators_prettified_for_display_only():
+    """Captions/tooltips render = < > … but the stored guard name is untouched."""
+    assert "function prettyGuard" in VIEWER_JS
+    assert ', "=")' in VIEWER_JS and ', "<")' in VIEWER_JS and ', ">")' in VIEWER_JS
+    assert "prettyGuard(e.guard)" in VIEWER_JS  # applied in caption + tooltip
+    # the raw slug guard names in the data are NOT rewritten (search/provenance intact)
+    _, graph, _ = render_statechart.render_html(_machine_config("banktran"))
+    guards = [e["guard"] for e in graph["edges"] if e.get("guard")]
+    assert any("_eq_" in g for g in guards), "raw slug guard names must be preserved"
 
 
 # -- 3. box sizing fits the now-visible compartment text -------------------

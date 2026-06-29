@@ -53,8 +53,8 @@ svg#canvas { width: 100%; height: 100%; display: block; background:
 .edge path { fill: none; stroke: #5b6577; stroke-width: 1.4px; }
 /* sequential (unconditional `always`) flow — de-emphasized plumbing */
 .edge.seq path { stroke: #aab2c0; stroke-width: 1.3px; }
-/* conditional (guarded) transitions — decisions, drawn distinctly */
-.edge.conditional path { stroke: #1f6f8b; stroke-width: 1.9px; }
+/* conditional (guarded) transitions — decisions, drawn distinctly (teal + dashed) */
+.edge.conditional path { stroke: #1f6f8b; stroke-width: 1.9px; stroke-dasharray: 7 4; }
 .edge .elabel { font-size: 11px; fill: #2b3344;
   paint-order: stroke; stroke: #ffffff; stroke-width: 3px; stroke-linejoin: round; }
 .edge .elabel .ev { font-weight: 600; }

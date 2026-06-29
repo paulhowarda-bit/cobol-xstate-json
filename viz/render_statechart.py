@@ -403,7 +403,7 @@ HTML_SHELL = """<!doctype html>
       <div class="li"><span class="sw" style="background:#fff;border-width:2.4px"></span>final state</div>
       <div class="li">Ⓒ / Ⓒ* shallow / deep history</div>
       <div class="li">● default entry</div>
-      <div class="li"><span style="color:#1f6f8b;font-weight:700">──▶</span> conditional transition [guard]</div>
+      <div class="li"><span style="color:#1f6f8b;font-weight:700">– –▶</span> conditional transition [guard]</div>
       <div class="li"><span style="color:#aab2c0;font-weight:700">──▶</span> sequential (unconditional)</div>
       <div class="li"><span style="color:#b5651d">– – –</span> broadcast / annotation</div>
       <div class="li"><span style="color:#d98a00">▭</span> search highlight</div>
