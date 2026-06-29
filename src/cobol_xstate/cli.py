@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
-import webbrowser
 from pathlib import Path
 from typing import List, Optional
 
@@ -22,24 +20,6 @@ def _format(name: Optional[str]) -> Optional[SourceFormat]:
     return {"fixed": SourceFormat.FIXED, "free": SourceFormat.FREE}[name]
 
 
-def _load_renderer():
-    """Import the standalone viz/render_statechart.py by file path.
-
-    The HTML viewer lives outside the package (it is a self-contained tool with
-    its own vendored JS assets), so it is loaded on demand only when the html
-    target is requested — keeping the json/js paths dependency-free.
-    """
-    repo_root = Path(__file__).resolve().parents[2]
-    mod_path = repo_root / "viz" / "render_statechart.py"
-    if not mod_path.exists():
-        raise SystemExit(
-            f"error: html target needs the renderer at {mod_path}, which is missing.")
-    spec = importlib.util.spec_from_file_location("_viz_render_statechart", mod_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cobol-xstate",
@@ -48,14 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("source", help="path to a COBOL source file ('-' for stdin)")
     p.add_argument("-o", "--output", help="write output here (default: stdout)")
-    p.add_argument("--target", choices=["json", "js", "html"], default="json",
+    p.add_argument("--target", choices=["json", "js"], default="json",
                    help="json = the XState config bundle (default); js = a runnable "
-                        "XState v5 setup() ES module backed by the decimal runtime; "
-                        "html = a self-contained interactive statechart diagram")
-    p.add_argument("--html", dest="target", action="store_const", const="html",
-                   help="shorthand for --target html (.cbl -> interactive diagram)")
-    p.add_argument("--open", action="store_true", dest="open_browser",
-                   help="with --html, open the written diagram in the default browser")
+                        "XState v5 setup() ES module backed by the decimal runtime")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
     p.add_argument("-I", "--copybook-path", action="append", default=[],
@@ -106,27 +81,6 @@ def run(argv: Optional[List[str]] = None) -> int:
                     runtime_src.read_text())
         else:
             print(text)
-    elif args.target == "html":
-        renderer = _load_renderer()
-        html, graph, used_cdn = renderer.render_html(machine.config)
-        if args.output:
-            out_path = Path(args.output)
-        elif args.source == "-":
-            out_path = Path("statechart.html")
-        else:
-            out_path = Path(args.source).with_suffix(".html")
-        out_path.write_text(html, encoding="utf-8")
-        idx = graph["index"]
-        print(
-            f"Wrote {out_path}  ({len(html) // 1024} KB) — "
-            f"{len(idx['states'])} states, {len(idx['transitions'])} transitions"
-            + ("  [CDN fallback: needs network]" if used_cdn else "  [offline, self-contained]"),
-            file=sys.stderr,
-        )
-        if args.open_browser:
-            uri = out_path.resolve().as_uri()
-            webbrowser.open(uri)
-            print(f"opened {uri}", file=sys.stderr)
     else:
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
         if args.output:
