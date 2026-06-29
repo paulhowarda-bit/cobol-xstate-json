@@ -175,6 +175,24 @@ def test_occurs_seeds_context_as_array():
     assert machine.data["TBL-AMT"]["occurs"] == 5
 
 
+def test_redefines_is_flagged_as_unmodeled_aliasing():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RD.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-A      PIC 9(4).\n"
+        "       01  WS-B REDEFINES WS-A PIC X(4).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           STOP RUN.\n"
+    )
+    machine = _machine(src)
+    assert machine.data["WS-B"]["redefines"] == "WS-A"
+    assert any("REDEFINES" in f["message"] and "byte-aliasing" in f["message"]
+               for f in machine.flags)
+
+
 def test_group_occurs_is_flagged_not_silently_modeled():
     src = (
         "       IDENTIFICATION DIVISION.\n"

@@ -169,6 +169,13 @@ def test_nested_perform_builds_nested_actors():
     assert '"__RET__"' in mod                   # each actor returns via a final state
 
 
+def test_perform_thru_builds_a_range_actor():
+    mod = emit_setup_module(_machine("thrurange.cbl"))
+    assert '"src": "actor:1000-A__THRU__3000-C"' in mod   # PERFORM 1000-A THRU 3000-C
+    assert '"actor:1000-A__THRU__3000-C"' in mod          # ...one actor spanning the range
+    assert '"initial": "1000-A"' in mod                   # entered at the head paragraph
+
+
 # --------------------------------------------------------------------------- #
 # OCCURS subscript addressing
 # --------------------------------------------------------------------------- #
@@ -341,6 +348,12 @@ def test_occurs_table_sum_runs_under_stock_xstate(repo_tmp):
 def test_sort_runs_input_then_output_under_stock_xstate(repo_tmp):
     # INPUT PROCEDURE 1000-FILL (WS-IN=5) runs, then OUTPUT PROCEDURE 2000-EMIT (WS-OUT=7).
     _run_to_done(repo_tmp, "sorter.cbl", {"WS-IN": "5", "WS-OUT": "7"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_thru_range_runs_all_paragraphs(repo_tmp):
+    # PERFORM 1000-A THRU 3000-C runs A, B, C in order then returns: 100 + 20 + 3 = 123.
+    _run_to_done(repo_tmp, "thrurange.cbl", {"WS-N": "123"})
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")

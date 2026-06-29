@@ -552,11 +552,31 @@ def _emit_split(key: str, st: dict, out: dict, buildable: set, needed: set) -> N
     out[ids[n]] = control
 
 
-def _reroute_to_return(states: dict, owner: str) -> None:
-    """Inside an actor, any transition leaving the owning paragraph (fall-through, GO TO,
-    or the program-end sentinel) is the paragraph's return point."""
+def _target_owner(target: str, ordered: List[str]) -> Tuple[Optional[set], Optional[str]]:
+    """Resolve a PERFORM target to (owner_paragraph_set, initial_paragraph). A plain name
+    owns just itself; ``HEAD__THRU__TAIL`` owns the source-order paragraph span head..tail
+    (PERFORM p THRU q runs p through q, then returns)."""
+    if "__THRU__" in target:
+        head, tail = target.split("__THRU__", 1)
+        if head in ordered and tail in ordered:
+            i, j = ordered.index(head), ordered.index(tail)
+            if i <= j:
+                return set(ordered[i:j + 1]), head
+        return None, None
+    return ({target}, target) if target in ordered else (None, None)
+
+
+def _buildable_targets(pool: dict, ordered: List[str]) -> set:
+    performed = {a[len("perform_"):] for st in pool.values()
+                 for a in (st.get("entry", []) or []) if a.startswith("perform_")}
+    return {t for t in performed if _target_owner(t, ordered)[0] is not None}
+
+
+def _reroute_to_return(states: dict, owner: set) -> None:
+    """Inside an actor, any transition leaving the owned paragraph(s) (fall-through past the
+    range, GO TO out, or the program-end sentinel) is the return point."""
     def leaves(tgt: str) -> bool:
-        return bool(tgt) and (_para_of(tgt) != owner or tgt == "__END__")
+        return bool(tgt) and (_para_of(tgt) not in owner or tgt == "__END__")
 
     for st in states.values():
         for t in st.get("always", []) or []:
@@ -579,17 +599,41 @@ def _prune(states: dict, initial: str) -> dict:
     return {k: v for k, v in states.items() if k in seen}
 
 
-def _invoke_transform(orig_states: dict, initial: str) -> Tuple[dict, Dict[str, dict]]:
+def _build_actors(pool: dict, buildable: set, seed: set,
+                  ordered: List[str]) -> Dict[str, dict]:
+    """Build an actor config for every PERFORM target reachable from `seed`, slicing the
+    owned paragraph(s) out of the shared `pool` (so cross-region and THRU-range PERFORMs
+    resolve). A range target owns its whole paragraph span; a plain target owns itself."""
+    actor_configs: Dict[str, dict] = {}
+    work = list(seed)
+    while work:
+        target = work.pop()
+        name = f"actor:{target}"
+        if name in actor_configs:
+            continue
+        owner, initial = _target_owner(target, ordered)
+        if owner is None:
+            continue
+        own = copy.deepcopy({k: v for k, v in pool.items() if _para_of(k) in owner})
+        if initial not in own:
+            continue
+        needed: set = set()
+        states: dict = {}
+        for k, st in own.items():
+            _emit_split(k, st, states, buildable, needed)
+        _reroute_to_return(states, owner)
+        states["__RET__"] = {"type": "final"}
+        actor_configs[name] = {"initial": initial, "states": states}
+        work.extend(needed)
+    return actor_configs
+
+
+def _invoke_transform(orig_states: dict, initial: str,
+                      ordered: List[str]) -> Tuple[dict, Dict[str, dict]]:
     """Return (main_states, actor_configs). Performs become invokes of actor machines;
     main is pruned to what is reachable from `initial` (the un-performed paragraph copies
     fall away). Each actor config is {initial, states} with a `__RET__` final."""
-    all_performed = set()
-    for st in orig_states.values():
-        for a in st.get("entry", []) or []:
-            if a.startswith("perform_"):
-                all_performed.add(a[len("perform_"):])
-    buildable = {p for p in all_performed if p in orig_states}
-
+    buildable = _buildable_targets(orig_states, ordered)
     main_src = copy.deepcopy(orig_states)
     main_new: dict = {}
     sink: set = set()
@@ -597,63 +641,20 @@ def _invoke_transform(orig_states: dict, initial: str) -> Tuple[dict, Dict[str, 
         _emit_split(k, st, main_new, buildable, sink)
     main_new = _prune(main_new, initial)
 
-    actor_configs: Dict[str, dict] = {}
-    work = [p for p in buildable if any(  # only those actually reached from main
-        f"actor:{p}" == inv.get("src")
-        for s in main_new.values() for inv in [s.get("invoke") or {}])]
-    while work:
-        para = work.pop()
-        name = f"actor:{para}"
-        if name in actor_configs:
-            continue
-        own = copy.deepcopy({k: v for k, v in orig_states.items() if _para_of(k) == para})
-        if para not in own:
-            continue
-        needed: set = set()
-        states: dict = {}
-        for k, st in own.items():
-            _emit_split(k, st, states, buildable, needed)
-        _reroute_to_return(states, para)
-        states["__RET__"] = {"type": "final"}
-        actor_configs[name] = {"initial": para, "states": states}
-        work.extend(needed)
-    return main_new, actor_configs
+    seed = {inv["src"][len("actor:"):] for s in main_new.values()
+            for inv in [s.get("invoke") or {}] if inv.get("src")}
+    return main_new, _build_actors(orig_states, buildable, seed, ordered)
 
 
-def _build_actors(pool: dict, buildable: set, seed: set) -> Dict[str, dict]:
-    """Build actor configs for every performed paragraph reachable from `seed`, slicing
-    each paragraph's states out of the shared `pool` (so cross-region PERFORMs resolve)."""
-    actor_configs: Dict[str, dict] = {}
-    work = list(seed)
-    while work:
-        para = work.pop()
-        name = f"actor:{para}"
-        if name in actor_configs:
-            continue
-        own = copy.deepcopy({k: v for k, v in pool.items() if _para_of(k) == para})
-        if para not in own:
-            continue
-        needed: set = set()
-        states: dict = {}
-        for k, st in own.items():
-            _emit_split(k, st, states, buildable, needed)
-        _reroute_to_return(states, para)
-        states["__RET__"] = {"type": "final"}
-        actor_configs[name] = {"initial": para, "states": states}
-        work.extend(needed)
-    return actor_configs
-
-
-def _invoke_transform_parallel(regions: dict) -> Tuple[dict, Dict[str, dict]]:
+def _invoke_transform_parallel(regions: dict,
+                               ordered: List[str]) -> Tuple[dict, Dict[str, dict]]:
     """Parallel (DECLARATIVES/HANDLE) machine: transform each region's flow into invokes,
     building actors from a pool unioned across all regions so a handler can PERFORM a
     main-flow paragraph and vice versa."""
     pool: dict = {}
     for r in regions.values():
         pool.update(r.get("states", {}))
-    all_performed = {a[len("perform_"):] for st in pool.values()
-                     for a in (st.get("entry", []) or []) if a.startswith("perform_")}
-    buildable = {p for p in all_performed if p in pool}
+    buildable = _buildable_targets(pool, ordered)
 
     new_regions: dict = {}
     seed: set = set()
@@ -668,7 +669,7 @@ def _invoke_transform_parallel(regions: dict) -> Tuple[dict, Dict[str, dict]]:
         new_regions[name] = nr
         seed |= sink
 
-    return new_regions, _build_actors(pool, buildable, seed)
+    return new_regions, _build_actors(pool, buildable, seed, ordered)
 
 
 # --------------------------------------------------------------------------- #
@@ -681,12 +682,14 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     config["context"] = _js_context(config, fields)
 
     # PERFORM -> invoke: rebuild the runnable flow with real call-return.
+    ordered = machine.paragraph_order
     actor_configs: Dict[str, dict] = {}
     if config.get("type") == "parallel":
-        new_regions, actor_configs = _invoke_transform_parallel(config["states"])
+        new_regions, actor_configs = _invoke_transform_parallel(config["states"], ordered)
         config["states"] = new_regions
     elif config.get("states") and config.get("initial"):
-        main_states, actor_configs = _invoke_transform(config["states"], config["initial"])
+        main_states, actor_configs = _invoke_transform(config["states"],
+                                                       config["initial"], ordered)
         config["states"] = main_states
 
     # collect referenced names across the main machine AND every actor body

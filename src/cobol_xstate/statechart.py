@@ -74,6 +74,7 @@ class Machine:
     source_name: str = "<source>"
     data: Dict[str, dict] = field(default_factory=dict)
     semantics: Dict[str, dict] = field(default_factory=dict)
+    paragraph_order: List[str] = field(default_factory=list)  # source order (for THRU)
 
     def bundle(self) -> dict:
         return {
@@ -309,8 +310,13 @@ class _ParaCompiler:
     def _perform_action(self, st: PerformStmt) -> str:
         thru = f" THRU {st.thru}" if st.thru else ""
         ctrl = f" {st.control_text}" if st.control_text else ""
-        return self.reg.action_named(
-            f"perform_{st.target}", f"PERFORM {st.target}{thru}{ctrl}".strip(), st.line)
+        cobol = f"PERFORM {st.target}{thru}{ctrl}".strip()
+        if st.thru:
+            # Encode both ends so the emitter builds a range actor; register() preserves the
+            # `__THRU__` separator (action_named would slug `__` down to `_`).
+            return self.reg.register(
+                "action", f"perform_{st.target}__THRU__{st.thru}", cobol, st.line)
+        return self.reg.action_named(f"perform_{st.target}", cobol, st.line)
 
     def _exec_action(self, st: ExecStmt) -> str:
         base = f"link_{st.target}" if st.kind == "call" and st.target else \
@@ -464,13 +470,12 @@ class _ParaCompiler:
 
         def perform_proc(target: str, thru: Optional[str], phase: str) -> None:
             thru_s = f" THRU {thru}" if thru else ""
-            entry.append(self.reg.action_named(
-                f"perform_{target}",
-                f"{st.verb} {phase} PROCEDURE {target}{thru_s}", st.line))
+            cobol = f"{st.verb} {phase} PROCEDURE {target}{thru_s}"
             if thru:
-                self.ctx.flag(self.pname, st.line,
-                              f"{st.verb} {phase} PROCEDURE {target} THRU {thru}: only the "
-                              f"head paragraph {target} is performed; verify the THRU range")
+                entry.append(self.reg.register(
+                    "action", f"perform_{target}__THRU__{thru}", cobol, st.line))
+            else:
+                entry.append(self.reg.action_named(f"perform_{target}", cobol, st.line))
 
         if st.input_proc:
             perform_proc(st.input_proc, st.input_thru, "INPUT")
@@ -682,6 +687,11 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
             ctx.flag(it.section or "DATA", it.line,
                      f"OCCURS on group {it.name}: subscripting its subordinate items "
                      f"is not modeled (only elementary-item OCCURS is)")
+        if it.redefines:
+            ctx.flag(it.section or "DATA", it.line,
+                     f"{it.name} REDEFINES {it.redefines}: the two share storage, but "
+                     f"byte-aliasing (reading one PICTURE's bytes through another) is not "
+                     f"modeled - {it.name} is an independent context field; verify")
         if it.level in (88, 66) or it.is_group or it.pic is None:
             continue
         val = _initial_value(it)
@@ -758,4 +768,6 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         source_name=source_name,
         data=_data_dictionary(program),
         semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem},
+        paragraph_order=[p.name for p in program.paragraphs]
+        + [p.name for p in program.declaratives],
     )

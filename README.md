@@ -118,7 +118,8 @@ constructs become real structure, so nothing is folded away.
 | `READ … AT END` / `INVALID KEY` | a guarded handler branch — the conditional flag-set is **conditional**, not folded |
 | `PERFORM p UNTIL/VARYING/TIMES`, inline `PERFORM` | a **loop** state (exit guard + body that loops back); `TEST AFTER` ⇒ do-while |
 | `PERFORM p` (simple) | call-return `entry` action `perform_p`; `p` is compiled as its own region |
-| `SORT/MERGE … INPUT/OUTPUT PROCEDURE` | `perform_input` → `sort_file` effect → `perform_output` (the procedures are call-returns); `USING`/`GIVING` & key order flagged |
+| `PERFORM p THRU q` | call-return into a range actor spanning paragraphs `p..q` (source order), returning after `q` |
+| `SORT/MERGE … INPUT/OUTPUT PROCEDURE` | `perform_input` → `sort_file` effect → `perform_output` (the procedures are call-returns, `THRU` ranges included); `USING`/`GIVING` & key order flagged |
 | `GO TO p` | exit `always` edge to `p` (no return); suppresses fall-through |
 | Fall-through / end of paragraph | eventless `always` edge to the next paragraph (or the shared `final`) |
 | `STOP RUN` / `GOBACK` / `EXIT PROGRAM` | `type: 'final'` |
@@ -167,8 +168,7 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   trigger event and performs the handler (threading the shared context). The triggering
   errors are *runtime* events, so those edges are reactive — the autonomous run / golden
   master exercises the `PROGRAM` region, and the handler fires only when its event is sent
-  (flagged). USE `THRU` ranges and multi-paragraph sections perform the section's first
-  body paragraph.
+  (flagged). A multi-paragraph USE section performs its first body paragraph.
 - **PERFORM call-return: a no-op marker in the JSON contract, a real `invoke` in the
   runnable JS.** In the `--target json` bundle a `PERFORM p` is the flat marker
   `perform_p` (the review contract; the literal jump-and-return pair isn't drawn there).
@@ -203,7 +203,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 104 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 107 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -222,7 +222,8 @@ examples/           custrpt.cbl  (canonical batch loop)
                     tblsum.cbl (OCCURS table: subscripted reads/writes)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
-tests/              one module per pipeline stage (104 tests)
+                    thrurange.cbl (PERFORM p THRU q as a range actor)
+tests/              one module per pipeline stage (107 tests)
 ```
 
 ## License
