@@ -52,7 +52,7 @@ The default output is a JSON **bundle**:
     "actions": { "ADD_CUST-AMT_TO_WS-TOTAL": { "kind": "arith", "assignments": [ { "target": "WS-TOTAL", "expr": "WS-TOTAL + CUST-AMT" } ] } },
     "guards":  { "UNTIL_WS-EOF_eq_Y": { "op": "rel", "left": "WS-EOF", "rel": "=", "right": "'Y'" } }
   },
-  "provenance": { "<name>": { "kind": "state|guard|action", "cobol": "...", "line": N } },
+  "provenance": { "<name>": { "kind": "state|guard|action", "cobol": "...", "line": N, "member": "COPYBOOK?" } },
   "flags":    [ { "paragraph": "...", "line": N, "message": "..." } ],
   "notes":    [ "..." ]
 }
@@ -154,9 +154,12 @@ deliberately explicit about the gap (the skill's core principle — don't preten
 - **Copybooks must be resolvable.** `COPY`/`REPLACING`/`EXEC SQL INCLUDE` are expanded
   via the resolver (`-I DIR`, `--copybook-ext`); a member that can't be found is listed
   in `notes` as **missing** (its data/logic isn't in the model) rather than silently
-  dropped. Embedded `EXEC SQL/CICS/DLI` is extracted opaquely — host vars preserved,
-  `LINK`/`XCTL`/`RETURN`/`HANDLE` mapped to call/transfer/terminate/flag — but the SQL/
-  CICS sub-language itself isn't interpreted.
+  dropped. An expanded member's `origin` is threaded through to its tokens, so a
+  copybook-defined data item carries a `member` in `data`, and a copybook-defined
+  paragraph carries `member` in `provenance` — the diagram traces back to the right file.
+  (Statement-level action/guard `member` is not yet threaded.) Embedded `EXEC SQL/CICS/DLI`
+  is extracted opaquely — host vars preserved, `LINK`/`XCTL`/`RETURN`/`HANDLE` mapped to
+  call/transfer/terminate/flag — but the SQL/CICS sub-language itself isn't interpreted.
 - **PERFORM call-return: a no-op marker in the JSON contract, a real `invoke` in the
   runnable JS.** In the `--target json` bundle a `PERFORM p` is the flat marker
   `perform_p` (the review contract; the literal jump-and-return pair isn't drawn there).
@@ -191,7 +194,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 96 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 99 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -209,7 +212,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     accum.cbl / nestperf.cbl (PERFORM-UNTIL & nested PERFORM call-return)
                     tblsum.cbl (OCCURS table: subscripted reads/writes)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
-tests/              one module per pipeline stage (96 tests)
+tests/              one module per pipeline stage (99 tests)
 ```
 
 ## License
