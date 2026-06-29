@@ -1,4 +1,5 @@
 from cobol_xstate.normalizer import normalize
+from cobol_xstate.lexer import tokenize
 from cobol_xstate.preprocessor import preprocess, CopybookResolver
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
@@ -69,6 +70,56 @@ def test_preprocess_unit_expands_and_records(tmp_path):
     assert "A" in res.expanded
     assert any("A-FIELD" in cl.text for cl in res.lines)
     assert res.lines[0].origin == "A"
+
+
+# -- copybook provenance (origin threaded to tokens / data / paragraphs) ----
+
+def test_tokens_carry_copybook_origin(tmp_path):
+    resolver = _write(tmp_path, "A.cpy", "       01  A-FIELD PIC X.\n")
+    res = preprocess(normalize("       COPY A.\n"), resolver)
+    toks = tokenize(res.lines)
+    a_field = next(t for t in toks if t.up == "A-FIELD")
+    assert a_field.origin == "A"
+
+
+def test_copybook_data_items_carry_member(tmp_path):
+    resolver = _write(tmp_path, "REC.cpy",
+                      "       01  REC.\n"
+                      "           05  REC-AMT  PIC 9(5) COMP-3.\n"
+                      "           05  REC-FLG  PIC X.\n"
+                      "               88  REC-OK  VALUE 'Y'.\n")
+    src = (
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY REC.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-X.\n"
+        "           ADD 1 TO REC-AMT.\n"
+    )
+    machine = build_machine(parse_program(src, resolver=resolver))
+    assert machine.data["REC-AMT"]["member"] == "REC"
+    assert machine.data["REC-OK"]["member"] == "REC"   # 88-level too
+
+
+def test_copybook_paragraph_shows_member_in_provenance(tmp_path):
+    # A procedure copybook: the performed paragraph's provenance names its member.
+    resolver = _write(tmp_path, "PROC.cpy",
+                      "       1000-LOG.\n"
+                      "           ADD 1 TO WS-N.\n")
+    src = (
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-N PIC 9(3) VALUE 0.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           PERFORM 1000-LOG\n"
+        "           STOP RUN.\n"
+        "       COPY PROC.\n"
+    )
+    machine = build_machine(parse_program(src, resolver=resolver))
+    assert machine.provenance["1000-LOG"]["member"] == "PROC"
+    # a non-copybook paragraph has no member key
+    assert "member" not in machine.provenance["0000-MAIN"]
 
 
 # -- EXEC SQL / CICS / DLI extraction --------------------------------------
