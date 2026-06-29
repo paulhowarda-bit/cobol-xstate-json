@@ -182,6 +182,25 @@ def test_occurs_field_carries_count_and_writes_use_setelem():
 
 
 # --------------------------------------------------------------------------- #
+# SORT / MERGE INPUT/OUTPUT PROCEDURE
+# --------------------------------------------------------------------------- #
+
+def test_sort_procedures_become_call_return_invokes():
+    mod = emit_setup_module(_machine("sorter.cbl"))
+    # INPUT PROCEDURE -> invoke, then the sort effect, then OUTPUT PROCEDURE -> invoke
+    assert '"src": "actor:1000-FILL"' in mod
+    assert '"src": "actor:2000-EMIT"' in mod
+    assert '"sort_SORT-FILE"' in mod
+    # the sort itself is a no-op effect, not a data op
+    assert '"sort_SORT-FILE": (context)' not in mod
+
+
+def test_sort_is_flagged_opaque():
+    machine = _machine("sorter.cbl")
+    assert any("is an opaque effect" in f["message"] for f in machine.flags)
+
+
+# --------------------------------------------------------------------------- #
 # Node integration (skipped when node / xstate are unavailable)
 # --------------------------------------------------------------------------- #
 
@@ -297,3 +316,9 @@ def test_nested_perform_threads_context_under_stock_xstate(repo_tmp):
 def test_occurs_table_sum_runs_under_stock_xstate(repo_tmp):
     # Write five elements by literal subscript, then sum with a variable subscript.
     _run_to_done(repo_tmp, "tblsum.cbl", {"WS-SUM": "150"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_sort_runs_input_then_output_under_stock_xstate(repo_tmp):
+    # INPUT PROCEDURE 1000-FILL (WS-IN=5) runs, then OUTPUT PROCEDURE 2000-EMIT (WS-OUT=7).
+    _run_to_done(repo_tmp, "sorter.cbl", {"WS-IN": "5", "WS-OUT": "7"})

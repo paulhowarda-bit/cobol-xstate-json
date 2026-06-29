@@ -5,6 +5,7 @@ from cobol_xstate.model import (
     IfStmt,
     IoStmt,
     PerformStmt,
+    SortStmt,
     TerminateStmt,
     AlterStmt,
     CallStmt,
@@ -29,6 +30,37 @@ def test_program_id_and_paragraphs():
     ))
     assert prog.program_id == "T"
     assert [p.name for p in prog.paragraphs] == ["0000-MAIN", "1000-A"]
+
+
+def test_sort_captures_input_and_output_procedures():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           SORT SORT-FILE\n"
+        "               ON ASCENDING KEY S-KEY\n"
+        "               INPUT PROCEDURE IS 1000-FILL\n"
+        "               OUTPUT PROCEDURE IS 2000-EMIT\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert isinstance(st, SortStmt)
+    assert st.verb == "SORT" and st.file == "SORT-FILE"
+    assert st.input_proc == "1000-FILL"
+    assert st.output_proc == "2000-EMIT"
+    assert st.using == [] and st.giving == []
+
+
+def test_sort_using_giving_files():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           SORT WORK-FILE\n"
+        "               USING IN-FILE\n"
+        "               GIVING OUT-FILE\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert isinstance(st, SortStmt)
+    assert st.input_proc is None and st.output_proc is None
+    assert st.using == ["IN-FILE"] and st.giving == ["OUT-FILE"]
 
 
 def test_perform_until_captures_target_and_control():

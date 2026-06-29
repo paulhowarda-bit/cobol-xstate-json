@@ -118,6 +118,7 @@ constructs become real structure, so nothing is folded away.
 | `READ … AT END` / `INVALID KEY` | a guarded handler branch — the conditional flag-set is **conditional**, not folded |
 | `PERFORM p UNTIL/VARYING/TIMES`, inline `PERFORM` | a **loop** state (exit guard + body that loops back); `TEST AFTER` ⇒ do-while |
 | `PERFORM p` (simple) | call-return `entry` action `perform_p`; `p` is compiled as its own region |
+| `SORT/MERGE … INPUT/OUTPUT PROCEDURE` | `perform_input` → `sort_file` effect → `perform_output` (the procedures are call-returns); `USING`/`GIVING` & key order flagged |
 | `GO TO p` | exit `always` edge to `p` (no return); suppresses fall-through |
 | Fall-through / end of paragraph | eventless `always` edge to the next paragraph (or the shared `final`) |
 | `STOP RUN` / `GOBACK` / `EXIT PROGRAM` | `type: 'final'` |
@@ -190,7 +191,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 91 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 96 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -207,7 +208,8 @@ examples/           custrpt.cbl  (canonical batch loop)
                     altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
                     accum.cbl / nestperf.cbl (PERFORM-UNTIL & nested PERFORM call-return)
                     tblsum.cbl (OCCURS table: subscripted reads/writes)
-tests/              one module per pipeline stage (91 tests)
+                    sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
+tests/              one module per pipeline stage (96 tests)
 ```
 
 ## License

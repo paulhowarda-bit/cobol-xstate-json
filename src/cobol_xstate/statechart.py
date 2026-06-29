@@ -49,6 +49,7 @@ from .model import (
     Paragraph,
     PerformStmt,
     Program,
+    SortStmt,
     Stmt,
     TerminateStmt,
     walk_statements,
@@ -341,6 +342,8 @@ class _ParaCompiler:
             name = root or self._fresh("end")
             self.reg.state(name, f"{st.kind} (terminator)", st.line)
             return self._emit(name, {"type": "final", "meta": {"kind": st.kind, "cobolLine": st.line}})
+        if isinstance(st, SortStmt):
+            return self.compile_sort(st, after, root)
         if isinstance(st, IoStmt):
             return self.compile_io(st, after, root)
         if isinstance(st, ExecStmt):       # terminate (RETURN/ABEND) or transfer (XCTL)
@@ -450,6 +453,48 @@ class _ParaCompiler:
         if not edges:
             edges = [self._edge(after, "goto-empty", st.line)]
         return self._emit(name, {"always": edges})
+
+    def compile_sort(self, st: SortStmt, after: str, root: Optional[str]) -> str:
+        """SORT/MERGE as the control flow the compiler inserts: perform the INPUT
+        PROCEDURE (call-return), run the sort (an opaque effect), then perform the OUTPUT
+        PROCEDURE. USING/GIVING move records via compiler-managed file I/O (an effect)."""
+        name = root or self._fresh("sort")
+        entry: List[str] = []
+
+        def perform_proc(target: str, thru: Optional[str], phase: str) -> None:
+            thru_s = f" THRU {thru}" if thru else ""
+            entry.append(self.reg.action_named(
+                f"perform_{target}",
+                f"{st.verb} {phase} PROCEDURE {target}{thru_s}", st.line))
+            if thru:
+                self.ctx.flag(self.pname, st.line,
+                              f"{st.verb} {phase} PROCEDURE {target} THRU {thru}: only the "
+                              f"head paragraph {target} is performed; verify the THRU range")
+
+        if st.input_proc:
+            perform_proc(st.input_proc, st.input_thru, "INPUT")
+
+        sort_eff = self.reg.action_named(
+            f"{st.verb.lower()}_{_slug(st.file or 'FILE')}",
+            st.raw or f"{st.verb} {st.file or ''}".strip(), st.line)
+        entry.append(sort_eff)
+        self.ctx.flag(self.pname, st.line,
+                      f"{st.verb} on {st.file or '?'} is an opaque effect; record ordering "
+                      f"(ASCENDING/DESCENDING KEY) is not modeled")
+
+        if st.output_proc:
+            perform_proc(st.output_proc, st.output_thru, "OUTPUT")
+        if st.using:
+            self.ctx.flag(self.pname, st.line,
+                          f"{st.verb} USING {', '.join(st.using)}: records are read by the "
+                          f"sort automatically; that file data flow is not modeled")
+        if st.giving:
+            self.ctx.flag(self.pname, st.line,
+                          f"{st.verb} GIVING {', '.join(st.giving)}: sorted records are "
+                          f"written automatically; that file data flow is not modeled")
+
+        return self._emit(name, {"entry": entry,
+                                 "always": [self._edge(after, "sort", st.line)]})
 
     def compile_io(self, st: IoStmt, after: str, root: Optional[str]) -> str:
         name = root or self._fresh("io")

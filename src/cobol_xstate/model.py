@@ -122,6 +122,27 @@ class ExecStmt(Stmt):
 
 
 @dataclass
+class SortStmt(Stmt):
+    """SORT / MERGE with its compiler-inserted control flow.
+
+    A SORT runs (1) its INPUT PROCEDURE (which RELEASEs records) or reads USING files,
+    (2) the sort itself, then (3) its OUTPUT PROCEDURE (which RETURNs records, RETURN ...
+    AT END signalling exhaustion) or writes GIVING files. The procedures are PERFORMed -
+    call-return - so they map exactly like a simple PERFORM.
+    """
+
+    verb: str                    # 'SORT' | 'MERGE'
+    file: Optional[str] = None   # the sort/merge work file
+    input_proc: Optional[str] = None
+    input_thru: Optional[str] = None
+    output_proc: Optional[str] = None
+    output_thru: Optional[str] = None
+    using: List[str] = field(default_factory=list)
+    giving: List[str] = field(default_factory=list)
+    raw: str = ""
+
+
+@dataclass
 class TerminateStmt(Stmt):
     kind: str                   # 'STOP_RUN' | 'GOBACK' | 'EXIT_PROGRAM'
 

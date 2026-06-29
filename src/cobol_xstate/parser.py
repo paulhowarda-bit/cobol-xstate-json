@@ -41,6 +41,7 @@ from .model import (
     Paragraph,
     PerformStmt,
     Program,
+    SortStmt,
     Stmt,
     TerminateStmt,
 )
@@ -273,6 +274,8 @@ class StmtParser:
             return self.parse_perform()
         if v == "GO":
             return self.parse_goto()
+        if v in ("SORT", "MERGE"):
+            return self.parse_sort()
         if v in IO_VERBS:
             return self.parse_io()
         if v == "CALL":
@@ -616,6 +619,77 @@ class StmtParser:
         return names
 
     # -- I/O ---------------------------------------------------------------
+    # -- SORT / MERGE ------------------------------------------------------
+    _SORT_KEYWORDS = {
+        "INPUT", "OUTPUT", "USING", "GIVING", "ON", "ASCENDING", "DESCENDING", "KEY",
+        "WITH", "DUPLICATES", "IN", "ORDER", "COLLATING", "SEQUENCE", "IS", "THRU",
+        "THROUGH", "PROCEDURE",
+    }
+
+    def _sort_name(self):
+        """Read a single procedure/file name token (not a keyword or statement starter)."""
+        t = self._peek()
+        if t and t.kind == "word" and t.up not in self._SORT_KEYWORDS and t.up not in STARTERS:
+            return self._next()
+        return None
+
+    def parse_sort(self) -> Stmt:
+        vt = self._next()
+        verb, line = vt.up, vt.line
+        parts = [vt.text]
+        file_name = None
+        nt = self._peek()
+        if nt and nt.kind == "word" and nt.up not in STARTERS:
+            file_name = self._next().up
+            parts.append(file_name)
+
+        in_proc = in_thru = out_proc = out_thru = None
+        using: List[str] = []
+        giving: List[str] = []
+
+        def read_proc():
+            if self._peek() and self._peek().is_word("IS"):
+                self._next()
+            head = self._sort_name()
+            thru = None
+            if head and self._peek() and self._peek().up in ("THRU", "THROUGH"):
+                self._next()
+                tt = self._sort_name()
+                thru = tt.up if tt else None
+            return (head.up if head else None), thru
+
+        while not self._eof():
+            t = self._peek()
+            if t.kind == "period":
+                break
+            if t.kind == "word":
+                u = t.up
+                if u in STARTERS:
+                    break
+                if u == "INPUT" and self._peek(1) and self._peek(1).up == "PROCEDURE":
+                    self._next(); self._next()
+                    in_proc, in_thru = read_proc()
+                    continue
+                if u == "OUTPUT" and self._peek(1) and self._peek(1).up == "PROCEDURE":
+                    self._next(); self._next()
+                    out_proc, out_thru = read_proc()
+                    continue
+                if u in ("USING", "GIVING"):
+                    self._next()
+                    bucket = using if u == "USING" else giving
+                    while True:
+                        nm = self._sort_name()
+                        if nm is None:
+                            break
+                        bucket.append(nm.up)
+                    continue
+            self._next()  # skip ordering noise (ON ASCENDING KEY ..., COLLATING ...)
+
+        return SortStmt(line=line, verb=verb, file=file_name,
+                        input_proc=in_proc, input_thru=in_thru,
+                        output_proc=out_proc, output_thru=out_thru,
+                        using=using, giving=giving, raw=" ".join(parts))
+
     def parse_io(self) -> Stmt:
         verb_tok = self._next()
         verb = verb_tok.up
