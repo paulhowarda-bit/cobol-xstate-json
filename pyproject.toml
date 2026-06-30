@@ -23,3 +23,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the src/ layout on sys.path so `python -m pytest` works without installing the
+# package or setting PYTHONPATH (pytest >= 7).
+pythonpath = ["src"]
