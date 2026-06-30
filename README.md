@@ -114,9 +114,10 @@ constructs become real structure, so nothing is folded away.
 | Paragraph / section | an entry state; its body compiles to sub-states |
 | Straight-line run of `MOVE`/`ADD`/`OPEN`/… | one state's `entry` action-name list |
 | `IF … ELSE … END-IF` (incl. nested) | guarded `always` split to Then/Else sub-states converging on the continuation |
-| `EVALUATE … WHEN … WHEN OTHER` | guarded `always` per WHEN; each branch returns to the continuation |
+| `EVALUATE … WHEN … WHEN OTHER` | guarded `always` per WHEN; each branch returns to the continuation. `EVALUATE a ALSO b … WHEN x ALSO y` → `a = x AND b = y`; `THRU` ranges, abbreviated relations (`WHEN > 5`), and `ANY` handled |
+| `SEARCH` / `SEARCH ALL … WHEN … AT END` | each `WHEN` is a guarded branch to its body and `AT END` a guarded branch; the serial index iteration is an opaque effect (flagged) |
 | `READ … AT END` / `INVALID KEY` | a guarded handler branch — the conditional flag-set is **conditional**, not folded |
-| `PERFORM p UNTIL/VARYING/TIMES`, inline `PERFORM` | a **loop** state (exit guard + body that loops back); `TEST AFTER` ⇒ do-while |
+| `PERFORM p UNTIL/VARYING/TIMES`, inline `PERFORM` | a **loop** state (exit guard + body that loops back); `TEST AFTER` ⇒ do-while. `VARYING` initializes (`var := from`) and steps (`var := var + by`) the control variable; nested `AFTER` indices are flagged |
 | `PERFORM p` (simple) | call-return `entry` action `perform_p`; `p` is compiled as its own region |
 | `PERFORM p THRU q` | call-return into a range actor spanning paragraphs `p..q` (source order), returning after `q` |
 | `SORT/MERGE … INPUT/OUTPUT PROCEDURE` | `perform_input` → `sort_file` effect → `perform_output` (the procedures are call-returns, `THRU` ranges included); `USING`/`GIVING` & key order flagged |
@@ -161,7 +162,13 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   paragraph carries `member` in `provenance` — the diagram traces back to the right file.
   (Statement-level action/guard `member` is not yet threaded.) Embedded `EXEC SQL/CICS/DLI`
   is extracted opaquely — host vars preserved, `LINK`/`XCTL`/`RETURN`/`HANDLE` mapped to
-  call/transfer/terminate/flag — but the SQL/CICS sub-language itself isn't interpreted.
+  call/transfer/terminate/flag, and `SELECT`/`FETCH … INTO :host-vars` modeled as real
+  (external-sourced) input assignments to those host variables — but the rest of the
+  SQL/CICS sub-language is not interpreted.
+- **Robust at scale.** A paragraph whose body fails to parse does not abort the program
+  (or a batch of thousands): it is recovered as one opaque action and **flagged** (`body
+  did not parse …`), so a corpus of millions of lines converts without a hard stop and
+  every unrecovered spot is visible in `flags`.
 - **DECLARATIVES & CICS HANDLE are an orthogonal handler region, not main-flow code.** A
   `USE AFTER ERROR` procedure or a `HANDLE CONDITION` registration becomes a `type:'parallel'`
   machine: the `PROGRAM` region is the normal flow, and a `HANDLERS` region watches the
@@ -183,16 +190,23 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must
   implement these over a decimal type (COMP-3/zoned/binary per `data`), not float.
   Single-dimension elementary `OCCURS` is resolved: a table is an array, `TBL(I)` reads
-  (`elem`) and writes (`setElem`) by a literal or single-variable subscript, 1-based.
-  Group `OCCURS`, multi-dimension subscripts, and arithmetic subscripts (`TBL(I + 1)`)
-  are flagged / fall back, not guessed. `REDEFINES` is recorded but byte-aliasing (one
-  storage area read through a different PICTURE) is **not** modeled — flagged, never
-  silently reinterpreted.
-  Conditions cover relational/class/sign/88/AND-OR-NOT, COBOL *abbreviated* combined
-  relations (`IF A = 1 OR 2` → `A = 1 OR A = 2`, with the subject and operator — NOT
-  included — implied from the prior relation), and 88-level `VALUE lo THRU hi` ranges
-  (emitted as `lo <= x <= hi`). Forms still beyond this fall back to `{op:'raw'}`
-  (nothing dropped — flagged shape, routed to an external guard).
+  (`elem`) and writes (`setElem`), 1-based. Subscripts may be a literal, a variable, or an
+  **arithmetic expression** (`TBL(WS-I - 1)`, evaluated with the decimal runtime).
+  Multi-dimension subscripts (`TBL(I, J)`) and reference modification (`X(1:3)`) are kept
+  whole in the JSON contract (a faithful operand) but route to an external guard /
+  `notModeled` in the runnable JS rather than emitting a wrong reference. Group `OCCURS`
+  and nested subscripts are flagged / fall back, not guessed. `REDEFINES` is recorded and
+  **classified**: a same-category/size redefinition is reported as a safe value *alias*,
+  while a different-PICTURE/USAGE one is flagged as genuine byte reinterpretation (not
+  modeled — never silently reinterpreted; full byte-aliasing needs a byte buffer).
+  Conditions cover relational/class/sign/88/AND-OR-NOT, **decimal literals** (`> 500.00`),
+  **arithmetic-expression operands** (`WS-A + WS-B > WS-LIMIT`), parenthesized
+  sub-conditions, COBOL *abbreviated* combined relations (`IF A = 1 OR 2` → `A = 1 OR
+  A = 2`, with the subject and operator — NOT included — implied from the prior relation),
+  and 88-level `VALUE lo THRU hi` ranges (emitted as `lo <= x <= hi`). Forms still beyond
+  this fall back to `{op:'raw'}` — and a raw fallback **always emits a flag** (nothing is
+  left only in `semantics` where a flag-only triage would miss it), routed to an external
+  guard.
 - **Step semantics:** one record cycle = one macrostep, STATEMATE next-step sensing
   (a flag set this cycle is sensed next cycle). Same-cycle cross-region dependencies
   should be reviewed.
@@ -203,7 +217,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 107 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 120 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -223,7 +237,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
                     thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (107 tests)
+tests/              one module per pipeline stage (120 tests)
 ```
 
 ## License
