@@ -45,20 +45,36 @@ RUNTIME_IMPORT = "./cobolRuntime.mjs"
 _HELPERS = ("D", "add", "sub", "mul", "div", "pow", "store", "storeStr",
             "elem", "setElem", "rel", "isClass", "isSign", "notModeled")
 
-# A single-dimension OCCURS subscript: NAME(SUB) where SUB is one identifier or integer.
-_SUBSCRIPT = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)\(([A-Za-z0-9-]+)\)$")
+# An OCCURS subscript / reference-modification: NAME( inner ). `inner` may be one
+# identifier or integer (the common case), an arithmetic expression (TBL(I - 1)), or a
+# multi-dimension list (TBL(I, J)). The first two are emittable; multi-dimension is not
+# (the data dictionary models one OCCURS dimension), so it is routed out honestly.
+_SUBSCRIPT = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)\((.+)\)$")
+_SIMPLE_SUB = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 def _split_subscript(tok: str) -> Tuple[str, Optional[str]]:
+    """Return (name, inner) for a single-dimension subscript, else (tok, None). A
+    multi-dimension or reference-modification (`a:b`) subscript returns (tok, None) so the
+    caller degrades to an external guard / notModeled rather than emitting wrong JS."""
     m = _SUBSCRIPT.match(tok)
-    return (m.group(1), m.group(2)) if m else (tok, None)
+    if not m:
+        return tok, None
+    inner = m.group(2).strip()
+    if "," in inner or ":" in inner:   # multi-dimension or reference modification
+        return tok, None
+    return m.group(1), inner
 
 
 def _subscript_js(sub: str) -> str:
-    """JS for the subscript value: an integer literal, or a subscript variable's value."""
+    """JS for the subscript value: an integer literal, a subscript variable's value, or an
+    arithmetic subscript expression (TBL(I - 1)) evaluated with the decimal runtime.
+    Raises ``_ExprError`` if the subscript expression cannot be parsed."""
     if _is_num_literal(sub):
         return _js_str(sub)
-    return f"context[{_js_str(sub.upper())}]"
+    if _SIMPLE_SUB.match(sub):
+        return f"context[{_js_str(sub.upper())}]"
+    return _emit_numeric_expr(sub)   # arithmetic subscript -> a Dec; elem() coerces it
 
 _FIGURATIVE_NUM = {"ZERO": "0", "ZEROS": "0", "ZEROES": "0"}
 _FIGURATIVE_STR = {"SPACE": "", "SPACES": "", "ZERO": "0", "ZEROS": "0", "ZEROES": "0"}
@@ -353,6 +369,19 @@ def _operand_js(tok: str, fields: Dict[str, dict]) -> Tuple[str, bool]:
         fld = fields.get(name.upper())
         numeric = bool(fld and fld.get("category") == "numeric")
         return f"elem(context[{_js_str(name.upper())}], {_subscript_js(sub)})", numeric
+    # An arithmetic-expression operand (WS-A + WS-B, TBL(I) * 2): evaluate it with the
+    # decimal runtime and compare numerically. COBOL spaces binary operators, so a real
+    # operator is surrounded by whitespace - a hyphen inside WS-NET-PAY is not.
+    if re.search(r"\s(?:\*\*|[-+*/])\s|\*\*", tok):
+        try:
+            return _emit_numeric_expr(tok), True
+        except _ExprError:
+            pass
+    # A subscript / reference-modification we could not resolve faithfully (multi-dim,
+    # nested, ref-mod): do NOT emit context["TBL(I,J)"] (silently undefined) - signal the
+    # caller to route this to an external guard / notModeled instead.
+    if "(" in tok and up not in fields:
+        raise _ExprError(f"unresolved subscript operand {tok!r}")
     fld = fields.get(up)
     numeric = bool(fld and fld.get("category") == "numeric")
     return f"context[{_js_str(up)}]", numeric
@@ -361,6 +390,13 @@ def _operand_js(tok: str, fields: Dict[str, dict]) -> Tuple[str, bool]:
 def _emit_guard(tree: dict, fields: Dict[str, dict]) -> Optional[str]:
     """Boolean condition tree -> JS bool expression, or ``None`` if it can't be modeled
     (caller routes it to an external guard, honestly, rather than inventing a truth)."""
+    try:
+        return _emit_guard_inner(tree, fields)
+    except _ExprError:
+        return None  # an operand could not be faithfully emitted -> external guard
+
+
+def _emit_guard_inner(tree: dict, fields: Dict[str, dict]) -> Optional[str]:
     op = tree.get("op")
     if op == "and":
         parts = [_emit_guard(a, fields) for a in tree["args"]]

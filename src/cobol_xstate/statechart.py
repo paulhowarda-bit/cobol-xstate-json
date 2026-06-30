@@ -49,6 +49,7 @@ from .model import (
     Paragraph,
     PerformStmt,
     Program,
+    SearchStmt,
     SortStmt,
     Stmt,
     TerminateStmt,
@@ -158,10 +159,18 @@ class _BuildCtx:
                           f"{spec['verb']} ON SIZE ERROR - the overflow path must be "
                           f"replicated in the rewrite")
 
-    def record_guard(self, name: str, cond_text: str) -> None:
+    def record_guard(self, name: str, cond_text: str, para: str = "", line: int = 0) -> None:
         if name in self.guard_sem or not cond_text.strip():
             return
-        self.guard_sem[name] = parse_condition(cond_text, self.data)
+        tree = parse_condition(cond_text, self.data)
+        self.guard_sem[name] = tree
+        # Iron rule for scale: a condition we could not model into a Boolean tree must be
+        # surfaced as a flag, never left only in 'semantics' where a reviewer scanning
+        # 'flags' would miss it.
+        if tree.get("op") == "raw":
+            self.flag(para or "?", line,
+                      f"condition not fully modeled (left as raw): {cond_text.strip()} "
+                      f"- routed to an external guard; verify")
 
 
 def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
@@ -273,7 +282,7 @@ class _ParaCompiler:
         if isinstance(st, IoStmt):
             return not st.handlers
         if isinstance(st, ExecStmt):
-            return st.kind in ("effect", "call", "handle")
+            return st.kind in ("effect", "call", "handle", "input")
         if isinstance(st, ContinueStmt):
             return not st.next_sentence
         if isinstance(st, ExitStmt):
@@ -285,6 +294,13 @@ class _ParaCompiler:
         if isinstance(st, Action):
             name = reg.action(st.text, st.line)
             self.ctx.record_action(name, st.text, st.line, self.pname)
+            # STRING/UNSTRING are consumed opaquely up to their END- terminator; an inner
+            # ON OVERFLOW is a conditional branch we fold away - flag it so it is not
+            # silently lost (SEARCH is modeled as real structure, see compile_search).
+            if st.verb in ("STRING", "UNSTRING") and re.search(r"\bOVERFLOW\b", st.text, re.I):
+                self.ctx.flag(self.pname, st.line,
+                              f"{st.verb} ON OVERFLOW handler is folded into the opaque "
+                              f"action; its conditional branch is not modeled - verify")
             return [name]
         if isinstance(st, CallStmt):
             return [_call_action(st, self.ctx, self.pname)]
@@ -322,10 +338,20 @@ class _ParaCompiler:
         base = f"link_{st.target}" if st.kind == "call" and st.target else \
             f"exec_{st.lang.lower()}_{st.verb.lower()}"
         name = self.reg.action_named(base, f"EXEC {st.lang} {st.text} END-EXEC", st.line)
-        self.ctx.action_sem.setdefault(name, {
-            "verb": st.verb, "kind": f"exec-{st.lang.lower()}",
-            "hostVars": st.host_vars, "raw": f"EXEC {st.lang} {st.text} END-EXEC",
-        })
+        if st.kind == "input" and st.into_vars:
+            # SELECT/FETCH ... INTO: the DB row populates the host variables - a real
+            # (external-sourced) assignment to each, not an opaque effect.
+            self.ctx.action_sem[name] = {
+                "verb": st.verb, "kind": "input",
+                "assignments": [{"target": v, "expr": "<external: SQL row>"}
+                                for v in st.into_vars],
+                "raw": f"EXEC {st.lang} {st.text} END-EXEC",
+            }
+        else:
+            self.ctx.action_sem.setdefault(name, {
+                "verb": st.verb, "kind": f"exec-{st.lang.lower()}",
+                "hostVars": st.host_vars, "raw": f"EXEC {st.lang} {st.text} END-EXEC",
+            })
         if st.kind == "handle":
             self.ctx.flag(self.pname, st.line,
                           f"EXEC {st.lang} {st.verb} registers implicit handler(s) "
@@ -351,6 +377,8 @@ class _ParaCompiler:
             return self._emit(name, {"type": "final", "meta": {"kind": st.kind, "cobolLine": st.line}})
         if isinstance(st, SortStmt):
             return self.compile_sort(st, after, root)
+        if isinstance(st, SearchStmt):
+            return self.compile_search(st, after, root)
         if isinstance(st, IoStmt):
             return self.compile_io(st, after, root)
         if isinstance(st, ExecStmt):       # terminate (RETURN/ABEND) or transfer (XCTL)
@@ -381,7 +409,7 @@ class _ParaCompiler:
         name = root or self._fresh("if")
         g = self.reg.guard(st.cond_text, st.line) if st.cond_text.strip() else None
         if g:
-            self.ctx.record_guard(g, st.cond_text)
+            self.ctx.record_guard(g, st.cond_text, self.pname, st.line)
         then_e = self.compile_block(st.then_body, after)
         else_e = self.compile_block(st.else_body, after) if st.else_body else after
         edges = [self._edge(then_e, "if-then", st.line, guard=g),
@@ -392,11 +420,12 @@ class _ParaCompiler:
         name = root or self._fresh("eval")
         edges = []
         for cond, body in st.whens:
-            full = f"{st.subject} = {cond}" if st.subject and cond else (cond or st.subject)
+            full = _evaluate_when_condition(st.subject, cond)
             g = self.reg.guard(full, st.line) if full.strip() else None
             if g:
-                self.ctx.record_guard(g, full)
+                self.ctx.record_guard(g, full, self.pname, st.line)
             tgt = self.compile_block(body, after) if body else after
+            # A WHEN whose every object is ANY (no condition text) always matches.
             edges.append(self._edge(tgt, "when", st.line, guard=g))
         if st.other_body is not None:
             edges.append(self._edge(self.compile_block(st.other_body, after),
@@ -407,10 +436,52 @@ class _ParaCompiler:
         return self._emit(name, {"always": edges})
 
     def compile_loop(self, st: PerformStmt, after: str, root: Optional[str]) -> str:
+        varying = _parse_varying(st.control_text) if st.kind == "varying" else []
+        until = _until_text(st.control_text)
+        # Name the guard from the full control clause (stable name); model its semantics
+        # from the bounded UNTIL condition (so a VARYING ... AFTER doesn't over-capture).
         g = self.reg.guard(st.control_text or f"{st.kind} clause", st.line)
-        m = re.search(r"\bUNTIL\b\s*(.+)$", st.control_text, re.I)
-        if m:
-            self.ctx.record_guard(g, m.group(1))
+        if until:
+            self.ctx.record_guard(g, until, self.pname, st.line)
+
+        if varying:
+            # PERFORM VARYING is test-before: init the control variable, test, run body,
+            # step (var := var + by), retest. The init state is the loop's entry (so
+            # inbound transitions land on it); head/body/step are fresh.
+            if st.test_after:
+                self.ctx.flag(self.pname, st.line,
+                              "PERFORM VARYING WITH TEST AFTER - modeled as test-before "
+                              "init/step; verify the first-iteration semantics")
+            if len(varying) > 1:
+                inner = ", ".join(v[0] for v in varying[1:])
+                self.ctx.flag(self.pname, st.line,
+                              f"PERFORM VARYING ... AFTER ({inner}): only the primary index "
+                              f"{varying[0][0]} is stepped; nested index iteration is not "
+                              f"modeled - verify the inner loops")
+            head = self._fresh("loop")
+            var, frm, by = varying[0]
+            step = self.reg.action(f"ADD {by} TO {var}", st.line)
+            self.ctx.record_action(step, f"ADD {by} TO {var}", st.line, self.pname)
+            loop_back = self._emit(self._fresh("vstep"),
+                                   {"entry": [step],
+                                    "always": [self._edge(head, "loop-step", st.line)]})
+            if st.inline_body:
+                body_entry = self.compile_block(st.inline_body, loop_back)
+            else:
+                state = {"always": [self._edge(loop_back, "loop-iter", st.line)]}
+                if st.target:
+                    state["entry"] = [self._perform_action(st)]
+                body_entry = self._emit(self._fresh("iter"), state)
+            self._emit(head, {"always": [
+                self._edge(after, "loop-exit", st.line, guard=g),
+                self._edge(body_entry, "loop-body", st.line),
+            ]})
+            init = self.reg.action(f"MOVE {frm} TO {var}", st.line)
+            self.ctx.record_action(init, f"MOVE {frm} TO {var}", st.line, self.pname)
+            return self._emit(root or self._fresh("vinit"),
+                              {"entry": [init],
+                               "always": [self._edge(head, "loop-init", st.line)]})
+
         if st.test_after:                      # do-while: run body, then test
             head = self._fresh("loop")
             body_root = root
@@ -502,6 +573,36 @@ class _ParaCompiler:
         return self._emit(name, {"entry": entry,
                                  "always": [self._edge(after, "sort", st.line)]})
 
+    def compile_search(self, st: SearchStmt, after: str, root: Optional[str]) -> str:
+        """SEARCH / SEARCH ALL as real guarded structure: each WHEN is a guarded branch to
+        its body, AT END is a guarded branch (table-exhausted is a runtime condition routed
+        to an external guard), then fall-through. The serial index iteration itself is an
+        opaque effect - flagged, not faked as a loop."""
+        name = root or self._fresh("search")
+        verb = "SEARCH ALL" if st.all else "SEARCH"
+        effect = self.reg.action_named(
+            f"search_{_slug(st.table)}", f"{verb} {st.table}", st.line)
+        edges = []
+        for cond, body in st.whens:
+            g = self.reg.guard(cond, st.line) if cond.strip() else None
+            if g:
+                self.ctx.record_guard(g, cond, self.pname, st.line)
+            tgt = self.compile_block(body, after) if body else after
+            edges.append(self._edge(tgt, "search-when", st.line, guard=g))
+        if st.at_end_body:
+            gend = self.reg.guard_named(
+                f"{_slug(st.table)}_searchAtEnd",
+                f"{verb} {st.table} exhausted (AT END) - runtime", st.line)
+            tgt = self.compile_block(st.at_end_body, after)
+            edges.append(self._edge(tgt, "search-at-end", st.line, guard=gend))
+        edges.append(self._edge(after, "search-continue", st.line,
+                                note="no WHEN matched / fell through"))
+        self.ctx.flag(self.pname, st.line,
+                      f"{verb} on {st.table}: WHEN/AT END branches are modeled as guarded "
+                      f"edges, but the index iteration (advance until match) is an opaque "
+                      f"effect - verify the loop/index behavior")
+        return self._emit(name, {"entry": [effect], "always": edges})
+
     def compile_io(self, st: IoStmt, after: str, root: Optional[str]) -> str:
         name = root or self._fresh("io")
         edges = []
@@ -511,6 +612,73 @@ class _ParaCompiler:
             edges.append(self._edge(tgt, "io-handler", st.line, guard=g, note=key))
         edges.append(self._edge(after, "io-continue", st.line, note="normal (no condition)"))
         return self._emit(name, {"entry": [_io_action(st, self.reg)], "always": edges})
+
+
+_VARYING_RE = re.compile(
+    r"\b(?:VARYING|AFTER)\s+([A-Z0-9][A-Z0-9-]*)\s+FROM\s+(\S+)\s+BY\s+(\S+)", re.I)
+
+
+def _parse_varying(control: str):
+    """Extract (var, from, by) for the primary VARYING and each AFTER clause."""
+    return [(v.upper(), frm, by) for v, frm, by in _VARYING_RE.findall(control or "")]
+
+
+def _until_text(control: str) -> str:
+    """The primary UNTIL condition, bounded before any AFTER clause."""
+    m = re.search(r"\bUNTIL\b\s+(.+?)(?:\s+AFTER\b|$)", control or "", re.I)
+    return m.group(1).strip() if m else ""
+
+
+def _redefines_compatible(item, target) -> bool:
+    """True when a REDEFINES item has the same category/size as what it redefines, so it is
+    a value alias rather than a genuine byte reinterpretation across different PICTUREs."""
+    if target is None:
+        return False
+    a, b = getattr(item, "type", None), getattr(target, "type", None)
+    if a is None or b is None:
+        return getattr(item, "is_group", False) and getattr(target, "is_group", False)
+    if a.category != b.category:
+        return False
+    if a.category.startswith("numeric"):
+        return (a.digits, a.scale, a.usage) == (b.digits, b.scale, b.usage)
+    return a.pic == b.pic  # alphanumeric/alphabetic: same picture => same length
+
+
+def _evaluate_when_condition(subject: str, when: str) -> str:
+    """Build the Boolean condition text for one EVALUATE WHEN, honoring multiple operands
+    (``EVALUATE a ALSO b ... WHEN x ALSO y`` -> ``a = x AND b = y``), ``EVALUATE TRUE``
+    (the objects are conditions), ``THRU`` ranges, abbreviated relations (``WHEN > 5``),
+    and ``ANY`` (matches anything -> dropped from the conjunction)."""
+    subjects = [s.strip() for s in re.split(r"\bALSO\b", subject or "", flags=re.I)]
+    objects = [o.strip() for o in re.split(r"\bALSO\b", when or "", flags=re.I)]
+    pieces: List[str] = []
+    for idx, obj in enumerate(objects):
+        subj = subjects[idx] if idx < len(subjects) else (subjects[-1] if subjects else "")
+        piece = _evaluate_pair(subj, obj)
+        if piece:
+            pieces.append(piece)
+    if not pieces:
+        return ""  # all ANY (or empty) -> an unconditional WHEN
+    return " AND ".join(f"({p})" for p in pieces) if len(pieces) > 1 else pieces[0]
+
+
+def _evaluate_pair(subj: str, obj: str) -> str:
+    obj = obj.strip()
+    up = obj.upper()
+    su = subj.strip().upper()
+    if not obj or up == "ANY":
+        return ""
+    if su == "TRUE":     # EVALUATE TRUE: each object is itself a condition
+        return obj
+    if su == "FALSE":    # EVALUATE FALSE: the object is a condition that must be false
+        return f"NOT ( {obj} )"
+    m = re.match(r"(.+?)\s+(?:THRU|THROUGH)\s+(.+)$", obj, re.I)
+    if m:               # WHEN lo THRU hi -> subj >= lo AND subj <= hi
+        return f"{subj} >= {m.group(1).strip()} AND {subj} <= {m.group(2).strip()}"
+    if re.match(r"^(NOT\s+)?(>=|<=|<>|[<>=])", up) or \
+            re.match(r"^(NOT\s+)?(GREATER|LESS|EQUAL|EQUALS|EQ|GT|LT|GE|LE|NE)\b", up):
+        return f"{subj} {obj}"   # abbreviated relation: WHEN > 5  ->  subj > 5
+    return f"{subj} = {obj}"
 
 
 def _compute_alter_targets(program: Program, ctx: _BuildCtx) -> None:
@@ -688,10 +856,18 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
                      f"OCCURS on group {it.name}: subscripting its subordinate items "
                      f"is not modeled (only elementary-item OCCURS is)")
         if it.redefines:
-            ctx.flag(it.section or "DATA", it.line,
-                     f"{it.name} REDEFINES {it.redefines}: the two share storage, but "
-                     f"byte-aliasing (reading one PICTURE's bytes through another) is not "
-                     f"modeled - {it.name} is an independent context field; verify")
+            tgt = ctx.data.get(it.redefines)
+            if _redefines_compatible(it, tgt):
+                ctx.flag(it.section or "DATA", it.line,
+                         f"{it.name} REDEFINES {it.redefines}: same category/size - it can "
+                         f"be treated as a value ALIAS of {it.redefines}. Modeled as an "
+                         f"independent context field; if the program writes one and reads "
+                         f"the other, mirror the value")
+            else:
+                ctx.flag(it.section or "DATA", it.line,
+                         f"{it.name} REDEFINES {it.redefines}: DIFFERENT PICTURE/USAGE - "
+                         f"reading one layout's bytes through another (byte reinterpretation) "
+                         f"is NOT modeled; {it.name} is an independent field - review manually")
         if it.level in (88, 66) or it.is_group or it.pic is None:
             continue
         val = _initial_value(it)
@@ -708,6 +884,10 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         ctx.reg.state(para.name, f"paragraph {para.name}"
                       + (f" (section {para.section})" if para.section else ""),
                       para.line, member=para.origin)
+        if getattr(para, "parse_error", None):
+            ctx.flag(para.name, para.line,
+                     f"paragraph body did not parse ({para.parse_error}); recovered as one "
+                     f"opaque action - logic here is NOT modeled; review manually")
         cont = names[idx + 1] if idx + 1 < len(names) else _END
         _ParaCompiler(ctx, para).compile(cont)
 
