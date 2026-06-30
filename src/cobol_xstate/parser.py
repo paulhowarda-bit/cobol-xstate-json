@@ -41,6 +41,7 @@ from .model import (
     Paragraph,
     PerformStmt,
     Program,
+    SearchStmt,
     SortStmt,
     Stmt,
     TerminateStmt,
@@ -59,9 +60,10 @@ CONTROL_VERBS: Set[str] = {
 }
 STARTERS: Set[str] = ACTION_VERBS | CONTROL_VERBS
 
-# Verbs consumed opaquely up to their END- terminator (they carry inner WHEN / AT END
-# / ON OVERFLOW clauses we do not model in v0.1).
-OPAQUE_SCOPED = {"SEARCH": "END-SEARCH", "STRING": "END-STRING", "UNSTRING": "END-UNSTRING"}
+# Verbs consumed opaquely up to their END- terminator (STRING/UNSTRING carry an inner
+# ON OVERFLOW clause that the statechart stage flags). SEARCH is parsed structurally
+# (its WHEN/AT END branches are real control flow) - see parse_search.
+OPAQUE_SCOPED = {"STRING": "END-STRING", "UNSTRING": "END-UNSTRING"}
 
 IO_VERBS = {"READ", "WRITE", "REWRITE", "DELETE", "START", "RETURN"}
 
@@ -208,7 +210,15 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
             bucket_lines[-1].append(cl)
 
     for para, plines in zip(buckets, bucket_lines):
-        para.statements = StmtParser(tokenize(plines)).parse_paragraph()
+        # Robustness at scale: an unparseable paragraph must not abort the whole program
+        # (or a batch of thousands). On failure, fall back to one opaque action carrying
+        # the raw text and mark the paragraph so the statechart stage can flag it.
+        try:
+            para.statements = StmtParser(tokenize(plines)).parse_paragraph()
+        except Exception as exc:  # noqa: BLE001 - deliberate catch-all for corpus safety
+            raw = " ".join(cl.text.strip() for cl in plines).strip()
+            para.statements = [Action(line=para.line, text=raw[:200], verb="?")]
+            para.parse_error = f"{type(exc).__name__}: {exc}"
 
     if buckets and buckets[0].name == "_ENTRY_" and not buckets[0].statements:
         buckets.pop(0)
@@ -339,6 +349,8 @@ class StmtParser:
             return self.parse_goto()
         if v in ("SORT", "MERGE"):
             return self.parse_sort()
+        if v == "SEARCH":
+            return self.parse_search()
         if v in IO_VERBS:
             return self.parse_io()
         if v == "CALL":
@@ -470,6 +482,44 @@ class StmtParser:
                     break
             parts.append(self._next().text)
         return " ".join(parts)
+
+    # -- SEARCH ------------------------------------------------------------
+    def parse_search(self) -> Stmt:
+        line = self._next().line  # SEARCH
+        is_all = False
+        if self._peek() and self._peek().is_word("ALL"):
+            self._next()
+            is_all = True
+        table = None
+        if self._peek() and self._peek().kind == "word" and self._peek().up not in STARTERS:
+            table = self._next().up
+        varying = None
+        if self._peek() and self._peek().is_word("VARYING"):
+            self._next()
+            if self._peek() and self._peek().kind == "word":
+                varying = self._next().up
+        st = SearchStmt(line=line, table=table or "?", all=is_all, varying=varying)
+        # AT END handler and WHEN branches, in any order, until END-SEARCH / period.
+        while not self._eof():
+            t = self._peek()
+            if t.kind == "period":
+                break
+            if t.is_word("END-SEARCH"):
+                self._next()
+                break
+            if t.up == "AT" and self._peek(1) and self._peek(1).is_word("END"):
+                self._next(); self._next()
+                st.at_end_body = self.parse_block(stops={"WHEN"})
+                continue
+            if t.is_word("WHEN"):
+                self._next()
+                cond = self._collect_condition_when()
+                body = self.parse_block(stops={"WHEN"})
+                st.whens.append((cond.strip(), body))
+                continue
+            # Stray token inside SEARCH: consume to make progress.
+            self._next()
+        return st
 
     def _collect_until_word(self, words: Set[str]) -> str:
         parts: List[str] = []
@@ -648,6 +698,7 @@ class StmtParser:
                 host_vars.append(":" + toks[idx + 1].text.upper())
 
         kind, target, conditions = "effect", None, []
+        into_vars: List[str] = []
         if lang == "CICS":
             if verb in ("RETURN", "ABEND"):
                 kind = "terminate"
@@ -658,10 +709,42 @@ class StmtParser:
             elif verb == "HANDLE":
                 kind = "handle"
                 conditions = self._exec_handle_conditions(toks)
-        elif lang == "SQL" and verb == "WHENEVER":
-            kind = "handle"
+        elif lang == "SQL":
+            if verb == "WHENEVER":
+                kind = "handle"
+            elif verb in ("SELECT", "FETCH"):
+                # SELECT/FETCH ... INTO :a, :b ... FROM/WHERE: the DB populates the host
+                # variables. Capture them so the action models a real (external) input.
+                into_vars = self._exec_into_vars(toks)
+                if into_vars:
+                    kind = "input"
         return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
-                        target=target, host_vars=host_vars, conditions=conditions)
+                        target=target, host_vars=host_vars, conditions=conditions,
+                        into_vars=into_vars)
+
+    @staticmethod
+    def _exec_into_vars(toks: List[Token]) -> List[str]:
+        """Collect the :host-vars in the INTO clause of a SELECT/FETCH (up to the next
+        clause keyword)."""
+        out: List[str] = []
+        i = 0
+        while i < len(toks):
+            if toks[i].kind == "word" and toks[i].up == "INTO":
+                i += 1
+                while i < len(toks):
+                    t = toks[i]
+                    if t.kind == "word" and t.up in ("FROM", "WHERE", "ORDER", "GROUP",
+                                                     "HAVING", "FOR"):
+                        break
+                    if t.kind == "punct" and t.text == ":" and i + 1 < len(toks) \
+                            and toks[i + 1].kind == "word":
+                        out.append(toks[i + 1].up)
+                        i += 2
+                        continue
+                    i += 1
+                break
+            i += 1
+        return out
 
     @staticmethod
     def _exec_program(toks: List[Token]) -> Optional[str]:

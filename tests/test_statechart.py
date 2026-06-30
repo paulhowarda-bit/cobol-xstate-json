@@ -2,7 +2,17 @@ import json
 from pathlib import Path
 
 from cobol_xstate.parser import parse_program
-from cobol_xstate.statechart import build_machine
+from cobol_xstate.statechart import build_machine, _evaluate_when_condition
+
+
+def test_evaluate_also_thru_any_and_true_build_correct_conditions():
+    # EVALUATE a ALSO b ... WHEN x ALSO y  ->  a = x AND b = y
+    assert _evaluate_when_condition("A ALSO B", "1 ALSO 2") == "(A = 1) AND (B = 2)"
+    # THRU range, ANY (dropped), abbreviated relation, EVALUATE TRUE (object is a condition)
+    assert _evaluate_when_condition("WS-N", "1 THRU 5") == "WS-N >= 1 AND WS-N <= 5"
+    assert _evaluate_when_condition("A ALSO B", "1 ALSO ANY") == "A = 1"
+    assert _evaluate_when_condition("WS-N", "> 100") == "WS-N > 100"
+    assert _evaluate_when_condition("TRUE", "WS-X > 5") == "WS-X > 5"
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
@@ -85,6 +95,34 @@ def test_terminator_marks_final():
         "           STOP RUN.\n"
     )
     assert machine.config["states"]["0000-MAIN"].get("type") == "final"
+
+
+def test_search_when_and_at_end_are_real_guarded_branches():
+    src = """       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SRCHT.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-TAB.
+          05 WS-ENT OCCURS 5 PIC 99.
+       01 WS-IDX PIC 99 VALUE 1.
+       01 WS-FOUND PIC X VALUE 'N'.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           SEARCH WS-ENT VARYING WS-IDX
+               AT END MOVE 'N' TO WS-FOUND
+               WHEN WS-ENT (WS-IDX) = 42
+                   MOVE 'Y' TO WS-FOUND
+           END-SEARCH
+           STOP RUN.
+"""
+    machine = _machine(src)
+    kinds = [e["meta"]["kind"] for _, e in _all_edges(machine)]
+    # WHEN -> a guarded branch; AT END -> a guarded branch; plus a fall-through.
+    assert "search-when" in kinds and "search-at-end" in kinds and "search-continue" in kinds
+    # The WHEN condition became a real guard (not an opaque action).
+    assert machine.semantics["guards"]
+    # The opaque index iteration is flagged, not silently dropped.
+    assert any("SEARCH" in f["message"] and "index" in f["message"] for f in machine.flags)
 
 
 def test_dynamic_call_resolved_by_constant_propagation():

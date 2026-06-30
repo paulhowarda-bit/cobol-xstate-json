@@ -23,17 +23,53 @@ from typing import Dict, List, Optional
 
 _NUM = re.compile(r"^[+-]?\d+(\.\d+)?$")
 
-# Single-dimension OCCURS subscript: collapse `NAME ( SUB )` -> `NAME(SUB)` so the
-# reference survives whitespace splitting downstream (SUB = one identifier or integer).
-_SUBNORM = re.compile(r"([A-Za-z][A-Za-z0-9-]*)\s*\(\s*([A-Za-z0-9-]+)\s*\)")
+# A subscripted / reference-modified reference: collapse the space between the name and
+# its `(` so `NAME ( ... )` survives downstream whitespace splitting as one token. The
+# inner content (a subscript list `I, J`, an arithmetic subscript `I - 1`, or a
+# reference modification `1:3`) is preserved verbatim, only edge-trimmed. We must NOT do
+# this for a logical/keyword `WORD ( sub-condition )` - excluded by reserved-word and a
+# relational-operator check so `AND ( A < 1 )` stays a grouped condition.
+_SUBNORM = re.compile(r"([A-Za-z][A-Za-z0-9-]*)\s+\(\s*([^()]*?)\s*\)")
+_RESERVED_BEFORE_PAREN = {
+    "AND", "OR", "NOT", "IF", "WHEN", "UNTIL", "WHILE", "THEN", "ELSE", "TO", "FROM",
+    "GIVING", "BY", "INTO", "THAN", "EQUAL", "GREATER", "LESS", "IS", "ALSO", "OF", "IN",
+}
 
 
 def _norm_subscripts(s: str) -> str:
-    return _SUBNORM.sub(r"\1(\2)", s)
+    def repl(m):
+        name, content = m.group(1), m.group(2).strip()
+        if name.upper() in _RESERVED_BEFORE_PAREN:
+            return m.group(0)
+        if re.search(r"[<>]|(?<![A-Za-z0-9-])=", content):  # a relation -> sub-condition
+            return m.group(0)
+        content = re.sub(r"\s*,\s*", ",", content)  # tighten a subscript list: I, J -> I,J
+        return f"{name}({content})"
+    return _SUBNORM.sub(repl, s)
 
 
 def _operands(s: str) -> List[str]:
-    return [t for t in re.split(r"[\s,]+", s.strip()) if t]
+    """Split an operand list on whitespace/commas, but NOT on commas or spaces that sit
+    inside parentheses (so a subscript ``TBL(I,J)`` or ref-mod ``X(1:3)`` stays whole)."""
+    out: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    for ch in s.strip():
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif depth == 0 and (ch.isspace() or ch == ","):
+            if buf:
+                out.append("".join(buf))
+                buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
 
 
 def _is_literal(tok: str) -> bool:
@@ -227,10 +263,29 @@ _SIGN = {"POSITIVE", "NEGATIVE", "ZERO"}
 
 
 def _ctokens(s: str) -> List[str]:
-    # NAME(SUB) is one token (an OCCURS subscript) so a relational operand keeps it whole.
+    # Token classes, longest/most-specific first so they win at each scan position:
+    #   * string literals
+    #   * a subscripted / reference-modified reference - NAME( ... ) - kept WHOLE (incl.
+    #     inner spaces, commas, and arithmetic) so a relational operand survives intact
+    #   * decimal or integer numeric literals (the decimal point must not split the token)
+    #   * multi-char then single-char operators (** >= <= <>  + - * / = > < ( ))
+    #   * a COBOL word (data-name / keyword)
     return re.findall(
-        r"'[^']*'|\"[^\"]*\"|[A-Za-z][A-Za-z0-9-]*\([A-Za-z0-9-]+\)"
-        r"|>=|<=|<>|[=><]|[A-Za-z0-9][A-Za-z0-9-]*", s)
+        r"'[^']*'|\"[^\"]*\""
+        r"|[A-Za-z][A-Za-z0-9-]*\([^)]*\)"
+        r"|\d+(?:\.\d+)?"
+        r"|\*\*|>=|<=|<>|[-+*/=><()]"
+        r"|[A-Za-z][A-Za-z0-9-]*",
+        s)
+
+
+_ARITH_OPS = {"+", "-", "*", "/", "**"}
+
+
+def _norm_operand(s: str) -> str:
+    """Uppercase an operand reference, but leave literals (and arithmetic expressions
+    containing them) spelled as written."""
+    return s if _is_literal(s) else s.upper()
 
 
 def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
@@ -283,6 +338,20 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
     def _norm(tok):
         return tok if _is_literal(tok) else tok.upper()
 
+    def read_operand():
+        """Consume one relational operand: a primary term, then any run of arithmetic
+        operators + terms (``A``, ``18.5``, ``TBL(I)``, ``WS-A + WS-B``). Stops before a
+        relational operator, a logical connective, or a class/sign keyword."""
+        if peek() is None:
+            return None
+        parts = [adv()]
+        while peek() in _ARITH_OPS:
+            parts.append(adv())            # arithmetic operator
+            if peek() is None:
+                break
+            parts.append(adv())            # next term
+        return " ".join(parts)
+
     def _read_rel_op():
         """Consume a relational operator (worded or symbolic) and return its canonical
         form, or None. Handles a leading NOT (``NOT =``) as relation negation."""
@@ -303,10 +372,10 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
         return None, False
 
     def _rel_node(left, rel, neg):
-        right = adv() if peek() is not None else "?"
-        subj = _norm(left) if isinstance(left, str) else left
+        right = read_operand() if peek() is not None else "?"
+        subj = _norm_operand(left) if isinstance(left, str) else left
         last["subject"], last["rel"], last["neg"] = subj, rel, neg
-        node = {"op": "rel", "left": subj, "rel": rel, "right": _norm(right)}
+        node = {"op": "rel", "left": subj, "rel": rel, "right": _norm_operand(right)}
         return {"op": "not", "arg": node} if neg else node
 
     def _condname_node(di, name):
@@ -333,7 +402,7 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
             rel, neg = _read_rel_op()
             if rel is not None:
                 return _rel_node(last["subject"], rel, neg)
-        left = adv()
+        left = read_operand()
         nxt = peek()
         # class / sign condition: A [IS] [NOT] NUMERIC|POSITIVE|...
         save = pos
@@ -364,7 +433,7 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
         if last["subject"] is not None and last["rel"] is not None \
                 and (_is_literal(left) or di is not None):
             node = {"op": "rel", "left": last["subject"], "rel": last["rel"],
-                    "right": _norm(left)}
+                    "right": _norm_operand(left)}
             return {"op": "not", "arg": node} if last["neg"] else node
         return {"op": "cond-name", "name": left.upper()}
 

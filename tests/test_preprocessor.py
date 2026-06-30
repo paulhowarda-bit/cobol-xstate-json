@@ -139,6 +139,16 @@ def test_exec_sql_host_variables_captured():
     assert ":WS-NAME" in st.host_vars and ":WS-ID" in st.host_vars
 
 
+def test_exec_sql_select_into_captures_targets_and_is_input():
+    st = _stmts("           EXEC SQL\n"
+                "               SELECT NAME, BAL INTO :WS-NAME, :WS-BAL\n"
+                "               FROM ACCT WHERE ID = :WS-ID\n"
+                "           END-EXEC.\n")[0]
+    assert isinstance(st, ExecStmt) and st.kind == "input"
+    # INTO targets (the DB-populated host vars), not the WHERE-clause :WS-ID.
+    assert st.into_vars == ["WS-NAME", "WS-BAL"]
+
+
 def test_exec_cics_link_is_call_and_xctl_is_transfer():
     link = _stmts("           EXEC CICS LINK PROGRAM('POSTLOG') END-EXEC.\n")[0]
     assert link.kind == "call" and link.target == "POSTLOG"

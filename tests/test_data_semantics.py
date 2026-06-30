@@ -130,6 +130,49 @@ def test_full_relation_after_connective_is_not_abbreviated():
     assert tree["args"][1] == {"op": "rel", "left": "B", "rel": "=", "right": "2"}
 
 
+def test_decimal_literal_operand_is_not_broken_by_the_point():
+    # The decimal point must not split the literal into 500 / 00 (which forced a raw
+    # fallback before): a comparison against a decimal constant is a real relation.
+    assert parse_condition("B-PATIENT-WGT > 500.00") == {
+        "op": "rel", "left": "B-PATIENT-WGT", "rel": ">", "right": "500.00"}
+    assert parse_condition("H-BMI < 18.5") == {
+        "op": "rel", "left": "H-BMI", "rel": "<", "right": "18.5"}
+
+
+def test_arithmetic_expression_operand_in_condition():
+    # A relational operand may be an arithmetic expression (not just a single term).
+    assert parse_condition("WS-A + WS-B > WS-LIMIT") == {
+        "op": "rel", "left": "WS-A + WS-B", "rel": ">", "right": "WS-LIMIT"}
+
+
+def test_parenthesized_relations_join_with_connective():
+    # ( rel ) AND ( rel ) - parentheses group sub-conditions; decimals inside must work.
+    tree = parse_condition("( H-PATIENT-AGE > 17 ) AND ( H-BMI < 18.5 )")
+    assert tree["op"] == "and"
+    assert tree["args"][0] == {"op": "rel", "left": "H-PATIENT-AGE", "rel": ">", "right": "17"}
+    assert tree["args"][1] == {"op": "rel", "left": "H-BMI", "rel": "<", "right": "18.5"}
+
+
+def test_logical_keyword_before_paren_is_not_a_subscript():
+    # AND ( ... ) must not be mis-tokenized as a subscripted reference AND(...).
+    tree = parse_condition("A = 1 AND ( B = 2 )")
+    assert tree["op"] == "and" and len(tree["args"]) == 2
+
+
+def test_arithmetic_and_multidim_subscript_operands_are_kept_whole():
+    # A subscript that is an arithmetic expression or a multi-dimension list is preserved
+    # as a single relational operand (faithful), not split into a raw fallback.
+    assert parse_condition("W-SUB1 > WWM-PTR ( WWM-INDX - 1 )") == {
+        "op": "rel", "left": "W-SUB1", "rel": ">", "right": "WWM-PTR(WWM-INDX - 1)"}
+    assert parse_condition("TBL ( I , J ) = 5") == {
+        "op": "rel", "left": "TBL(I,J)", "rel": "=", "right": "5"}
+
+
+def test_unmodelable_condition_falls_back_to_raw_honestly():
+    # A nested subscript is beyond this static recovery: raw, not a wrong guess.
+    assert parse_condition("TBL(IDX(I)) = 1")["op"] == "raw"
+
+
 def test_88_value_thru_is_a_range_not_two_singletons():
     src = (
         "       IDENTIFICATION DIVISION.\n"
@@ -175,7 +218,8 @@ def test_occurs_seeds_context_as_array():
     assert machine.data["TBL-AMT"]["occurs"] == 5
 
 
-def test_redefines_is_flagged_as_unmodeled_aliasing():
+def test_redefines_across_pictures_flags_byte_reinterpretation():
+    # 9(4) numeric redefined as X(4) alphanumeric: genuine byte reinterpretation.
     src = (
         "       IDENTIFICATION DIVISION.\n"
         "       PROGRAM-ID. RD.\n"
@@ -189,7 +233,25 @@ def test_redefines_is_flagged_as_unmodeled_aliasing():
     )
     machine = _machine(src)
     assert machine.data["WS-B"]["redefines"] == "WS-A"
-    assert any("REDEFINES" in f["message"] and "byte-aliasing" in f["message"]
+    assert any("REDEFINES" in f["message"] and "byte reinterpretation" in f["message"]
+               and "NOT modeled" in f["message"] for f in machine.flags)
+
+
+def test_redefines_same_category_flagged_as_value_alias():
+    # X(4) redefined as X(4): same category/size -> reported as a safe value alias.
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RD2.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-A      PIC X(4).\n"
+        "       01  WS-B REDEFINES WS-A PIC X(4).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           STOP RUN.\n"
+    )
+    machine = _machine(src)
+    assert any("REDEFINES" in f["message"] and "ALIAS" in f["message"]
                for f in machine.flags)
 
 

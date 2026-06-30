@@ -119,6 +119,23 @@ class ExecStmt(Stmt):
     target: Optional[str] = None            # program name for LINK/XCTL
     host_vars: List[str] = field(default_factory=list)   # :WS-FOO references
     conditions: List[str] = field(default_factory=list)  # HANDLE condition names
+    into_vars: List[str] = field(default_factory=list)   # SELECT/FETCH ... INTO targets
+
+
+@dataclass
+class SearchStmt(Stmt):
+    """SEARCH / SEARCH ALL with its WHEN branches and AT END handler.
+
+    A serial SEARCH increments an index over ``table`` testing each WHEN until one
+    matches (-> its body) or the table is exhausted (-> AT END). The conditional
+    branches are real control flow; the index iteration itself is a runtime effect.
+    """
+
+    table: str
+    all: bool = False                # SEARCH ALL (binary) vs serial SEARCH
+    varying: Optional[str] = None
+    at_end_body: List[Stmt] = field(default_factory=list)
+    whens: List[Tuple[str, List[Stmt]]] = field(default_factory=list)  # (cond, body)
 
 
 @dataclass
@@ -164,6 +181,7 @@ class Paragraph:
     section: Optional[str] = None
     origin: Optional[str] = None  # copybook member name if the header came from a COPY
     statements: List[Stmt] = field(default_factory=list)
+    parse_error: Optional[str] = None  # set if the body failed to parse (corpus safety)
     # DECLARATIVES handler metadata (set only on the section head of a USE procedure):
     use_trigger: Optional[str] = None   # 'ERROR' | 'EXCEPTION' | 'DEBUGGING' | ...
     use_files: List[str] = field(default_factory=list)  # files it applies to ([]=global)
@@ -204,4 +222,8 @@ def walk_statements(stmts: List[Stmt]):
             yield from walk_statements(st.inline_body)
         elif isinstance(st, IoStmt):
             for body in st.handlers.values():
+                yield from walk_statements(body)
+        elif isinstance(st, SearchStmt):
+            yield from walk_statements(st.at_end_body)
+            for _cond, body in st.whens:
                 yield from walk_statements(body)

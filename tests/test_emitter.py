@@ -123,6 +123,27 @@ def test_guard_raw_is_external():
     assert _emit_guard({"op": "raw", "text": "A = 1 OR 2"}, {}) is None
 
 
+def test_guard_arithmetic_subscript_evaluates_index():
+    # TBL(WWM-INDX - 1): the subscript is an arithmetic expression evaluated with the
+    # decimal runtime; elem() coerces the resulting Dec to a 1-based index.
+    tree = {"op": "rel", "left": "W-SUB1", "rel": ">", "right": "WWM-PTR(WWM-INDX - 1)"}
+    fields = {"W-SUB1": {"category": "numeric", "digits": 4, "scale": 0, "signed": False},
+              "WWM-PTR": {"category": "numeric", "digits": 4, "scale": 0, "signed": False,
+                          "occurs": 10},
+              "WWM-INDX": {"category": "numeric", "digits": 4, "scale": 0, "signed": False}}
+    js = _emit_guard(tree, fields)
+    assert 'elem(context["WWM-PTR"], sub(D(context["WWM-INDX"]), D("1")))' in js
+    assert js.startswith("rel(context[\"W-SUB1\"]")
+
+
+def test_guard_multidim_subscript_is_external():
+    # A multi-dimension subscript is not modeled in the runnable JS -> external guard,
+    # never a silently-undefined context["TBL(I,J)"] reference.
+    tree = {"op": "rel", "left": "TBL(I,J)", "rel": "=", "right": "5"}
+    fields = {"TBL": {"category": "numeric", "digits": 2, "scale": 0, "signed": False}}
+    assert _emit_guard(tree, fields) is None
+
+
 # --------------------------------------------------------------------------- #
 # full module structure
 # --------------------------------------------------------------------------- #
@@ -342,6 +363,13 @@ def test_nested_perform_threads_context_under_stock_xstate(repo_tmp):
 def test_occurs_table_sum_runs_under_stock_xstate(repo_tmp):
     # Write five elements by literal subscript, then sum with a variable subscript.
     _run_to_done(repo_tmp, "tblsum.cbl", {"WS-SUM": "150"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_varying_steps_the_control_variable(repo_tmp):
+    # PERFORM 1000-STEP VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 5: the index must be
+    # initialized and stepped each iteration, summing 1..5 = 15 and leaving WS-I = 6.
+    _run_to_done(repo_tmp, "varysum.cbl", {"WS-SUM": "15", "WS-I": "6"})
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
