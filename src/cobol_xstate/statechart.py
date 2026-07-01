@@ -77,6 +77,8 @@ class Machine:
     data: Dict[str, dict] = field(default_factory=dict)
     semantics: Dict[str, dict] = field(default_factory=dict)
     paragraph_order: List[str] = field(default_factory=list)  # source order (for THRU)
+    using: List[str] = field(default_factory=list)       # PROCEDURE DIVISION USING params
+    returning: Optional[str] = None                      # PROCEDURE DIVISION RETURNING
 
     def bundle(self) -> dict:
         return {
@@ -102,7 +104,9 @@ class Machine:
             "data": self.data,
             "semantics": {"actions": self.semantics.get("actions", {}),
                           "guards": self.semantics.get("guards", {})},
-            "interface": build_interface(self.config, self.semantics, self.provenance),
+            "interface": build_interface(
+                self.config, self.semantics, self.provenance,
+                data=self.data, using=self.using, returning=self.returning),
             "provenance": self.provenance,
             "flags": self.flags,
             "notes": self.notes,
@@ -175,20 +179,32 @@ class _BuildCtx:
                       f"- routed to an external guard; verify")
 
 
+def _call_args_suffix(st: CallStmt) -> str:
+    """The `` USING a b RETURNING r`` tail for a CALL's provenance label, so the external
+    interface can surface the arguments passed across the boundary."""
+    parts = []
+    if st.using:
+        parts.append("USING " + " ".join(st.using))
+    if st.returning:
+        parts.append("RETURNING " + st.returning)
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
     """Action name for a CALL, resolving a dynamic target by constant propagation
     where the program proves it constant (else flag, don't guess)."""
     reg = ctx.reg
+    args = _call_args_suffix(st)
     if not st.dynamic:
-        return reg.action_named("call_" + st.target, f"CALL '{st.target}'", st.line)
+        return reg.action_named("call_" + st.target, f"CALL '{st.target}'{args}", st.line)
     res = ctx.calls.resolve(st.target)
     if res.confident and res.resolved:
         return reg.action_named(
             "call_" + res.resolved,
-            f"CALL {st.target} -> resolved '{res.resolved}' ({res.reason})", st.line)
+            f"CALL {st.target} -> resolved '{res.resolved}' ({res.reason}){args}", st.line)
     # Unresolved or ambiguous: keep the identifier name and flag it.
     ctx.flag(para, st.line, f"dynamic CALL {st.target} - {res.reason}")
-    return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}", st.line)
+    return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}{args}", st.line)
 
 
 def _io_action(st: IoStmt, reg: NameRegistry) -> str:
@@ -952,4 +968,6 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem},
         paragraph_order=[p.name for p in program.paragraphs]
         + [p.name for p in program.declaratives],
+        using=program.using,
+        returning=program.returning,
     )

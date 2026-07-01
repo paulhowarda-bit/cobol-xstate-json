@@ -82,6 +82,47 @@ def test_internal_moves_and_computes_are_not_perimeter():
     assert iface["events"] == []
 
 
+def test_program_parameter_interface_using_returning_linkage():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. SUBPGM.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-RC PIC 9(4).\n"
+        "       LINKAGE SECTION.\n"
+        "       01 LK-REQUEST PIC X(80).\n"
+        "       01 LK-REPLY   PIC X(80).\n"
+        "       PROCEDURE DIVISION USING LK-REQUEST LK-REPLY RETURNING WS-RC.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 'OK' TO LK-REPLY\n"
+        "           GOBACK.\n"
+    )
+    iface = build_machine(parse_program(src)).bundle()["interface"]
+    p = iface["parameters"]
+    assert p["using"] == ["LK-REQUEST", "LK-REPLY"]
+    assert p["returning"] == "WS-RC"
+    assert set(p["linkage"]) == {"LK-REQUEST", "LK-REPLY"}
+    # The entry gets the caller's parameters and creates a reply back to the caller.
+    caller_get = [e for e in iface["events"]
+                  if e["endpointType"] == "caller" and e["direction"] == "get"]
+    assert caller_get and set(caller_get[0]["fields"]) == {"LK-REQUEST", "LK-REPLY"}
+    caller_create = [e for e in iface["events"]
+                     if e["endpointType"] == "caller" and e["direction"] == "create"]
+    assert any("WS-RC" in e["fields"] for e in caller_create)
+
+
+def test_call_using_arguments_become_event_fields():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           CALL 'AUDIT' USING WS-REQ WS-RESP.\n",
+        data_body="       01 WS-REQ PIC X(10).\n       01 WS-RESP PIC X(10).\n",
+    )
+    ev = next(e for e in iface["events"] if e["endpoint"] == "AUDIT")
+    assert ev["direction"] == "create"
+    assert ev["endpointType"] == "program"
+    assert ev["fields"] == ["WS-REQ", "WS-RESP"]
+
+
 def test_cics_handle_condition_is_a_get_in_the_handlers_region():
     iface = _iface(
         "       DECLARATIVES.\n"
