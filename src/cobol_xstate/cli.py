@@ -135,12 +135,26 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))
+        iface = machine.bundle()["interface"]
         print(
             f"[{machine.program_id}] {n_states} state(s), "
             f"{len(machine.provenance)} provenance entr(ies), "
-            f"{len(machine.flags)} flag(s)",
+            f"{len(machine.flags)} flag(s), "
+            f"{len(iface['perimeterStates'])} perimeter state(s)",
             file=sys.stderr,
         )
+        if iface["endpoints"]:
+            print("  external interface:", file=sys.stderr)
+            for ep in iface["endpoints"]:
+                print(f"    {ep['type']:9} {ep['endpoint']:24} "
+                      f"({', '.join(ep['directions'])})", file=sys.stderr)
+        for state, d in iface["perimeterStates"].items():
+            io = []
+            if d["gets"]:
+                io.append("gets " + ", ".join(d["gets"]))
+            if d["creates"]:
+                io.append("creates " + ", ".join(d["creates"]))
+            print(f"  PERIMETER {state} [{d['region']}]: {'; '.join(io)}", file=sys.stderr)
         for f in machine.flags:
             print(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}", file=sys.stderr)
 

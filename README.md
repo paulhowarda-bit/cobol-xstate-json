@@ -71,6 +71,11 @@ The default output is a JSON **bundle**:
     "actions": { "ADD_CUST-AMT_TO_WS-TOTAL": { "kind": "arith", "assignments": [ { "target": "WS-TOTAL", "expr": "WS-TOTAL + CUST-AMT" } ] } },
     "guards":  { "UNTIL_WS-EOF_eq_Y": { "op": "rel", "left": "WS-EOF", "rel": "=", "right": "'Y'" } }
   },
+  "interface": {
+    "endpoints": [ { "endpoint": "CUST", "type": "db2", "directions": ["get"] }, { "endpoint": "POSTLOG", "type": "program", "directions": ["create"] } ],
+    "events":    [ { "event": "GET.DB2.CUST", "direction": "get", "endpointType": "db2", "endpoint": "CUST", "fields": ["CUST-NAME","CUST-BALANCE"], "state": "1000-LOOKUP", "region": "PROGRAM", "line": 42 } ],
+    "perimeterStates": { "1000-LOOKUP": { "region": "PROGRAM", "gets": ["GET.DB2.CUST"], "creates": [] } }
+  },
   "provenance": { "<name>": { "kind": "state|guard|action", "cobol": "...", "line": N, "member": "COPYBOOK?" } },
   "flags":    [ { "paragraph": "...", "line": N, "message": "..." } ],
   "notes":    [ "..." ]
@@ -90,6 +95,16 @@ STATEMATE statechart holds beyond control flow travels alongside it:
   sign / 88-level / AND-OR-NOT).
 - **`machine.context`** — seeded with each elementary item's start-of-run value (its
   `VALUE` clause, else the typed default).
+- **`interface`** — the program's **external perimeter**: an overlay classifying which
+  states cross the program boundary and in which direction. `perimeterStates` maps a
+  state (and its region / "state machine") to the external events it **gets** (file
+  `READ`, SQL `SELECT`/`FETCH`, `ACCEPT`, CICS `RECEIVE`, an error/exception condition it
+  `HANDLE`s) and **creates** (file `WRITE`/`REWRITE`, SQL `INSERT`/`UPDATE`/`DELETE`,
+  `DISPLAY`, CICS `SEND`, `CALL` / CICS `LINK`/`XCTL`, CICS `RETURN`). `endpoints` lists
+  the external actors (Db2 table, file, program, console, terminal, caller) and `events`
+  is the per-crossing detail (direction, endpoint, fields, state, source line). This is a
+  pure classification of the emitted machine — the same boundary the `harel-statechart-render`
+  skill draws as typed endpoint nodes. See it at a glance with `--summary`.
 
 Nothing is invented — every action/guard expression is a faithful translation of the
 COBOL the `provenance` entry points to. The one thing the bare config can't embed is the
