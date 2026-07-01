@@ -25,12 +25,17 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 # endpoint kinds
-_FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS = (
-    "file", "db2", "program", "console", "terminal", "caller", "condition", "ims")
+_FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE = (
+    "file", "db2", "program", "console", "terminal", "caller", "condition", "ims",
+    "response")
 
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|TSQUEUE|TDQUEUE)\s*\(\s*'?"
     r"([A-Z0-9_.$#@-]+)'?\s*\)", re.I)
+_CICS_COMMAREA = re.compile(r"\bCOMMAREA\s*\(\s*([A-Z0-9_.$#@-]+)\s*\)", re.I)
+# Data items that carry an external subsystem's response/return status - branching on
+# them is the program reacting to a response event (DB2 SQLCODE, VSAM/CICS file status).
+_RESPONSE_ITEMS = {"SQLCODE", "SQLSTATE", "SQLERRD", "EIBRESP", "EIBRESP2"}
 _SQL_FROM = re.compile(r"\bFROM\s+([A-Z0-9_.$#@-]+)", re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+([A-Z0-9_.$#@-]+)", re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+([A-Z0-9_.$#@-]+)", re.I)
@@ -94,8 +99,12 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict]
     if is_cics:
         res = _CICS_RESOURCE.search(up)
         endpoint = res.group(1) if res else ""
+        ca = _CICS_COMMAREA.search(up)
+        commarea = [ca.group(1).upper()] if ca else []
         if verb in ("LINK", "XCTL"):
-            return ("create", _PROGRAM, endpoint or "<program>", "CICS " + verb, [])
+            return ("create", _PROGRAM, endpoint or "<program>", "CICS " + verb, commarea)
+        if verb == "RETURN" and commarea:
+            return ("create", _CALLER, "CALLER", "CICS RETURN", commarea)
         if verb == "SEND":
             return ("create", _TERMINAL, endpoint or "terminal", "CICS SEND", [])
         if verb == "RECEIVE":
@@ -181,6 +190,81 @@ def _iter_states(config: dict):
             yield from rec(st.get("states"), program)
 
 
+_WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
+
+
+def _classify_move(spec: Optional[dict], linkage: set
+                   ) -> List[Tuple[str, str, str, str, List[str]]]:
+    """A MOVE touching a LINKAGE item is a boundary crossing: reading a linkage field is
+    receiving the caller's request (get); writing one is sending a response (create).
+    Plain WS-to-WS moves are internal and return nothing."""
+    hits: List[Tuple[str, str, str, str, List[str]]] = []
+    for a in (spec or {}).get("assignments", []):
+        if not isinstance(a, dict):
+            continue
+        target = (a.get("target") or "").upper()
+        expr = (a.get("expr") or "").upper()
+        if target in linkage:
+            hits.append(("create", _CALLER, "CALLER",
+                         "MOVE -> linkage (send response)", [target]))
+        for w in _WORD.findall(expr):
+            if w in linkage:
+                hits.append(("get", _CALLER, "CALLER",
+                             "MOVE <- linkage (receive request)", [w]))
+    return hits
+
+
+def _response_item(node) -> Optional[str]:
+    """The external response/return item (SQLCODE / EIBRESP / ...) a guard tree tests, if any."""
+    if isinstance(node, str):
+        up = node.upper()
+        return next((r for r in _RESPONSE_ITEMS if r in up), None)
+    if isinstance(node, dict):
+        for v in node.values():
+            got = _response_item(v)
+            if got:
+                return got
+    if isinstance(node, list):
+        for v in node:
+            got = _response_item(v)
+            if got:
+                return got
+    return None
+
+
+def _perimeter_kind(gets: List[str], creates: List[str]) -> str:
+    if gets and creates:
+        return "input-output"
+    return "input" if gets else "output"
+
+
+def _find_state(config: dict, name: str) -> Optional[dict]:
+    """Locate a state dict by name anywhere in the (possibly nested/parallel) config."""
+    def rec(states):
+        for n, st in (states or {}).items():
+            if n == name:
+                return st
+            found = rec(st.get("states"))
+            if found is not None:
+                return found
+        return None
+    return rec(config.get("states", {}))
+
+
+def _annotate_states(config: dict, perimeter: Dict[str, dict]) -> None:
+    """Tag each perimeter state's node in the machine with ``meta.perimeter`` (input /
+    output / input-output) and its get/create events, so the boundary is visible on the
+    state itself - not only in the separate overlay. Idempotent."""
+    for name, d in perimeter.items():
+        st = _find_state(config, name)
+        if st is None:
+            continue
+        meta = st.setdefault("meta", {})
+        meta["perimeter"] = _perimeter_kind(d["gets"], d["creates"])
+        meta["gets"] = d["gets"]
+        meta["creates"] = d["creates"]
+
+
 def _linkage_records(data: Optional[dict]) -> List[str]:
     """Top-level (01/77) items in the LINKAGE SECTION - the program's parameter records
     (COMMAREA / passed parameters), independent of any USING list."""
@@ -206,6 +290,9 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     parameters) is the perimeter at the entry point and is surfaced under ``parameters``.
     """
     actions = (semantics or {}).get("actions", {})
+    guards = (semantics or {}).get("guards", {})
+    linkage_all = {n.upper() for n, it in (data or {}).items()
+                   if isinstance(it, dict) and it.get("section") == "LINKAGE"}
     events: List[dict] = []
     perimeter: Dict[str, dict] = {}
     endpoints: Dict[str, dict] = {}
@@ -231,11 +318,25 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         for aname in st.get("entry", []) or []:
             prov = provenance.get(aname, {})
             cobol = prov.get("cobol", "")
-            hit = _classify(aname, cobol, actions.get(aname))
+            line = prov.get("line", 0)
+            spec = actions.get(aname)
+            hit = _classify(aname, cobol, spec)
             if hit:
                 direction, etype, endpoint, verb, fields = hit
-                add(state, region, direction, etype, endpoint, verb, fields,
-                    prov.get("line", 0), cobol)
+                add(state, region, direction, etype, endpoint, verb, fields, line, cobol)
+            elif linkage_all and spec and spec.get("verb") == "MOVE":
+                for direction, etype, endpoint, verb, fields in _classify_move(
+                        spec, linkage_all):
+                    add(state, region, direction, etype, endpoint, verb, fields, line, cobol)
+        # Branching on an external return item (SQLCODE / EIBRESP) is the program
+        # reacting to a *response event* from that subsystem.
+        for edge in st.get("always", []) or []:
+            g = edge.get("guard")
+            item = _response_item(guards.get(g)) if g else None
+            if item:
+                sub = "DB2" if item.startswith("SQL") else "CICS"
+                add(state, region, "get", _RESPONSE, sub, f"response ({item})",
+                    [item], 0, f"branch on {item}")
         for event_name in (st.get("on", {}) or {}):
             hit = _classify_condition_event(event_name)
             if hit:
@@ -261,6 +362,12 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     if returning:
         add(entry, program, "create", _CALLER, "CALLER", "PROCEDURE DIVISION RETURNING",
             [returning.upper()], 0, "RETURNING " + returning.upper())
+
+    # Label each perimeter state input / output / input-output, and tag the state node
+    # itself so the boundary is visible on the machine (meta.perimeter), not just here.
+    for d in perimeter.values():
+        d["perimeter"] = _perimeter_kind(d["gets"], d["creates"])
+    _annotate_states(config, perimeter)
 
     return {
         "endpoints": [

@@ -154,7 +154,8 @@ def run(argv: Optional[List[str]] = None) -> int:
                 io.append("gets " + ", ".join(d["gets"]))
             if d["creates"]:
                 io.append("creates " + ", ".join(d["creates"]))
-            print(f"  PERIMETER {state} [{d['region']}]: {'; '.join(io)}", file=sys.stderr)
+            print(f"  PERIMETER {state} [{d['region']}] ({d.get('perimeter', '?')}): "
+                  f"{'; '.join(io)}", file=sys.stderr)
         for f in machine.flags:
             print(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}", file=sys.stderr)
 

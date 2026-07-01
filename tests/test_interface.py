@@ -123,6 +123,79 @@ def test_call_using_arguments_become_event_fields():
     assert ev["fields"] == ["WS-REQ", "WS-RESP"]
 
 
+def test_linkage_moves_are_receive_request_and_send_response():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. LKSUB.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-NAME PIC X(20).\n"
+        "       LINKAGE SECTION.\n"
+        "       01 LK-REQ-AREA.\n"
+        "          05 LK-CUST-ID PIC 9(6).\n"
+        "          05 LK-REPLY   PIC X(20).\n"
+        "       PROCEDURE DIVISION USING LK-REQ-AREA.\n"
+        "       0000-MAIN.\n"
+        "           MOVE LK-CUST-ID TO WS-NAME\n"
+        "           MOVE WS-NAME TO LK-REPLY\n"
+        "           GOBACK.\n"
+    )
+    iface = build_machine(parse_program(src)).bundle()["interface"]
+    caller = [e for e in iface["events"] if e["endpointType"] == "caller"]
+    # reading a linkage field is a get (receive request); writing one is a create (send)
+    reads = [e for e in caller if e["direction"] == "get" and "LK-CUST-ID" in e["fields"]]
+    writes = [e for e in caller if e["direction"] == "create" and "LK-REPLY" in e["fields"]]
+    assert reads, "MOVE from a linkage field should be a receive-request get"
+    assert writes, "MOVE to a linkage field should be a send-response create"
+
+
+def test_sqlcode_branch_is_a_db2_response_event():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL SELECT NAME INTO :WS-N FROM CUST END-EXEC\n"
+        "           EVALUATE SQLCODE\n"
+        "             WHEN 0 MOVE 'OK' TO WS-N\n"
+        "             WHEN OTHER MOVE 'NG' TO WS-N\n"
+        "           END-EVALUATE.\n",
+        data_body="       01 WS-N PIC X(4).\n",
+    )
+    resp = [e for e in iface["events"] if e["endpointType"] == "response"]
+    assert resp and resp[0]["direction"] == "get"
+    assert resp[0]["fields"] == ["SQLCODE"]
+
+
+def test_cics_link_commarea_is_a_field():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC CICS LINK PROGRAM('POSTLOG') COMMAREA(WS-AREA) END-EXEC.\n",
+        data_body="       01 WS-AREA PIC X(100).\n",
+    )
+    ev = next(e for e in iface["events"] if e["endpoint"] == "POSTLOG")
+    assert ev["fields"] == ["WS-AREA"]
+
+
+def test_perimeter_states_are_tagged_on_the_machine_nodes():
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           DISPLAY 'HI'.\n"
+    )
+    m = build_machine(prog)
+    bundle = m.bundle()
+    # the state that DISPLAYs is tagged meta.perimeter = output on the machine itself
+    def find(states):
+        for n, st in (states or {}).items():
+            if st.get("meta", {}).get("perimeter"):
+                return st["meta"]["perimeter"]
+            got = find(st.get("states"))
+            if got:
+                return got
+        return None
+    assert find(bundle["machine"]["states"]) == "output"
+
+
 def test_cics_handle_condition_is_a_get_in_the_handlers_region():
     iface = _iface(
         "       DECLARATIVES.\n"
