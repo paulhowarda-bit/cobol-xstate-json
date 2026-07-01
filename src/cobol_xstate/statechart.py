@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .analysis import CallAnalysis, analyze_calls
+from .interface import build_interface
 from .semantics import parse_condition, parse_operation
 from .model import (
     Action,
@@ -101,6 +102,7 @@ class Machine:
             "data": self.data,
             "semantics": {"actions": self.semantics.get("actions", {}),
                           "guards": self.semantics.get("guards", {})},
+            "interface": build_interface(self.config, self.semantics, self.provenance),
             "provenance": self.provenance,
             "flags": self.flags,
             "notes": self.notes,
