@@ -29,14 +29,24 @@ Pure standard library — no runtime dependencies. Python ≥ 3.9. `pytest` for 
 ## Usage
 
 ```bash
-cobol-xstate examples/custrpt.cbl                 # full bundle to stdout
-cobol-xstate examples/banktran.cbl --summary      # + human summary & flags on stderr
-cobol-xstate prog.cbl -o prog.machine.json        # write to a file
-cobol-xstate prog.cbl --machine-only              # bare XState config only
-cobol-xstate - < prog.cbl                          # read from stdin
+cobol-xstate prog.cbl                              # -> ./prog.json (same name, current dir)
+cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/prog.json (dir created)
+cobol-xstate prog.cbl --outdir .                   # -> ./prog.json (. = current dir)
+cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
+cobol-xstate prog.cbl -o out/custom.json           # exact path (overrides --outdir/name)
+cobol-xstate prog.cbl -o -                          # write the bundle to stdout instead
+cobol-xstate prog.cbl --machine-only               # bare XState config only
+cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
 cobol-xstate prog.cbl --format free                # force free-format source
+cobol-xstate prog.cbl --target js                  # -> ./prog.mjs (+ cobolRuntime.mjs)
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
+
+By default the output is written to a file named after the source with a `.json`
+extension (`.mjs` for `--target js`), in the current directory. Use `--outdir` to
+choose the directory (relative paths resolve against the current directory, `.` is
+the current directory, and the directory is created if it does not exist), `-o PATH`
+for an exact path, or `-o -` to stream to stdout.
 
 ### Output
 
