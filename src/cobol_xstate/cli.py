@@ -20,6 +20,23 @@ def _format(name: Optional[str]) -> Optional[SourceFormat]:
     return {"fixed": SourceFormat.FIXED, "free": SourceFormat.FREE}[name]
 
 
+def _resolve_out_path(args, default_stem: Optional[str],
+                      program_id: str) -> Optional[Path]:
+    """Where to write the output, or ``None`` for stdout.
+
+    ``-o -`` -> stdout; ``-o PATH`` -> that exact path; otherwise an auto-named
+    ``<stem><ext>`` placed in ``--outdir`` (stem = source name, or PROGRAM-ID for
+    stdin). ``Path`` handles relative-vs-absolute; ``.`` is the current directory.
+    """
+    if args.output == "-":
+        return None
+    if args.output:
+        return Path(args.output)
+    stem = default_stem or program_id or "machine"
+    ext = ".mjs" if args.target == "js" else ".json"
+    return Path(args.outdir) / f"{stem}{ext}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cobol-xstate",
@@ -27,7 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
                     "XState v5 JSON Harel statechart (a modernization rewrite contract).",
     )
     p.add_argument("source", help="path to a COBOL source file ('-' for stdin)")
-    p.add_argument("-o", "--output", help="write output here (default: stdout)")
+    p.add_argument("-o", "--output",
+                   help="exact output path, overriding --outdir and the default name; "
+                        "'-' writes to stdout")
+    p.add_argument("--outdir", default=".", metavar="DIR",
+                   help="directory for the auto-named output file (default: current "
+                        "directory). Relative paths resolve against the current "
+                        "directory; created (with parents) if it does not exist. The "
+                        "file is named after the source (or the PROGRAM-ID for stdin).")
     p.add_argument("--target", choices=["json", "js"], default="json",
                    help="json = the XState config bundle (default); js = a runnable "
                         "XState v5 setup() ES module backed by the decimal runtime")
@@ -52,6 +76,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     if args.source == "-":
         source = sys.stdin.read()
         source_name = "<stdin>"
+        default_stem = None  # no filename; fall back to PROGRAM-ID after parsing
     else:
         path = Path(args.source)
         if not path.exists():
@@ -59,6 +84,7 @@ def run(argv: Optional[List[str]] = None) -> int:
             return 2
         source = path.read_text(errors="replace")
         source_name = path.name
+        default_stem = path.stem  # <stem>.cbl -> <stem>.json by default
         search_paths.append(str(path.parent))  # look beside the source by default
 
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
@@ -82,24 +108,30 @@ def run(argv: Optional[List[str]] = None) -> int:
     program = parse_program(source, fmt, resolver=resolver)
     machine = build_machine(program, source_name=source_name)
 
+    out_path = _resolve_out_path(args, default_stem, machine.program_id)
+    if out_path is not None:
+        # Create the destination directory (and parents) if it does not exist.
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
     if args.target == "js":
         text = emit_setup_module(machine)
-        if args.output:
-            out_path = Path(args.output)
+        if out_path is None:
+            print(text)
+        else:
             out_path.write_text(text)
             # Drop the decimal runtime beside the module so its import resolves.
             runtime_src = Path(__file__).resolve().parents[2] / "runtime" / "cobolRuntime.mjs"
             if runtime_src.exists():
                 (out_path.parent / "cobolRuntime.mjs").write_text(
                     runtime_src.read_text())
-        else:
-            print(text)
+            print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
     else:
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
-        if args.output:
-            Path(args.output).write_text(text + "\n")
-        else:
+        if out_path is None:
             print(text)
+        else:
+            out_path.write_text(text + "\n")
+            print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))
