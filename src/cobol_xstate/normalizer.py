@@ -14,9 +14,10 @@ heavily tested in isolation.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 class SourceFormat(Enum):
@@ -64,35 +65,138 @@ def _strip_inline_comment(code: str) -> str:
     return code
 
 
-def _detect_format(raw_lines: List[str]) -> SourceFormat:
-    """Heuristic: honor an explicit ``SOURCEFORMAT`` directive, else sniff columns.
+@dataclass
+class FormatDetection:
+    """Result of source-format auto-detection.
 
-    Fixed-format source overwhelmingly keeps cols 1-6 blank or numeric and reserves
-    col 7 for indicators; free-format source routinely puts code in those columns.
+    ``confidence`` lets callers tell a firm classification (explicit directive,
+    clear column signals, or a decisive shape check) from a guess, so an ambiguous
+    file can be warned about / overridden instead of silently corrupted.
+    """
+
+    format: SourceFormat
+    confidence: float          # 0.0 (pure default) .. 1.0 (explicit directive)
+    reason: str
+
+    @property
+    def is_confident(self) -> bool:
+        return self.confidence >= 0.6
+
+
+# Anchors every real COBOL program contains. If normalization picked the WRONG
+# format it slices the wrong columns and these get mangled, so the count of anchors
+# recovered under a candidate format is a reliable tie-breaker for ambiguous source.
+_COBOL_ANCHORS = re.compile(
+    r"\b(IDENTIFICATION\s+DIVISION|PROGRAM-ID|ENVIRONMENT\s+DIVISION|"
+    r"DATA\s+DIVISION|WORKING-STORAGE|LINKAGE\s+SECTION|PROCEDURE\s+DIVISION)\b",
+    re.I,
+)
+
+
+def _directive_format(raw_lines: List[str]) -> Optional[SourceFormat]:
+    """Honor an explicit source-format directive - the authoritative signal.
+
+    Recognizes the IBM ``>>SOURCE FORMAT [IS] FREE|FIXED`` directive as well as the
+    compiler-option / Micro Focus ``SOURCEFORMAT(FREE)`` / ``$SET SOURCEFORMAT"FREE"``
+    forms. Collapsing spaces unifies the ``SOURCE FORMAT`` (spaced, standard) and
+    ``SOURCEFORMAT`` (unspaced) spellings.
     """
     for raw in raw_lines[:200]:
         up = raw.upper()
-        if "SOURCEFORMAT" in up:
+        if "SOURCEFORMAT" in up.replace(" ", ""):
             if "FREE" in up:
                 return SourceFormat.FREE
             if "FIXED" in up:
                 return SourceFormat.FIXED
-    votes_free = 0
-    votes_fixed = 0
+    return None
+
+
+def _score_columns(raw_lines: List[str]) -> Tuple[int, int, bool]:
+    """Weighted column-signal vote. Returns ``(free, fixed, saw_strong_signal)``.
+
+    Only signals that are genuinely diagnostic get weight; the one ambiguous layout
+    (blank/numeric seq area + blank indicator + code from col 8) is deliberately a
+    *weak* fixed vote, because a free-format file merely indented to col 8 is
+    byte-identical to it - that case is resolved later by a shape check, not here.
+    """
+    free = fixed = 0
+    strong = False
     for raw in raw_lines:
         if not raw.strip():
             continue
-        seq = raw[_SEQ] if len(raw) >= 6 else raw
+        seq = raw[_SEQ]
         ind = raw[_IND] if len(raw) > _IND else " "
-        # A non-space, non-numeric sequence area or an alpha indicator column is a
-        # strong signal of free format.
-        if seq.strip() and not seq.strip().isdigit():
-            votes_free += 1
-        elif ind in ("*", "/", "-", "D", "d", " "):
-            votes_fixed += 1
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        if len(raw.rstrip()) > 80:
+            free += 5; strong = True            # past the 80-col card boundary: can't be fixed
+        elif seq.strip().isdigit():
+            fixed += 3; strong = True            # all-digit sequence numbers: classic fixed
+        elif seq.strip():
+            free += 2; strong = True             # letters in cols 1-6: left-margin free code
+        elif stripped.startswith((">>", "*>")) and indent < _IND:
+            free += 2; strong = True             # free directive / inline comment at the margin
+        elif ind in ("*", "/", "-", "D", "d"):
+            fixed += 2; strong = True            # comment / continuation / debug indicator in col 7
+        elif ind == " ":
+            fixed += 1                           # normal fixed line - but also free indented to col 8
         else:
-            votes_free += 1
-    return SourceFormat.FREE if votes_free > votes_fixed else SourceFormat.FIXED
+            free += 2; strong = True             # a code character sits in the indicator column
+    return free, fixed, strong
+
+
+def _shape_score(source: str, fmt: SourceFormat) -> int:
+    """How many distinct COBOL structural anchors survive normalization under ``fmt``.
+
+    A correct format recovers several (IDENTIFICATION/PROGRAM-ID/PROCEDURE ...); the
+    wrong format mangles them, so this cheaply verifies an otherwise-ambiguous guess.
+    """
+    joined = "\n".join(cl.text for cl in normalize(source, fmt))
+    return len({m.group(1).split()[0].upper() for m in _COBOL_ANCHORS.finditer(joined)})
+
+
+def detect_source_format(source: str) -> FormatDetection:
+    """Auto-detect fixed vs. free format, with a confidence and a human-readable reason.
+
+    Layered so that certainty degrades gracefully: an explicit directive wins; else
+    clear column signals; else a shape check that normalizes both ways and keeps the
+    one yielding recognizable COBOL; else the z/OS default (fixed) at low confidence.
+    """
+    raw_lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    directive = _directive_format(raw_lines)
+    if directive is not None:
+        return FormatDetection(directive, 1.0, "explicit source-format directive")
+
+    free, fixed, strong = _score_columns(raw_lines)
+    total = free + fixed
+    if strong and total:
+        margin = abs(free - fixed) / total
+        if margin >= 0.2:
+            fmt = SourceFormat.FREE if free > fixed else SourceFormat.FIXED
+            return FormatDetection(fmt, min(0.97, 0.65 + margin * 0.3),
+                                   f"column signals (free={free}, fixed={fixed})")
+
+    # Ambiguous columns: let each format prove itself by recovering COBOL structure.
+    fixed_shape = _shape_score(source, SourceFormat.FIXED)
+    free_shape = _shape_score(source, SourceFormat.FREE)
+    if fixed_shape != free_shape:
+        fmt = SourceFormat.FIXED if fixed_shape > free_shape else SourceFormat.FREE
+        lead = abs(fixed_shape - free_shape)
+        return FormatDetection(fmt, 0.8 if lead >= 2 else 0.65,
+                               f"shape check (fixed={fixed_shape}, free={free_shape})")
+
+    # Genuinely indistinguishable: default to the z/OS norm, low confidence.
+    fmt = SourceFormat.FREE if free > fixed else SourceFormat.FIXED
+    return FormatDetection(
+        fmt, 0.3,
+        f"ambiguous - no directive or diagnostic signals; defaulted to {fmt.value} "
+        "(z/OS norm). Pass --format to override.")
+
+
+def _detect_format(raw_lines: List[str]) -> SourceFormat:
+    """Back-compat shim: return just the format enum (see ``detect_source_format``)."""
+    return detect_source_format("\n".join(raw_lines)).format
 
 
 def _fixed_code(raw: str) -> Optional[str]:
@@ -122,7 +226,7 @@ def normalize(source: str, fmt: Optional[SourceFormat] = None) -> List[CodeLine]
     """
     raw_lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     if fmt is None:
-        fmt = _detect_format(raw_lines)
+        fmt = detect_source_format(source).format
 
     out: List[CodeLine] = []
     for idx, raw in enumerate(raw_lines, start=1):
@@ -148,10 +252,15 @@ def normalize(source: str, fmt: Optional[SourceFormat] = None) -> List[CodeLine]
             prev.text = (prev.text.rstrip() + joiner + code.lstrip())
         else:
             indent = len(code) - len(code.lstrip())
-            # Area A is cols 8-11; the normalized code starts at col 8 (index 0), so
-            # a first token within the first 4 chars sits in Area A. Free format has
-            # no areas - treat a near-left-margin token as a header candidate.
-            limit = 4 if fmt is SourceFormat.FIXED else 4
-            out.append(CodeLine(text=code, line=idx, area_a=indent < limit))
+            if fmt is SourceFormat.FIXED:
+                # Area A is cols 8-11; the normalized fixed-format code starts at col 8
+                # (index 0), so a first token within the first 4 chars sits in Area A.
+                area_a = indent < 4
+            else:
+                # Free format has no reference areas: a header may sit at any indent,
+                # so the strict header regex (parser._HEADER_RE) - not a column rule -
+                # is the discriminator. Treat every line as an Area-A candidate.
+                area_a = True
+            out.append(CodeLine(text=code, line=idx, area_a=area_a))
 
     return [cl for cl in out if cl.text.strip()]

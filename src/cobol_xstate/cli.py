@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .emitter import emit_setup_module
-from .normalizer import SourceFormat
+from .normalizer import SourceFormat, detect_source_format
 from .parser import parse_program
 from .preprocessor import CopybookResolver
 from .statechart import build_machine
@@ -66,7 +66,20 @@ def run(argv: Optional[List[str]] = None) -> int:
         paths=search_paths,
         exts=tuple(args.copybook_ext) + default_exts,
     )
-    program = parse_program(source, _format(args.format), resolver=resolver)
+    fmt = _format(args.format)
+    if fmt is None:
+        det = detect_source_format(source)
+        fmt = det.format
+        # A silent wrong guess corrupts every downstream stage, so surface it: state
+        # what was picked, and warn (recommending --format) when confidence is low.
+        level = "detected" if det.is_confident else "WARNING: low-confidence"
+        print(f"[{source_name}] {level} source format = {fmt.value} "
+              f"({det.confidence:.0%}: {det.reason})", file=sys.stderr)
+        if not det.is_confident:
+            print("  -> if the output looks corrupted, re-run with "
+                  "--format fixed|free to override.", file=sys.stderr)
+
+    program = parse_program(source, fmt, resolver=resolver)
     machine = build_machine(program, source_name=source_name)
 
     if args.target == "js":
