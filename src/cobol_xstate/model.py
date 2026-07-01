@@ -84,6 +84,8 @@ class CallStmt(Stmt):
     target: str
     dynamic: bool               # CALL identifier (not a literal) -> target unknown
     on_exception: bool = False
+    using: List[str] = field(default_factory=list)      # CALL ... USING args (data passed)
+    returning: Optional[str] = None                     # RETURNING receiver
 
 
 @dataclass
@@ -196,6 +198,9 @@ class Program:
     # CICS HANDLE CONDITION registrations: (condition-name, target-paragraph).
     cics_handlers: List[tuple] = field(default_factory=list)
     has_procedure_division: bool = False
+    # The program's own parameter interface (its perimeter at the entry point):
+    using: List[str] = field(default_factory=list)   # PROCEDURE DIVISION USING params
+    returning: Optional[str] = None                  # PROCEDURE DIVISION RETURNING
     notes: List[str] = field(default_factory=list)  # parser-level remarks
     # data-name -> initial literal from a WORKING-STORAGE `VALUE 'lit'` clause, used
     # by constant propagation to resolve dynamic CALL targets.

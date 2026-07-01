@@ -102,8 +102,13 @@ STATEMATE statechart holds beyond control flow travels alongside it:
   `HANDLE`s) and **creates** (file `WRITE`/`REWRITE`, SQL `INSERT`/`UPDATE`/`DELETE`,
   `DISPLAY`, CICS `SEND`, `CALL` / CICS `LINK`/`XCTL`, CICS `RETURN`). `endpoints` lists
   the external actors (Db2 table, file, program, console, terminal, caller) and `events`
-  is the per-crossing detail (direction, endpoint, fields, state, source line). This is a
-  pure classification of the emitted machine — the same boundary the `harel-statechart-render`
+  is the per-crossing detail (direction, endpoint, fields, state, source line).
+  `parameters` captures the program's **own** entry interface — `PROCEDURE DIVISION USING`
+  / `RETURNING`, the `LINKAGE SECTION` records, and whether a CICS `DFHCOMMAREA` is present
+  — i.e. the input/output parameters the caller passes across the boundary (surfaced as
+  `get`/`create` against the caller, since `USING` is by reference). `CALL … USING`
+  arguments appear as the `fields` of the outbound program event. This is a pure
+  classification of the emitted machine — the same boundary the `harel-statechart-render`
   skill draws as typed endpoint nodes. See it at a glance with `--summary`.
 
 Nothing is invented — every action/guard expression is a faithful translation of the

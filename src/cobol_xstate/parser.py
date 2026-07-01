@@ -21,7 +21,7 @@ the statechart stage, never silently smoothed.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
@@ -131,6 +131,42 @@ def _procedure_lines(lines: List[CodeLine]) -> List[CodeLine]:
     return lines[j + 1:]
 
 
+def _procedure_interface(lines: List[CodeLine]) -> Tuple[List[str], Optional[str]]:
+    """Extract the program's own parameter interface from the PROCEDURE DIVISION header:
+    ``PROCEDURE DIVISION USING p1 p2 ... [RETURNING r].`` Returns ``(using, returning)``.
+
+    These LINKAGE-backed items are the perimeter at the program's entry point - what the
+    caller (COMMAREA / parameter list) passes in and what is returned."""
+    start = None
+    for i, cl in enumerate(lines):
+        if re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I):
+            start = i
+            break
+    if start is None:
+        return [], None
+    header = []
+    j = start
+    while j < len(lines):
+        header.append(lines[j].text)
+        if "." in lines[j].text:
+            break
+        j += 1
+    text = " ".join(header)
+    text = text.split(".", 1)[0]  # header clause only, up to the terminating period
+    returning = None
+    mret = re.search(r"\bRETURNING\s+([A-Z0-9][A-Z0-9-]*)", text, re.I)
+    if mret:
+        returning = mret.group(1).upper()
+    using: List[str] = []
+    mus = re.search(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", text, re.I)
+    if mus:
+        for tok in re.split(r"[,\s]+", mus.group(1).strip()):
+            u = tok.upper()
+            if u and u not in ("BY", "REFERENCE", "CONTENT", "VALUE"):
+                using.append(u)
+    return using, returning
+
+
 def parse_program(source: str, fmt: Optional[SourceFormat] = None,
                   resolver: Optional[CopybookResolver] = None) -> Program:
     if fmt is None:
@@ -148,6 +184,7 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
 
     if any(re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I) for cl in lines):
         prog.has_procedure_division = True
+        prog.using, prog.returning = _procedure_interface(lines)
     if any(re.search(r"\bDECLARATIVES\b", cl.text, re.I) for cl in lines):
         prog.notes.append(
             "DECLARATIVES present: USE-procedure error handlers form an implicit "
@@ -641,6 +678,9 @@ class StmtParser:
                 dynamic = True
                 self._next()
         on_exc = False
+        using: List[str] = []
+        returning: Optional[str] = None
+        mode = None  # 'using' | 'returning' while collecting arg names
         while not self._eof():
             t = self._peek()
             if t.kind == "period":
@@ -651,10 +691,28 @@ class StmtParser:
                     break
                 if t.up in {"EXCEPTION", "OVERFLOW"}:
                     on_exc = True
-                if t.up in STARTERS and t.up not in {"CALL"}:
+                    mode = None
+                elif t.up == "USING":
+                    mode = "using"
+                    self._next()
+                    continue
+                elif t.up in {"RETURNING", "GIVING"}:
+                    mode = "returning"
+                    self._next()
+                    continue
+                elif t.up in {"BY", "REFERENCE", "CONTENT", "VALUE"}:
+                    self._next()
+                    continue
+                elif t.up in STARTERS and t.up != "CALL":
                     break
+                elif mode == "using":
+                    using.append(t.up)
+                elif mode == "returning":
+                    returning = t.up
+                    mode = None
             self._next()
-        return CallStmt(line=line, target=target, dynamic=dynamic, on_exception=on_exc)
+        return CallStmt(line=line, target=target, dynamic=dynamic, on_exception=on_exc,
+                        using=using, returning=returning)
 
     # -- ALTER -------------------------------------------------------------
     def parse_alter(self) -> Stmt:

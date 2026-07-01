@@ -34,6 +34,20 @@ _CICS_RESOURCE = re.compile(
 _SQL_FROM = re.compile(r"\bFROM\s+([A-Z0-9_.$#@-]+)", re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+([A-Z0-9_.$#@-]+)", re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+([A-Z0-9_.$#@-]+)", re.I)
+_CALL_USING = re.compile(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", re.I | re.S)
+
+
+def _parse_call_args(cobol: str) -> List[str]:
+    """The data-item names passed on a ``CALL ... USING a b c`` (for event fields)."""
+    m = _CALL_USING.search(cobol or "")
+    if not m:
+        return []
+    out = []
+    for tok in re.split(r"[,\s]+", m.group(1).strip()):
+        u = tok.upper()
+        if u and u not in ("BY", "REFERENCE", "CONTENT", "VALUE"):
+            out.append(u)
+    return out
 
 
 def _name_suffix(name: str) -> str:
@@ -125,7 +139,7 @@ def _classify(name: str, cobol: str, spec: Optional[dict]
     if verb == "ACCEPT":
         return ("get", _CONSOLE, "SYSIN", "ACCEPT", [])
     if verb == "CALL":
-        return ("create", _PROGRAM, _name_suffix(name), "CALL", [])
+        return ("create", _PROGRAM, _name_suffix(name), "CALL", _parse_call_args(cobol))
     return None  # OPEN / CLOSE / internal MOVE/COMPUTE/etc. - not an external crossing
 
 
@@ -167,11 +181,29 @@ def _iter_states(config: dict):
             yield from rec(st.get("states"), program)
 
 
-def build_interface(config: dict, semantics: dict, provenance: dict) -> dict:
-    """Return the external-interface overlay: events, per-state get/create, and endpoints.
+def _linkage_records(data: Optional[dict]) -> List[str]:
+    """Top-level (01/77) items in the LINKAGE SECTION - the program's parameter records
+    (COMMAREA / passed parameters), independent of any USING list."""
+    out = []
+    for name, item in (data or {}).items():
+        if not isinstance(item, dict) or item.get("section") != "LINKAGE":
+            continue
+        lvl = item.get("level")
+        if lvl in (1, 77, "01", "77") and "parent" not in item:
+            out.append(name)
+    return out
+
+
+def build_interface(config: dict, semantics: dict, provenance: dict,
+                    data: Optional[dict] = None, using: Optional[List[str]] = None,
+                    returning: Optional[str] = None) -> dict:
+    """Return the external-interface overlay: events, per-state get/create, endpoints,
+    and the program's own parameter interface.
 
     Pure read over the emitted machine - attributes each boundary crossing to the state
-    that hosts it, the direction, the external endpoint, and the source line.
+    that hosts it, the direction, the external endpoint, and the source line. The program
+    entry's LINKAGE / ``PROCEDURE DIVISION USING`` / ``RETURNING`` (its COMMAREA /
+    parameters) is the perimeter at the entry point and is surfaced under ``parameters``.
     """
     actions = (semantics or {}).get("actions", {})
     events: List[dict] = []
@@ -210,6 +242,26 @@ def build_interface(config: dict, semantics: dict, provenance: dict) -> dict:
                 direction, etype, endpoint, verb, fields = hit
                 add(state, region, direction, etype, endpoint, verb, fields, 0, event_name)
 
+    # The program's OWN parameter interface (LINKAGE / PROCEDURE DIVISION USING /
+    # RETURNING / COMMAREA) is the perimeter at the entry point: the caller passes these
+    # in (get) and receives RETURNING / by-reference updates back (create).
+    program = config.get("id", "PROGRAM")
+    entry = config.get("initial") or "__ENTRY__"
+    using = [u.upper() for u in (using or [])]
+    linkage = _linkage_records(data)
+    commarea = [n for n in linkage if n.upper() == "DFHCOMMAREA"]
+    # Parameters received from the caller: the USING list, else the COMMAREA/LINKAGE record.
+    inbound = using or commarea or linkage
+    if inbound:
+        add(entry, program, "get", _CALLER, "CALLER", "PROCEDURE DIVISION USING",
+            list(inbound), 0, "PROCEDURE DIVISION USING " + " ".join(inbound))
+        # USING is BY REFERENCE by default, so the caller also sees updates -> create.
+        add(entry, program, "create", _CALLER, "CALLER", "USING (by reference)",
+            list(inbound), 0, "USING (by reference) " + " ".join(inbound))
+    if returning:
+        add(entry, program, "create", _CALLER, "CALLER", "PROCEDURE DIVISION RETURNING",
+            [returning.upper()], 0, "RETURNING " + returning.upper())
+
     return {
         "endpoints": [
             {"endpoint": k, "type": v["type"], "directions": sorted(v["directions"])}
@@ -217,4 +269,10 @@ def build_interface(config: dict, semantics: dict, provenance: dict) -> dict:
         ],
         "events": events,
         "perimeterStates": perimeter,
+        "parameters": {
+            "using": using,
+            "returning": returning.upper() if returning else None,
+            "linkage": linkage,
+            "commarea": bool(commarea),
+        },
     }
