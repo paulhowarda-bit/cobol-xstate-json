@@ -19,12 +19,21 @@ on runtime data is *flagged*, never smoothed over.
 ## Install
 
 ```bash
+# simplest: run straight from a clone, no install, no PYTHONPATH
+python cobol-xstate.py <file.cbl>
+
+# or install the console script
 python -m pip install -e .
-# or run without installing:
-PYTHONPATH=src python -m cobol_xstate.cli <file.cbl>
+cobol-xstate <file.cbl>
+
+# or run the module directly
+PYTHONPATH=src python -m cobol_xstate.cli <file.cbl>      # bash
+$env:PYTHONPATH="src"; python -m cobol_xstate.cli <file.cbl>   # PowerShell
 ```
 
-Pure standard library — no runtime dependencies. Python ≥ 3.9. `pytest` for tests.
+There is no build step and nothing to package — a `git pull` of the public repo is
+all that is needed to get the latest code. Pure standard library, no runtime
+dependencies. Python ≥ 3.9. `pytest` for tests.
 
 ## Usage
 
