@@ -83,14 +83,18 @@ class FormatDetection:
         return self.confidence >= 0.6
 
 
-# Anchors every real COBOL program contains. If normalization picked the WRONG
-# format it slices the wrong columns and these get mangled, so the count of anchors
-# recovered under a candidate format is a reliable tie-breaker for ambiguous source.
-_COBOL_ANCHORS = re.compile(
-    r"\b(IDENTIFICATION\s+DIVISION|PROGRAM-ID|ENVIRONMENT\s+DIVISION|"
-    r"DATA\s+DIVISION|WORKING-STORAGE|LINKAGE\s+SECTION|PROCEDURE\s+DIVISION)\b",
-    re.I,
-)
+# Characters valid in the fixed-format indicator area (column 7): blank = code line,
+# * / = comment, - = continuation, D/d = debug, $ = directive. ANYTHING ELSE in column
+# 7 means column 7 carries program text, which only happens in free format. Columns 1-6
+# (sequence numbers AND alphanumeric change/revision markers) are format-independent -
+# the compiler ignores them in fixed format - so they are never inspected here.
+_FIXED_INDICATORS = frozenset(" */-Dd$")
+_FIXED_COMMENT_INDICATORS = frozenset("*/-")
+
+# A DIVISION header's column pins the format: in fixed format it sits in Area A
+# (column 8); in free format it starts at the left margin.
+_DIVISION_HEADER = re.compile(
+    r"\b(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION\b", re.I)
 
 
 def _directive_format(raw_lines: List[str]) -> Optional[SourceFormat]:
@@ -111,90 +115,90 @@ def _directive_format(raw_lines: List[str]) -> Optional[SourceFormat]:
     return None
 
 
-def _score_columns(raw_lines: List[str]) -> Tuple[int, int, bool]:
-    """Weighted column-signal vote. Returns ``(free, fixed, saw_strong_signal)``.
+def _column7_scan(raw_lines: List[str]) -> Tuple[int, int, int]:
+    """Inspect column 7 (the indicator area) of every non-blank line.
 
-    The vote turns on *where the first code character sits*, which is what actually
-    distinguishes the formats - NOT line length. Fixed-format source uses columns
-    1-72 and the compiler ignores everything past 72, so long lines and a filled
-    73-80 identification area are ordinary fixed source, never a free-format signal.
-
-    Strong signals: an all-digit sequence area (cols 1-6) or a valid indicator in
-    col 7 => FIXED; a code character in cols 1-7 (sequence/indicator area) => FREE.
-    The ambiguous layout - blank seq, blank col 7, code from col 8 - is only a *weak*
-    fixed lean, because free code merely indented to col 8 is byte-identical to it;
-    that case is settled later by the shape check, and defaulting it to fixed is
-    lossless anyway (fixed reading only strips the blank cols 1-7).
+    Returns ``(n_lines, violations, comments)``. A *violation* is a line whose column
+    7 holds program text (a character not valid in the fixed indicator area) - this
+    only happens in free format and is the sole reliable free signal. *comments* counts
+    lines with a ``*`` / ``/`` / ``-`` indicator, which is positive proof of fixed.
+    Columns 1-6 are never looked at, so sequence numbers and change markers are moot.
     """
-    free = fixed = 0
-    strong = False
+    n = violations = comments = 0
     for raw in raw_lines:
         if not raw.strip():
             continue
-        seq = raw[_SEQ]                                 # cols 1-6 (sequence area)
-        ind = raw[_IND] if len(raw) > _IND else " "     # col 7 (indicator area)
-        indent = len(raw) - len(raw.lstrip())           # first code char at col indent+1
-        if seq.strip().isdigit():
-            fixed += 3; strong = True                    # all-digit sequence numbers
-        elif indent >= _CODE.start:
-            fixed += 1                                   # code at col 8+: fixed, or free indented
-        elif indent == _IND:
-            if ind in ("*", "/", "-", "D", "d"):
-                fixed += 2; strong = True                # comment / continuation / debug in col 7
-            else:
-                free += 2; strong = True                 # a code character in the indicator column
-        else:
-            free += 2; strong = True                     # code in the sequence area (cols 1-6)
-    return free, fixed, strong
+        n += 1
+        col7 = raw[_IND] if len(raw) > _IND else " "
+        if col7 in _FIXED_COMMENT_INDICATORS:
+            comments += 1
+        elif col7 not in _FIXED_INDICATORS:
+            violations += 1
+    return n, violations, comments
 
 
-def _shape_score(source: str, fmt: SourceFormat) -> int:
-    """How many distinct COBOL structural anchors survive normalization under ``fmt``.
-
-    A correct format recovers several (IDENTIFICATION/PROGRAM-ID/PROCEDURE ...); the
-    wrong format mangles them, so this cheaply verifies an otherwise-ambiguous guess.
-    """
-    joined = "\n".join(cl.text for cl in normalize(source, fmt))
-    return len({m.group(1).split()[0].upper() for m in _COBOL_ANCHORS.finditer(joined)})
+def _division_header_format(raw_lines: List[str]) -> Optional[SourceFormat]:
+    """Decide by the column of the first DIVISION header: column 8 (Area A) => fixed,
+    column 1-4 (left margin) => free. Returns ``None`` when no header pins it."""
+    for raw in raw_lines:
+        m = _DIVISION_HEADER.search(raw)
+        if m is None:
+            continue
+        col = m.start() + 1  # 1-based column of the header word
+        if col == _CODE.start + 1:      # column 8
+            return SourceFormat.FIXED
+        if col <= 4:
+            return SourceFormat.FREE
+        # A header at some other column is inconclusive; keep scanning for a clearer one.
+    return None
 
 
 def detect_source_format(source: str) -> FormatDetection:
     """Auto-detect fixed vs. free format, with a confidence and a human-readable reason.
 
-    Layered so that certainty degrades gracefully: an explicit directive wins; else
-    clear column signals; else a shape check that normalizes both ways and keeps the
-    one yielding recognizable COBOL; else the z/OS default (fixed) at low confidence.
+    Priority order - definitive signals first, heuristic last - so certainty degrades
+    gracefully and the change-marker problem never arises (column 7 is the discriminator,
+    columns 1-6 are ignored):
+
+    1. explicit ``>>SOURCE FORMAT`` / ``SOURCEFORMAT()`` directive  -> conclusive
+    2. column-7 invariant: every line has a valid indicator          -> conclusive fixed
+    3. first DIVISION header at column 8 vs. the left margin          -> conclusive
+    4. a line past the 80-column card boundary                        -> free
+    5. fallback: the column-7 violation rate                          -> heuristic
     """
     raw_lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
+    # 1. Explicit directive.
     directive = _directive_format(raw_lines)
     if directive is not None:
         return FormatDetection(directive, 1.0, "explicit source-format directive")
 
-    free, fixed, strong = _score_columns(raw_lines)
-    total = free + fixed
-    if strong and total:
-        margin = abs(free - fixed) / total
-        if margin >= 0.2:
-            fmt = SourceFormat.FREE if free > fixed else SourceFormat.FIXED
-            return FormatDetection(fmt, min(0.97, 0.65 + margin * 0.3),
-                                   f"column signals (free={free}, fixed={fixed})")
+    n, violations, comments = _column7_scan(raw_lines)
 
-    # Ambiguous columns: let each format prove itself by recovering COBOL structure.
-    fixed_shape = _shape_score(source, SourceFormat.FIXED)
-    free_shape = _shape_score(source, SourceFormat.FREE)
-    if fixed_shape != free_shape:
-        fmt = SourceFormat.FIXED if fixed_shape > free_shape else SourceFormat.FREE
-        lead = abs(fixed_shape - free_shape)
-        return FormatDetection(fmt, 0.8 if lead >= 2 else 0.65,
-                               f"shape check (fixed={fixed_shape}, free={free_shape})")
+    # 2. Column-7 invariant: not one line puts code in column 7 -> fixed. This alone
+    #    classifies real fixed source correctly regardless of change markers in cols 1-6.
+    if n and violations == 0:
+        why = f"column 7 is a valid indicator on all {n} lines"
+        if comments:
+            why += f", incl. {comments} comment/continuation line(s)"
+        return FormatDetection(SourceFormat.FIXED, 0.97, why)
 
-    # Genuinely indistinguishable: default to the z/OS norm, low confidence.
-    fmt = SourceFormat.FREE if free > fixed else SourceFormat.FIXED
-    return FormatDetection(
-        fmt, 0.3,
-        f"ambiguous - no directive or diagnostic signals; defaulted to {fmt.value} "
-        "(z/OS norm). Pass --format to override.")
+    # 3. DIVISION header column.
+    header_fmt = _division_header_format(raw_lines)
+    if header_fmt is not None:
+        return FormatDetection(header_fmt, 0.95, "DIVISION header column position")
+
+    # 4. Anything past the 80-column card boundary cannot be strict fixed.
+    if any(len(raw.rstrip()) > 80 for raw in raw_lines):
+        return FormatDetection(SourceFormat.FREE, 0.85, "source line exceeds 80 columns")
+
+    # 5. Fallback heuristic on how often column 7 carries code.
+    ratio = violations / n if n else 0.0
+    if ratio >= 0.15:
+        return FormatDetection(SourceFormat.FREE, min(0.9, 0.6 + ratio),
+                               f"program text in column 7 on {violations}/{n} line(s)")
+    return FormatDetection(SourceFormat.FIXED, 0.6 if violations else 0.7,
+                           "no free-format signal; defaulted to fixed (z/OS norm)")
 
 
 def _detect_format(raw_lines: List[str]) -> SourceFormat:

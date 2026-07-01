@@ -140,10 +140,31 @@ def test_fixed_long_lines_and_ident_area_not_misread_as_free():
     assert det.format is SourceFormat.FIXED
 
 
-def test_detect_ambiguous_layout_is_low_confidence_but_lossless():
-    # Code indented to col 8, no directive/sequence numbers/long lines: byte-identical
-    # to blank-sequence fixed. We cannot know - so flag it LOW confidence rather than
-    # pretend. Crucially, defaulting to fixed is still lossless for this layout.
+def test_detect_fixed_with_alphanumeric_change_markers_in_sequence_area():
+    # THE change-marker case (e.g. FBMMAAIO): real fixed source carries alphanumeric
+    # change/revision markers in the sequence area (cols 1-6). The compiler ignores
+    # cols 1-6, so these must NOT be read as free-format code. Column 7 stays a valid
+    # indicator on every line, so the column-7 invariant classifies it fixed.
+    src = (
+        "CHG001 IDENTIFICATION DIVISION.\n"
+        "CHG001 PROGRAM-ID. FBMMAAIO.\n"
+        "PR1234 PROCEDURE DIVISION.\n"
+        "PR1234 5000-PROCESS.\n"
+        "MOD07A     MOVE WS-A TO WS-B.\n"
+    )
+    det = detect_source_format(src)
+    assert det.format is SourceFormat.FIXED
+    assert det.is_confident
+    # And the change markers are stripped, leaving clean code.
+    texts = [cl.text.strip() for cl in normalize(src)]
+    assert "IDENTIFICATION DIVISION." in texts
+    assert "PROGRAM-ID. FBMMAAIO." in texts
+    assert not any("CHG001" in t or "PR1234" in t for t in texts)
+
+
+def test_detect_indented_fixed_layout_is_fixed_and_lossless():
+    # Code indented to col 8 with a clean column 7 (all blank): the column-7 invariant
+    # holds, so this is fixed - and reading it as fixed is lossless.
     src = (
         "        IDENTIFICATION DIVISION.\n"
         "        PROGRAM-ID. T.\n"
@@ -151,15 +172,16 @@ def test_detect_ambiguous_layout_is_low_confidence_but_lossless():
         "        MOVE A TO B.\n"
     )
     det = detect_source_format(src)
-    assert not det.is_confident            # caller should warn / recommend --format
+    assert det.format is SourceFormat.FIXED
     texts = [cl.text.strip() for cl in normalize(src)]
     assert "IDENTIFICATION DIVISION." in texts
-    assert "PROCEDURE DIVISION." in texts  # anchors survive whichever way we defaulted
+    assert "PROCEDURE DIVISION." in texts
 
 
-def test_detect_shape_check_recovers_free_when_fixed_would_mangle():
-    # A free program whose code sits in the indicator/sequence area is unreadable as
-    # fixed (cols 1-7 get sliced off). Detection must recover FREE.
+def test_detect_margin_code_is_free_via_division_header_and_column7():
+    # A free program whose code sits at the left margin: column 7 holds code (invariant
+    # broken) and the DIVISION header is at column 1. Detection must recover FREE, and
+    # normalization must keep the program intact.
     src = (
         "IDENTIFICATION DIVISION.\n"
         "PROGRAM-ID. FOO.\n"
@@ -169,6 +191,5 @@ def test_detect_shape_check_recovers_free_when_fixed_would_mangle():
     )
     det = detect_source_format(src)
     assert det.format is SourceFormat.FREE
-    # And normalization keeps the program intact.
     texts = [cl.text.strip() for cl in normalize(src)]
     assert "PROGRAM-ID. FOO." in texts
