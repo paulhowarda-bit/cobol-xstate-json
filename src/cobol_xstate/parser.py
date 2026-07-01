@@ -379,7 +379,7 @@ class StmtParser:
             ln = self._next().line
             return TerminateStmt(line=ln, kind="GOBACK")
         if v in OPAQUE_SCOPED:
-            return self.parse_opaque_scoped(OPAQUE_SCOPED[v])
+            return self.parse_opaque_scoped(OPAQUE_SCOPED[v], stops)
         return self.parse_action(stops)
 
     # -- opaque action -----------------------------------------------------
@@ -406,21 +406,45 @@ class StmtParser:
             parts.append(self._next().text)
         return Action(line=line, text=" ".join(parts), verb=verb)
 
-    def parse_opaque_scoped(self, endword: str) -> Stmt:
+    def parse_opaque_scoped(self, endword: str, stops: Set[str]) -> Stmt:
+        """Consume a STRING / UNSTRING statement as one opaque action.
+
+        These carry an *optional* ``END-<verb>`` scope terminator. When it is present
+        we consume up to it. When it is ABSENT, COBOL terminates the statement
+        implicitly at the next statement-starting verb, so we must stop there too -
+        exactly like :meth:`parse_action`. Otherwise a terminator-less STRING swallows
+        the entire rest of the paragraph (every following IF / PERFORM / EVALUATE) as a
+        single opaque blob, which is the common one-period-per-paragraph style and was
+        collapsing real control flow.
+
+        The one exception is an ``ON OVERFLOW`` / ``NOT ON OVERFLOW`` phrase, whose
+        imperative legitimately contains verbs; those belong to the statement until its
+        ``END-`` word or the sentence period, so we keep consuming while inside it.
+        """
         start = self._next()
         parts = [start.text]
         line = start.line
         depth = 1
+        in_overflow = False
         while not self._eof():
             t = self._peek()
             if t.kind == "period":
                 break
-            if t.kind == "word" and t.up == endword:
-                parts.append(self._next().text)
-                depth -= 1
-                if depth == 0:
-                    break
-                continue
+            if t.kind == "word":
+                u = t.up
+                if u == endword:
+                    parts.append(self._next().text)
+                    depth -= 1
+                    if depth == 0:
+                        break
+                    continue
+                if u == "OVERFLOW":
+                    in_overflow = True
+                elif not in_overflow and (
+                    u in STARTERS or u in stops or self._is_end_word(t)
+                    or u in {"ELSE", "WHEN", "THEN"}
+                ):
+                    break  # implicit terminator: no END- word for this statement
             parts.append(self._next().text)
         return Action(line=line, text=" ".join(parts), verb=start.up)
 

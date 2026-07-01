@@ -206,3 +206,82 @@ def test_no_procedure_division():
     )
     assert prog.has_procedure_division is False
     assert prog.paragraphs == []
+
+
+def _para(prog, name):
+    return next(p for p in prog.paragraphs if p.name == name)
+
+
+def test_string_without_end_string_does_not_swallow_following_statements():
+    # A STRING with no END-STRING terminator must end at the next statement verb,
+    # not consume the rest of the paragraph (one-period-per-paragraph style).
+    from cobol_xstate.model import walk_statements, Action, IfStmt
+    prog = parse_program(_wrap(
+        "       5000-PROCESS.\n"
+        "           STRING WS-A DELIMITED BY SIZE\n"
+        "                  WS-B DELIMITED BY SIZE\n"
+        "               INTO WS-OUT\n"
+        "           MOVE 1 TO WS-FLAG\n"
+        "           IF WS-FLAG = 1\n"
+        "               PERFORM 6000-NEXT\n"
+        "           END-IF\n"
+        "           IF WS-A > 0\n"
+        "               MOVE 2 TO WS-FLAG\n"
+        "           END-IF.\n"
+    ))
+    stmts = _para(prog, "5000-PROCESS").statements
+    ifs = [s for s in walk_statements(stmts) if isinstance(s, IfStmt)]
+    assert len(ifs) == 2, "the two IFs after the STRING must survive as real control flow"
+    # The STRING itself is still captured as an opaque action, but only its own text.
+    string_actions = [s for s in walk_statements(stmts)
+                      if isinstance(s, Action) and s.verb == "STRING"]
+    assert len(string_actions) == 1
+    assert "PERFORM" not in string_actions[0].text  # did not swallow the paragraph
+
+
+def test_string_with_end_string_and_overflow_keeps_its_imperative():
+    # With an explicit END-STRING, the ON OVERFLOW imperative (which contains verbs)
+    # belongs to the STRING and must not prematurely terminate the opaque scope.
+    from cobol_xstate.model import walk_statements, Action, IfStmt
+    prog = parse_program(_wrap(
+        "       5000-PROCESS.\n"
+        "           STRING WS-A DELIMITED BY SIZE INTO WS-OUT\n"
+        "               ON OVERFLOW\n"
+        "                   MOVE 1 TO WS-ERR\n"
+        "                   PERFORM 9000-ERR\n"
+        "           END-STRING\n"
+        "           MOVE 5 TO WS-DONE\n"
+        "           IF WS-DONE = 5\n"
+        "               PERFORM 6000-NEXT\n"
+        "           END-IF.\n"
+    ))
+    stmts = _para(prog, "5000-PROCESS").statements
+    string_actions = [s for s in walk_statements(stmts)
+                      if isinstance(s, Action) and s.verb == "STRING"]
+    assert len(string_actions) == 1
+    # The overflow imperative stayed inside the STRING opaque text.
+    assert "OVERFLOW" in string_actions[0].text
+    assert "END-STRING" in string_actions[0].text
+    # And the statement AFTER END-STRING is still its own control flow.
+    ifs = [s for s in walk_statements(stmts) if isinstance(s, IfStmt)]
+    assert len(ifs) == 1
+
+
+def test_string_without_end_string_inside_if_does_not_eat_end_if():
+    from cobol_xstate.model import walk_statements, IfStmt, Action
+    prog = parse_program(_wrap(
+        "       5000-PROCESS.\n"
+        "           IF WS-A > 0\n"
+        "               STRING WS-A DELIMITED BY SIZE INTO WS-OUT\n"
+        "               MOVE 1 TO WS-FLAG\n"
+        "           END-IF\n"
+        "           PERFORM 6000-NEXT.\n"
+    ))
+    stmts = _para(prog, "5000-PROCESS").statements
+    ifs = [s for s in walk_statements(stmts) if isinstance(s, IfStmt)]
+    assert len(ifs) == 1
+    # The MOVE lives inside the IF then-body, and the STRING did not eat END-IF.
+    string_actions = [s for s in walk_statements(stmts)
+                      if isinstance(s, Action) and s.verb == "STRING"]
+    assert len(string_actions) == 1
+    assert "MOVE" not in string_actions[0].text

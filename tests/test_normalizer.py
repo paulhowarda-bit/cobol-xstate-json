@@ -120,12 +120,24 @@ def test_detect_left_margin_code_is_free_and_confident():
     assert det.is_confident
 
 
-def test_detect_content_past_column_80_is_free():
-    src = "        MOVE SOURCE-FIELD TO A-TARGET-FIELD-WHOSE-NAME-RUNS-WELL-PAST-COLUMN-EIGHTY.\n"
-    assert len(src.rstrip()) > 80
+def test_fixed_long_lines_and_ident_area_not_misread_as_free():
+    # Regression: real fixed source fills cols 73-80 (identification area) and can run
+    # past column 80. Line length is NOT a free-format signal - the compiler ignores
+    # everything past col 72 - so such a program must still detect as FIXED.
+    def fixed(code: str) -> str:
+        # blank seq (1-6), blank indicator (7), code at col 8, ident field past col 80
+        return ("      " + " " + code).ljust(72) + "IDENT0001"
+    src = "\n".join([
+        fixed("IDENTIFICATION DIVISION."),
+        fixed("PROGRAM-ID. BIG."),
+        fixed("PROCEDURE DIVISION."),
+        fixed("0000-MAIN."),
+        fixed("    MOVE WS-A TO WS-B"),
+        fixed("    STOP RUN."),
+    ]) + "\n"
+    assert max(len(line) for line in src.splitlines()) > 80
     det = detect_source_format(src)
-    assert det.format is SourceFormat.FREE
-    assert det.is_confident
+    assert det.format is SourceFormat.FIXED
 
 
 def test_detect_ambiguous_layout_is_low_confidence_but_lossless():
