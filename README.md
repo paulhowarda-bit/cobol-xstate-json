@@ -107,9 +107,15 @@ STATEMATE statechart holds beyond control flow travels alongside it:
   / `RETURNING`, the `LINKAGE SECTION` records, and whether a CICS `DFHCOMMAREA` is present
   — i.e. the input/output parameters the caller passes across the boundary (surfaced as
   `get`/`create` against the caller, since `USING` is by reference). `CALL … USING`
-  arguments appear as the `fields` of the outbound program event. This is a pure
-  classification of the emitted machine — the same boundary the `harel-statechart-render`
-  skill draws as typed endpoint nodes. See it at a glance with `--summary`.
+  arguments appear as the `fields` of the outbound program event. `MOVE`s to/from a
+  `LINKAGE` item are recognized as the request/response boundary (receive-request `get` /
+  send-response `create`), branches on an external return item (`SQLCODE`, `EIBRESP`) are
+  surfaced as a `get` **response** event from that subsystem, and each perimeter state is
+  labelled `input` / `output` / `input-output`. The boundary is also tagged **on the
+  machine itself** — every perimeter state carries `meta.perimeter` with its gets/creates,
+  so a consumer reading the bare `machine` (or the `harel-statechart-render` skill) sees it
+  without cross-referencing. This is a pure classification of the emitted machine. See it at
+  a glance with `--summary`.
 
 Nothing is invented — every action/guard expression is a faithful translation of the
 COBOL the `provenance` entry points to. The one thing the bare config can't embed is the
