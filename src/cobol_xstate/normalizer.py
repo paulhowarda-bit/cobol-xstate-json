@@ -114,34 +114,37 @@ def _directive_format(raw_lines: List[str]) -> Optional[SourceFormat]:
 def _score_columns(raw_lines: List[str]) -> Tuple[int, int, bool]:
     """Weighted column-signal vote. Returns ``(free, fixed, saw_strong_signal)``.
 
-    Only signals that are genuinely diagnostic get weight; the one ambiguous layout
-    (blank/numeric seq area + blank indicator + code from col 8) is deliberately a
-    *weak* fixed vote, because a free-format file merely indented to col 8 is
-    byte-identical to it - that case is resolved later by a shape check, not here.
+    The vote turns on *where the first code character sits*, which is what actually
+    distinguishes the formats - NOT line length. Fixed-format source uses columns
+    1-72 and the compiler ignores everything past 72, so long lines and a filled
+    73-80 identification area are ordinary fixed source, never a free-format signal.
+
+    Strong signals: an all-digit sequence area (cols 1-6) or a valid indicator in
+    col 7 => FIXED; a code character in cols 1-7 (sequence/indicator area) => FREE.
+    The ambiguous layout - blank seq, blank col 7, code from col 8 - is only a *weak*
+    fixed lean, because free code merely indented to col 8 is byte-identical to it;
+    that case is settled later by the shape check, and defaulting it to fixed is
+    lossless anyway (fixed reading only strips the blank cols 1-7).
     """
     free = fixed = 0
     strong = False
     for raw in raw_lines:
         if not raw.strip():
             continue
-        seq = raw[_SEQ]
-        ind = raw[_IND] if len(raw) > _IND else " "
-        stripped = raw.strip()
-        indent = len(raw) - len(raw.lstrip())
-        if len(raw.rstrip()) > 80:
-            free += 5; strong = True            # past the 80-col card boundary: can't be fixed
-        elif seq.strip().isdigit():
-            fixed += 3; strong = True            # all-digit sequence numbers: classic fixed
-        elif seq.strip():
-            free += 2; strong = True             # letters in cols 1-6: left-margin free code
-        elif stripped.startswith((">>", "*>")) and indent < _IND:
-            free += 2; strong = True             # free directive / inline comment at the margin
-        elif ind in ("*", "/", "-", "D", "d"):
-            fixed += 2; strong = True            # comment / continuation / debug indicator in col 7
-        elif ind == " ":
-            fixed += 1                           # normal fixed line - but also free indented to col 8
+        seq = raw[_SEQ]                                 # cols 1-6 (sequence area)
+        ind = raw[_IND] if len(raw) > _IND else " "     # col 7 (indicator area)
+        indent = len(raw) - len(raw.lstrip())           # first code char at col indent+1
+        if seq.strip().isdigit():
+            fixed += 3; strong = True                    # all-digit sequence numbers
+        elif indent >= _CODE.start:
+            fixed += 1                                   # code at col 8+: fixed, or free indented
+        elif indent == _IND:
+            if ind in ("*", "/", "-", "D", "d"):
+                fixed += 2; strong = True                # comment / continuation / debug in col 7
+            else:
+                free += 2; strong = True                 # a code character in the indicator column
         else:
-            free += 2; strong = True             # a code character sits in the indicator column
+            free += 2; strong = True                     # code in the sequence area (cols 1-6)
     return free, fixed, strong
 
 
