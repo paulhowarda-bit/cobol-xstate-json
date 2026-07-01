@@ -99,7 +99,8 @@ def _gather_statement(lines: List[CodeLine], i: int):
 
 
 def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = None,
-               _seen: Optional[set] = None) -> PreprocessResult:
+               _seen: Optional[set] = None,
+               fmt: Optional[SourceFormat] = None) -> PreprocessResult:
     resolver = resolver or CopybookResolver()
     _seen = _seen if _seen is not None else set()
     out: List[CodeLine] = []
@@ -115,7 +116,7 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
             if m:
                 member = m.group(1)
                 pairs = _parse_replacing(m.groupdict().get("rep") or "") if hasattr(m, "groupdict") else []
-                _expand_member(member, pairs, resolver, res, _seen)
+                _expand_member(member, pairs, resolver, res, _seen, fmt)
                 i = nxt
                 continue
         out.append(line)
@@ -123,7 +124,8 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
     return res
 
 
-def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set) -> None:
+def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
+                   fmt: Optional[SourceFormat] = None) -> None:
     key = member.strip().strip("'\"").upper()
     if key in seen:
         res.notes.append(f"COPY {key}: recursive/cyclic include skipped")
@@ -136,10 +138,12 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set) ->
         return
     text, path = found
     res.expanded.append(key)
-    sub = normalize(text)
+    # A copybook inherits the including program's source format - it is a fragment,
+    # far too small to auto-detect reliably on its own.
+    sub = normalize(text, fmt)
     seen = seen | {key}
     # Recursively preprocess the copybook (nested COPY), then apply REPLACING.
-    inner = preprocess(sub, resolver, seen)
+    inner = preprocess(sub, resolver, seen, fmt)
     res.expanded.extend(x for x in inner.expanded if x not in res.expanded)
     res.missing.extend(inner.missing)
     res.notes.extend(inner.notes)

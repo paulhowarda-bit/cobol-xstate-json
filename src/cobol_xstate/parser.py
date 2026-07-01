@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Set
 
-from .normalizer import CodeLine, SourceFormat, normalize
+from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
 from .data_division import parse_data_division
 from .preprocessor import CopybookResolver, preprocess
@@ -133,8 +133,10 @@ def _procedure_lines(lines: List[CodeLine]) -> List[CodeLine]:
 
 def parse_program(source: str, fmt: Optional[SourceFormat] = None,
                   resolver: Optional[CopybookResolver] = None) -> Program:
+    if fmt is None:
+        fmt = detect_source_format(source).format
     lines = normalize(source, fmt)
-    pre = preprocess(lines, resolver)
+    pre = preprocess(lines, resolver, fmt=fmt)
     lines = pre.lines
     prog = Program(program_id=_find_program_id(lines))
     if pre.expanded:
