@@ -588,24 +588,41 @@ def _emit_split(key: str, st: dict, out: dict, buildable: set, needed: set) -> N
     out[ids[n]] = control
 
 
-def _target_owner(target: str, ordered: List[str]) -> Tuple[Optional[set], Optional[str]]:
-    """Resolve a PERFORM target to (owner_paragraph_set, initial_paragraph). A plain name
-    owns just itself; ``HEAD__THRU__TAIL`` owns the source-order paragraph span head..tail
-    (PERFORM p THRU q runs p through q, then returns)."""
+def _target_owner(target: str, ordered: List[str],
+                  sections: Optional[Dict[str, List[str]]] = None,
+                  ) -> Tuple[Optional[set], Optional[str]]:
+    """Resolve a PERFORM target to (owner_paragraph_set, initial_paragraph). A plain
+    paragraph owns just itself; a SECTION name owns the header plus every member
+    paragraph (PERFORM section runs the whole extent); ``HEAD__THRU__TAIL`` owns the
+    source-order span head..tail, extended through TAIL's members when TAIL is a
+    section (PERFORM p THRU q runs p through the end of q, then returns)."""
+    sections = sections or {}
+
+    def extent_end(name: str) -> int:
+        """Index in `ordered` of the last paragraph belonging to `name`."""
+        idxs = [ordered.index(n) for n in sections.get(name, [name]) if n in ordered]
+        return max(idxs) if idxs else -1
+
     if "__THRU__" in target:
         head, tail = target.split("__THRU__", 1)
         if head in ordered and tail in ordered:
-            i, j = ordered.index(head), ordered.index(tail)
-            if i <= j:
+            i, j = ordered.index(head), extent_end(tail)
+            if 0 <= i <= j:
                 return set(ordered[i:j + 1]), head
         return None, None
-    return ({target}, target) if target in ordered else (None, None)
+    if target not in ordered:
+        return None, None
+    members = sections.get(target)
+    if members:
+        return {n for n in members if n in ordered}, target
+    return {target}, target
 
 
-def _buildable_targets(pool: dict, ordered: List[str]) -> set:
+def _buildable_targets(pool: dict, ordered: List[str],
+                       sections: Optional[Dict[str, List[str]]] = None) -> set:
     performed = {a[len("perform_"):] for st in pool.values()
                  for a in (st.get("entry", []) or []) if a.startswith("perform_")}
-    return {t for t in performed if _target_owner(t, ordered)[0] is not None}
+    return {t for t in performed if _target_owner(t, ordered, sections)[0] is not None}
 
 
 def _reroute_to_return(states: dict, owner: set) -> None:
@@ -635,11 +652,12 @@ def _prune(states: dict, initial: str) -> dict:
     return {k: v for k, v in states.items() if k in seen}
 
 
-def _build_actors(pool: dict, buildable: set, seed: set,
-                  ordered: List[str]) -> Dict[str, dict]:
+def _build_actors(pool: dict, buildable: set, seed: set, ordered: List[str],
+                  sections: Optional[Dict[str, List[str]]] = None) -> Dict[str, dict]:
     """Build an actor config for every PERFORM target reachable from `seed`, slicing the
     owned paragraph(s) out of the shared `pool` (so cross-region and THRU-range PERFORMs
-    resolve). A range target owns its whole paragraph span; a plain target owns itself."""
+    resolve). A range target owns its whole paragraph span; a section owns its members;
+    a plain target owns itself."""
     actor_configs: Dict[str, dict] = {}
     work = list(seed)
     while work:
@@ -647,7 +665,7 @@ def _build_actors(pool: dict, buildable: set, seed: set,
         name = f"actor:{target}"
         if name in actor_configs:
             continue
-        owner, initial = _target_owner(target, ordered)
+        owner, initial = _target_owner(target, ordered, sections)
         if owner is None:
             continue
         own = copy.deepcopy({k: v for k, v in pool.items() if _para_of(k) in owner})
@@ -664,12 +682,13 @@ def _build_actors(pool: dict, buildable: set, seed: set,
     return actor_configs
 
 
-def _invoke_transform(orig_states: dict, initial: str,
-                      ordered: List[str]) -> Tuple[dict, Dict[str, dict]]:
+def _invoke_transform(orig_states: dict, initial: str, ordered: List[str],
+                      sections: Optional[Dict[str, List[str]]] = None,
+                      ) -> Tuple[dict, Dict[str, dict]]:
     """Return (main_states, actor_configs). Performs become invokes of actor machines;
     main is pruned to what is reachable from `initial` (the un-performed paragraph copies
     fall away). Each actor config is {initial, states} with a `__RET__` final."""
-    buildable = _buildable_targets(orig_states, ordered)
+    buildable = _buildable_targets(orig_states, ordered, sections)
     main_src = copy.deepcopy(orig_states)
     main_new: dict = {}
     sink: set = set()
@@ -679,18 +698,19 @@ def _invoke_transform(orig_states: dict, initial: str,
 
     seed = {inv["src"][len("actor:"):] for s in main_new.values()
             for inv in [s.get("invoke") or {}] if inv.get("src")}
-    return main_new, _build_actors(orig_states, buildable, seed, ordered)
+    return main_new, _build_actors(orig_states, buildable, seed, ordered, sections)
 
 
-def _invoke_transform_parallel(regions: dict,
-                               ordered: List[str]) -> Tuple[dict, Dict[str, dict]]:
+def _invoke_transform_parallel(regions: dict, ordered: List[str],
+                               sections: Optional[Dict[str, List[str]]] = None,
+                               ) -> Tuple[dict, Dict[str, dict]]:
     """Parallel (DECLARATIVES/HANDLE) machine: transform each region's flow into invokes,
     building actors from a pool unioned across all regions so a handler can PERFORM a
     main-flow paragraph and vice versa."""
     pool: dict = {}
     for r in regions.values():
         pool.update(r.get("states", {}))
-    buildable = _buildable_targets(pool, ordered)
+    buildable = _buildable_targets(pool, ordered, sections)
 
     new_regions: dict = {}
     seed: set = set()
@@ -705,7 +725,7 @@ def _invoke_transform_parallel(regions: dict,
         new_regions[name] = nr
         seed |= sink
 
-    return new_regions, _build_actors(pool, buildable, seed, ordered)
+    return new_regions, _build_actors(pool, buildable, seed, ordered, sections)
 
 
 # --------------------------------------------------------------------------- #
@@ -719,13 +739,15 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
 
     # PERFORM -> invoke: rebuild the runnable flow with real call-return.
     ordered = machine.paragraph_order
+    sections = machine.sections
     actor_configs: Dict[str, dict] = {}
     if config.get("type") == "parallel":
-        new_regions, actor_configs = _invoke_transform_parallel(config["states"], ordered)
+        new_regions, actor_configs = _invoke_transform_parallel(
+            config["states"], ordered, sections)
         config["states"] = new_regions
     elif config.get("states") and config.get("initial"):
-        main_states, actor_configs = _invoke_transform(config["states"],
-                                                       config["initial"], ordered)
+        main_states, actor_configs = _invoke_transform(
+            config["states"], config["initial"], ordered, sections)
         config["states"] = main_states
 
     # collect referenced names across the main machine AND every actor body

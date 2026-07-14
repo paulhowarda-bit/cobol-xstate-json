@@ -77,6 +77,9 @@ class Machine:
     data: Dict[str, dict] = field(default_factory=dict)
     semantics: Dict[str, dict] = field(default_factory=dict)
     paragraph_order: List[str] = field(default_factory=list)  # source order (for THRU)
+    # section header -> [header, member paragraphs...] so PERFORM section-name owns
+    # the section's whole extent (not just the header pseudo-paragraph).
+    sections: Dict[str, List[str]] = field(default_factory=dict)
     using: List[str] = field(default_factory=list)       # PROCEDURE DIVISION USING params
     returning: Optional[str] = None                      # PROCEDURE DIVISION RETURNING
 
@@ -859,6 +862,17 @@ def _build_handlers_region(program: Program, ctx: "_BuildCtx"):
     return {"initial": "__WATCH__", "states": handler_states}
 
 
+def _section_map(program: Program) -> Dict[str, List[str]]:
+    """Section header name -> [header, member paragraphs...] in source order. PERFORM of
+    a section runs its whole extent, so the emitter's actor owner needs the members."""
+    out: Dict[str, List[str]] = {}
+    for plist in (program.paragraphs, program.declaratives):
+        for p in plist:
+            if p.section:
+                out.setdefault(p.section, [p.section]).append(p.name)
+    return out
+
+
 def build_machine(program: Program, source_name: str = "<source>") -> Machine:
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
                     data=program.data_by_name)
@@ -968,6 +982,7 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem},
         paragraph_order=[p.name for p in program.paragraphs]
         + [p.name for p in program.declaratives],
+        sections=_section_map(program),
         using=program.using,
         returning=program.returning,
     )
