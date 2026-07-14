@@ -211,3 +211,115 @@ def test_cics_handle_condition_is_a_get_in_the_handlers_region():
     conds = [ev for d in iface["perimeterStates"].values() for ev in d["gets"]
              if ev.startswith("GET.CONDITION.")]
     assert conds, "an external error/exception condition should be a 'get'"
+
+
+# --------------------------------------------------------------------------- #
+# Field-level capture + previously-invisible channels
+# --------------------------------------------------------------------------- #
+
+def _iface_of(src: str) -> dict:
+    from cobol_xstate.parser import parse_program
+    from cobol_xstate.statechart import build_machine
+    return build_machine(parse_program(src)).bundle()["interface"]
+
+
+_CICS_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. CQ.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-BUF        PIC X(80).\n"
+    "       01  WS-REC        PIC X(80).\n"
+    "       LINKAGE SECTION.\n"
+    "       01  DFHCOMMAREA.\n"
+    "           05  CA-ID     PIC 9(6).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           IF EIBCALEN = 0\n"
+    "               EXEC CICS ABEND ABCODE('NOCA') END-EXEC\n"
+    "           END-IF\n"
+    "           EXEC CICS READQ TS QUEUE('MYTSQ') INTO(WS-BUF) END-EXEC\n"
+    "           EXEC CICS READ DATASET('ACCT') INTO(WS-REC) RIDFLD(CA-ID)\n"
+    "           END-EXEC\n"
+    "           EXEC CICS WRITEQ TD QUEUE('MYTDQ') FROM(WS-BUF) END-EXEC\n"
+    "           EXEC CICS RETURN TRANSID('CQ02') COMMAREA(DFHCOMMAREA)\n"
+    "           END-EXEC.\n"
+)
+
+
+def test_cics_queues_are_visible_with_fields():
+    iface = _iface_of(_CICS_SRC)
+    evs = {(e["verb"], e["endpoint"]): e for e in iface["events"]}
+    rq = evs[("CICS READQ TS", "MYTSQ")]
+    assert rq["direction"] == "get" and rq["fields"] == ["WS-BUF"]
+    wq = evs[("CICS WRITEQ TD", "MYTDQ")]
+    assert wq["direction"] == "create" and wq["fields"] == ["WS-BUF"]
+
+
+def test_cics_return_with_commarea_and_transid_is_visible():
+    iface = _iface_of(_CICS_SRC)
+    ret = next(e for e in iface["events"] if e["verb"].startswith("CICS RETURN"))
+    assert "TRANSID(CQ02)" in ret["verb"]        # the pseudo-conversational contract
+    assert ret["fields"] == ["DFHCOMMAREA"]      # the returned COMMAREA
+    assert ret["direction"] == "create" and ret["endpointType"] == "caller"
+
+
+def test_cics_read_carries_into_and_ridfld_key():
+    iface = _iface_of(_CICS_SRC)
+    rd = next(e for e in iface["events"] if e["verb"] == "CICS READ")
+    assert rd["fields"] == ["WS-REC"]            # landing area
+    assert rd.get("params") == ["CA-ID"]         # outbound key (from LINKAGE!)
+
+
+def test_eibcalen_branch_is_a_cics_input_and_abend_visible():
+    iface = _iface_of(_CICS_SRC)
+    assert any(e["endpoint"] == "CICS-EIB" and "EIBCALEN" in e["fields"]
+               for e in iface["events"])
+    assert any(e["verb"] == "CICS ABEND" and e["endpoint"] == "NOCA"
+               for e in iface["events"])
+
+
+def test_file_status_branch_is_a_response_event():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. FS.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT MAST-FILE ASSIGN TO MASTDD\n"
+        "               ORGANIZATION IS INDEXED\n"
+        "               RECORD KEY IS M-KEY\n"
+        "               FILE STATUS IS WS-FSTAT.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  MAST-FILE.\n"
+        "       01  MAST-REC.\n"
+        "           05  M-KEY   PIC X(8).\n"
+        "           05  M-AMT   PIC 9(5).\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-FSTAT    PIC XX.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           OPEN INPUT MAST-FILE\n"
+        "           READ MAST-FILE\n"
+        "               AT END CONTINUE\n"
+        "           END-READ\n"
+        "           IF WS-FSTAT NOT = '00'\n"
+        "               DISPLAY 'BAD ' WS-FSTAT\n"
+        "           END-IF\n"
+        "           STOP RUN.\n"
+    )
+    iface = _iface_of(src)
+    # branching on the FILE STATUS field is a response event from that file
+    assert any(e["endpointType"] == "response" and e["endpoint"] == "MAST-FILE"
+               and e["fields"] == ["WS-FSTAT"] for e in iface["events"])
+    # the file endpoint carries its external binding from FILE-CONTROL
+    ep = next(p for p in iface["endpoints"] if p["endpoint"] == "MAST-FILE")
+    assert ep["assign"] == "MASTDD" and ep["organization"] == "INDEXED"
+    assert ep["statusField"] == "WS-FSTAT" and ep["recordKey"] == "M-KEY"
+    # READ with no INTO lists the FD record's field layout
+    rd = next(e for e in iface["events"] if e["verb"] == "READ")
+    assert set(rd["fields"]) >= {"MAST-REC", "M-KEY", "M-AMT"}
+    # DISPLAY of a variable carries it as a field
+    disp = next(e for e in iface["events"] if e["verb"] == "DISPLAY")
+    assert disp["fields"] == ["WS-FSTAT"]

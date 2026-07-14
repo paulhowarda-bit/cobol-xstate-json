@@ -55,15 +55,13 @@ def _events_by_state(iface: dict) -> Dict[str, List[dict]]:
     return out
 
 
-def _read_action(name: str, provenance: dict, actions: dict) -> bool:
+def _read_action(name: str, provenance: dict, actions: dict, dv, files, cursors) -> bool:
     """True if entry action ``name`` is the synchronous inbound read/fetch for a data get -
     the thing PUSH replaces with an ``on`` wait. Non-read entry actions (MOVE, COMPUTE) stay."""
     prov = provenance.get(name, {})
-    hit = _iface._classify(name, prov.get("cobol", ""), actions.get(name))
-    if not hit:
-        return False
-    direction, etype, _endpoint, _verb, _fields = hit
-    return direction == "get" and etype in _DATA_GET_TYPES
+    hits = _iface._classify(name, prov.get("cobol", ""), actions.get(name),
+                            dv, files, cursors)
+    return any(h["direction"] == "get" and h["etype"] in _DATA_GET_TYPES for h in hits)
 
 
 class _Rewriter:
@@ -72,9 +70,13 @@ class _Rewriter:
     Accumulates the generated ``recv_*`` / ``publish_*`` names and an inbound/outbound event
     manifest, plus a list of un-handled perimeter situations to flag."""
 
-    def __init__(self, provenance: dict, actions: dict):
+    def __init__(self, provenance: dict, actions: dict, dv=None, files=None,
+                 cursors=None):
         self.provenance = provenance
         self.actions = actions
+        self.dv = dv if dv is not None else _iface._DataView(None)
+        self.files = files or {}
+        self.cursors = cursors or {}
         self.recv: Dict[str, List[str]] = {}      # recv action name -> fields to assign
         self.publish: List[str] = []              # publish effect names
         self.inbound: List[str] = []              # event names the machine waits on
@@ -148,14 +150,16 @@ class _Rewriter:
 
     def _is_create_action(self, name: str, ev: dict) -> bool:
         prov = self.provenance.get(name, {})
-        hit = _iface._classify(name, prov.get("cobol", ""), self.actions.get(name))
-        return bool(hit) and hit[0] == "create"
+        hits = _iface._classify(name, prov.get("cobol", ""), self.actions.get(name),
+                                self.dv, self.files, self.cursors)
+        return any(h["direction"] == "create" for h in hits)
 
     def _make_data_wait(self, states: dict, name: str, ev: dict) -> None:
         st = states[name]
         # drop the synchronous read; keep other entry actions (MOVE, etc.)
         st["entry"] = [a for a in (st.get("entry", []) or [])
-                       if not _read_action(a, self.provenance, self.actions)]
+                       if not _read_action(a, self.provenance, self.actions,
+                                           self.dv, self.files, self.cursors)]
         if not st["entry"]:
             st.pop("entry", None)
         recv = self._recv_action(ev["event"], ev.get("fields", []))
@@ -201,10 +205,14 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
 
     iface = _iface.build_interface(
         machine.config, machine.semantics, machine.provenance,
-        data=machine.data, using=machine.using, returning=machine.returning)
+        data=machine.data, using=machine.using, returning=machine.returning,
+        files=getattr(machine, "files", {}) or {})
     ev_by_state = _events_by_state(iface)
 
-    rw = _Rewriter(machine.provenance, machine.semantics.get("actions", {}))
+    rw = _Rewriter(machine.provenance, machine.semantics.get("actions", {}),
+                   dv=_iface._DataView(machine.data),
+                   files=getattr(machine, "files", {}) or {},
+                   cursors=_iface._cursor_tables(machine.provenance))
     rw.run(config.get("states", {}), ev_by_state)
 
     # Flag any perimeter state that lives inside a performed paragraph (an actor in the js

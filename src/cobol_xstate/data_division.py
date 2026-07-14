@@ -64,6 +64,9 @@ class DataItem:
     pic: Optional[str] = None
     usage: Optional[str] = None
     value: Optional[str] = None
+    # FILE SECTION only: the FD/SD file this record belongs to (record <-> file link,
+    # so the external interface can attribute record fields to the physical file).
+    file: Optional[str] = None
     occurs: Optional[int] = None
     # OCCURS min TO max DEPENDING ON var: `occurs` holds the MAXIMUM (the table is
     # seeded at full size); the dynamic length variable is kept here and flagged.
@@ -150,35 +153,45 @@ def _data_region(lines: List[CodeLine]) -> List[CodeLine]:
 
 
 def _entries(region: List[CodeLine]):
-    """Yield (text, line, section, origin) for each level-numbered data entry."""
+    """Yield (text, line, section, origin, fd) for each level-numbered data entry,
+    where ``fd`` is the enclosing FD/SD file name inside the FILE SECTION (None
+    elsewhere) - the record <-> file association the external interface needs."""
     section = None
+    fd = None
     buf: List[str] = []
     first_line = 0
     first_origin = None
+    first_fd = None
     for cl in region:
         t = cl.text.strip()
         up = t.upper()
         sec = next((s for s in _SECTIONS if up.startswith(s + " SECTION")), None)
         if sec:
             if buf:
-                yield " ".join(buf), first_line, section, first_origin
+                yield " ".join(buf), first_line, section, first_origin, first_fd
                 buf = []
             section = sec
+            fd = None
+            continue
+        fm = re.match(r"^(?:FD|SD)\s+([A-Z0-9][A-Z0-9-]*)", up)
+        if fm:
+            fd = fm.group(1)  # records that follow belong to this file
             continue
         if up.startswith(("FD ", "SD ", "RD ", "FD.", "01 FD")) or up in ("FD", "SD"):
             # File/sort descriptions - skip the FD line itself; its 01 follows.
             continue
         if _LEVEL_START.match(cl.text) and re.match(r"^\s*\d", cl.text):
             if buf:
-                yield " ".join(buf), first_line, section, first_origin
+                yield " ".join(buf), first_line, section, first_origin, first_fd
             buf = [t]
             first_line = cl.line
             first_origin = cl.origin
+            first_fd = fd
         else:
             if buf:
                 buf.append(t)
     if buf:
-        yield " ".join(buf), first_line, section, first_origin
+        yield " ".join(buf), first_line, section, first_origin, first_fd
 
 
 def parse_data_division(lines: List[CodeLine]):
@@ -188,14 +201,15 @@ def parse_data_division(lines: List[CodeLine]):
     parent_stack: List[DataItem] = []  # (group items by level)
     last_elementary: Dict[int, DataItem] = {}
 
-    for text, line, section, origin in _entries(region):
+    for text, line, section, origin, fd in _entries(region):
         m = re.match(r"^(\d{1,2})\s+([A-Z0-9][A-Z0-9-]*|FILLER)\b(.*)$", text, re.I)
         if not m:
             continue
         level = int(m.group(1))
         name = m.group(2).upper()
         rest = m.group(3)
-        item = DataItem(level=level, name=name, line=line, section=section, origin=origin)
+        item = DataItem(level=level, name=name, line=line, section=section, origin=origin,
+                        file=fd if section == "FILE" else None)
 
         pm = re.search(r"\bPIC(?:TURE)?\b\s+(?:IS\s+)?(\S+)", rest, re.I)
         if pm:

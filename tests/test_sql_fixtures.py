@@ -43,13 +43,16 @@ def test_dml_table_has_both_directions():
     assert sel["fields"] == ["WS-NAME", "WS-BAL"]
 
 
-def test_dml_write_fields_are_currently_empty():
-    # KNOWN GAP: INSERT/UPDATE/DELETE do not yet capture their VALUES/SET host variables,
-    # so the renderer cannot show WHAT is written (only SELECT/FETCH capture INTO fields).
+def test_dml_write_fields_carry_host_variables():
+    # INSERT/UPDATE/DELETE capture their VALUES/SET/WHERE host variables as event
+    # fields, so the renderer can show WHAT is written (was a known gap).
     iface = _iface("sqldml.cbl")
     for e in iface["events"]:
         if e["verb"] in ("INSERT", "UPDATE", "DELETE"):
-            assert e["fields"] == []
+            assert e["fields"], f"{e['verb']} must carry its host variables"
+            assert all(not f.startswith(":") for f in e["fields"])
+    upd = next(e for e in iface["events"] if e["verb"] == "UPDATE")
+    assert set(upd["fields"]) == {"WS-BAL", "WS-ID"}
 
 
 # --------------------------------------------------------------------------- #
@@ -67,12 +70,12 @@ def test_unload_is_db2_get_plus_file_create():
     assert fetch["fields"] == ["WS-ID", "WS-NAME", "WS-BAL"]
 
 
-def test_unload_cursor_endpoint_is_unresolved_gap():
-    # KNOWN GAP: a FETCH has no FROM clause, and DECLARE C1 CURSOR FOR ... FROM ACCOUNT is
-    # not linked, so the Db2 endpoint renders as "<cursor>" instead of the table ACCOUNT
-    # (the cursor name C1 is not captured either). Blocks showing which table is unloaded.
+def test_unload_cursor_endpoint_resolves_to_its_table():
+    # DECLARE C1 CURSOR FOR SELECT ... FROM ACCOUNT is linked, so the FETCH's Db2
+    # endpoint is the table ACCOUNT, not "<cursor>" (was a known gap).
     iface = _iface("sqlunld.cbl")
-    assert "<cursor>" in _dirs(iface, "db2")
+    dirs = _dirs(iface, "db2")
+    assert "ACCOUNT" in dirs and "<cursor>" not in dirs
 
 
 # --------------------------------------------------------------------------- #
@@ -88,10 +91,15 @@ def test_load_is_file_get_plus_db2_create():
     assert "IN-FILE" in _dirs(iface, "file")  # READ uses the file name
 
 
-def test_read_and_write_endpoints_are_asymmetric_gap():
-    # KNOWN GAP: READ's endpoint is the FILE name (IN-FILE) but WRITE's is the RECORD name
-    # (OUT-REC) - the renderer must normalise record->file to pair a load with its unload.
+def test_read_and_write_endpoints_unify_on_the_file_name():
+    # READ's endpoint is the FILE name; WRITE names its RECORD but the FD association
+    # resolves it to the physical file, so both directions share one endpoint (was a
+    # known gap: the WRITE previously surfaced as a separate OUT-REC "file").
     read_iface = _iface("sqlload.cbl")
     write_iface = _iface("sqlunld.cbl")
     assert "IN-FILE" in _dirs(read_iface, "file")     # READ -> file name
-    assert "OUT-REC" in _dirs(write_iface, "file")    # WRITE -> record name
+    wdirs = _dirs(write_iface, "file")
+    assert "OUT-FILE" in wdirs and "OUT-REC" not in wdirs
+    # and the WRITE event carries the record's fields
+    wr = next(e for e in write_iface["events"] if e["verb"] == "WRITE")
+    assert "OUT-REC" in wr["fields"]

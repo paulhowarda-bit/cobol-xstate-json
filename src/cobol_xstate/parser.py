@@ -194,6 +194,53 @@ def _procedure_interface(lines: List[CodeLine]) -> Tuple[List[str], Optional[str
     return using, returning
 
 
+_SELECT_RE = re.compile(
+    r"\bSELECT\s+(?:OPTIONAL\s+)?([A-Z0-9][A-Z0-9-]*)(.*?)(?=\bSELECT\b|$)",
+    re.I | re.S)
+
+
+def _parse_file_control(lines: List[CodeLine]) -> Dict[str, dict]:
+    """ENVIRONMENT DIVISION FILE-CONTROL: SELECT clauses binding each logical file to
+    its external dataset (ASSIGN TO ddname), organization/access, record key, and -
+    crucially for the perimeter - its FILE STATUS field (the VSAM/QSAM analogue of
+    SQLCODE: branching on it is reacting to the file subsystem's response)."""
+    start = end = None
+    for i, cl in enumerate(lines):
+        up = cl.text.upper()
+        if start is None and "FILE-CONTROL" in up:
+            start = i
+        elif start is not None and re.search(
+                r"\b(?:I-O-CONTROL|DATA\s+DIVISION|CONFIGURATION\s+SECTION)\b", up):
+            end = i
+            break
+    if start is None:
+        return {}
+    text = " ".join(cl.text for cl in lines[start:end if end is not None else len(lines)])
+    files: Dict[str, dict] = {}
+    for m in _SELECT_RE.finditer(text):
+        name = m.group(1).upper()
+        body = m.group(2)
+        entry: Dict[str, object] = {"file": name}
+        am = re.search(r"\bASSIGN\s+(?:TO\s+)?([A-Z0-9$#@.-]+|'[^']*'|\"[^\"]*\")",
+                       body, re.I)
+        if am:
+            entry["assign"] = am.group(1).strip("'\"").upper()
+        om = re.search(r"\bORGANIZATION\s+(?:IS\s+)?([A-Z-]+)", body, re.I)
+        if om:
+            entry["organization"] = om.group(1).upper()
+        acm = re.search(r"\bACCESS\s+(?:MODE\s+)?(?:IS\s+)?([A-Z-]+)", body, re.I)
+        if acm:
+            entry["access"] = acm.group(1).upper()
+        km = re.search(r"\bRECORD\s+KEY\s+(?:IS\s+)?([A-Z0-9-]+)", body, re.I)
+        if km:
+            entry["recordKey"] = km.group(1).upper()
+        sm = re.search(r"\b(?:FILE\s+)?STATUS\s+(?:IS\s+)?([A-Z0-9-]+)", body, re.I)
+        if sm:
+            entry["statusField"] = sm.group(1).upper()
+        files[name] = entry
+    return files
+
+
 def parse_program(source: str, fmt: Optional[SourceFormat] = None,
                   resolver: Optional[CopybookResolver] = None) -> Program:
     if fmt is None:
@@ -220,6 +267,7 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
 
     prog.working_values = _scan_value_clauses(lines)
     prog.data_items, prog.data_by_name = parse_data_division(lines)
+    prog.files = _parse_file_control(lines)
 
     body = _procedure_lines(lines)
     if not body:

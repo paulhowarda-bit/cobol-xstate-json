@@ -3,18 +3,25 @@
 The emitted statechart is overwhelmingly *internal* control flow: eventless ``always``
 transitions guarded by IF/EVALUATE conditions, and actions that just mutate working
 storage. A small subset crosses the program boundary to talk to external actors - a
-file, a Db2 table, a CICS program/terminal, the console, or the caller.
+file, a Db2 table, a CICS program/terminal/queue, the console, or the caller.
 
 This module does NOT change the machine or invent anything. It reads the already-emitted
-machine + provenance and *classifies* which states participate in an external interface,
-in which direction:
+machine + provenance + semantics and *classifies* which states participate in an external
+interface, in which direction:
 
   * **get**    - the state receives an external event / reads external data
-                 (file READ, SQL SELECT/FETCH, ACCEPT, CICS RECEIVE, an error/exception
-                 condition the program HANDLEs, end-of-file).
+                 (file READ, SQL SELECT/FETCH, ACCEPT, CICS RECEIVE/READQ, an
+                 error/exception condition the program HANDLEs, end-of-file, a
+                 response code such as SQLCODE or a FILE STATUS field).
   * **create** - the state produces an external event / writes external data
                  (file WRITE/REWRITE/DELETE, SQL INSERT/UPDATE/DELETE, DISPLAY, CICS
-                 SEND, CALL / CICS LINK / XCTL, CICS RETURN to the caller).
+                 SEND/WRITEQ, CALL / CICS LINK / XCTL, CICS RETURN to the caller).
+
+Field-level fidelity: every event carries ``fields`` - the data items crossing the
+boundary in the event's direction (READ INTO target or the FD record's elementary
+fields, ACCEPT/DISPLAY operands, SQL host variables, COMMAREA, CALL arguments) - and,
+where data flows the other way in the same command, ``params`` (SQL WHERE host
+variables, CICS RIDFLD keys, CALL RETURNING receivers).
 
 Every classification is traced to the same source line as the action it came from.
 """
@@ -22,24 +29,37 @@ Every classification is traced to the same source line as the action it came fro
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 # endpoint kinds
 _FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE = (
     "file", "db2", "program", "console", "terminal", "caller", "condition", "ims",
     "response")
+_QUEUE, _SYSTEM, _TRANSACTION = "queue", "system", "transaction"
 
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|TSQUEUE|TDQUEUE)\s*\(\s*'?"
     r"([A-Z0-9_.$#@-]+)'?\s*\)", re.I)
 _CICS_COMMAREA = re.compile(r"\bCOMMAREA\s*\(\s*([A-Z0-9_.$#@-]+)\s*\)", re.I)
+_CICS_OPT = re.compile(r"\b(INTO|FROM|RIDFLD|TRANSID|QUEUE|ABCODE|SET)\s*\(\s*'?"
+                       r"([A-Z0-9_.$#@-]+)'?\s*\)", re.I)
 # Data items that carry an external subsystem's response/return status - branching on
 # them is the program reacting to a response event (DB2 SQLCODE, VSAM/CICS file status).
 _RESPONSE_ITEMS = {"SQLCODE", "SQLSTATE", "SQLERRD", "EIBRESP", "EIBRESP2"}
+# EIB fields the transaction READS as inputs (was I called with a COMMAREA? which PF
+# key? which transaction?) - branching on them consumes CICS-supplied input.
+_EIB_INPUTS = {"EIBCALEN", "EIBAID", "EIBTRNID", "EIBDATE", "EIBTIME", "EIBCPOSN"}
 _SQL_FROM = re.compile(r"\bFROM\s+([A-Z0-9_.$#@-]+)", re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+([A-Z0-9_.$#@-]+)", re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+([A-Z0-9_.$#@-]+)", re.I)
+_SQL_HOSTVAR = re.compile(r":\s*([A-Z0-9-]+)", re.I)
+_DECLARE_CURSOR = re.compile(
+    r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
 _CALL_USING = re.compile(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", re.I | re.S)
+_CALL_RETURNING = re.compile(r"\bRETURNING\s+([A-Z0-9-]+)", re.I)
+_ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
+_WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
+_STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
 def _parse_call_args(cobol: str) -> List[str]:
@@ -50,7 +70,8 @@ def _parse_call_args(cobol: str) -> List[str]:
     out = []
     for tok in re.split(r"[,\s]+", m.group(1).strip()):
         u = tok.upper()
-        if u and u not in ("BY", "REFERENCE", "CONTENT", "VALUE"):
+        if u and u not in ("BY", "REFERENCE", "CONTENT", "VALUE", "ON", "NOT",
+                           "EXCEPTION", "OVERFLOW") and not u.startswith(("'", '"')):
             out.append(u)
     return out
 
@@ -64,9 +85,92 @@ def _event(direction: str, etype: str, endpoint: str) -> str:
     return f"{'GET' if direction == 'get' else 'CREATE'}.{etype.upper()}.{endpoint}"
 
 
-def _classify_exec(name: str, cobol: str, spec: Optional[dict]
-                   ) -> Optional[Tuple[str, str, str, str, List[str]]]:
-    """Classify an EXEC SQL / CICS / DLI action -> (direction, etype, endpoint, verb, fields)."""
+def _hit(direction, etype, endpoint, verb, fields, params=None):
+    d = {"direction": direction, "etype": etype, "endpoint": endpoint,
+         "verb": verb, "fields": fields}
+    if params:
+        d["params"] = params
+    return d
+
+
+# --------------------------------------------------------------------------- #
+# data-dictionary helpers (record <-> file, group -> elementary fields)
+# --------------------------------------------------------------------------- #
+
+class _DataView:
+    def __init__(self, data: Optional[dict]):
+        self.data = data or {}
+        self.children: Dict[str, List[str]] = {}
+        for name, it in self.data.items():
+            if isinstance(it, dict) and it.get("parent"):
+                self.children.setdefault(it["parent"].upper(), []).append(name)
+
+    def file_of(self, name: str) -> Optional[str]:
+        it = self.data.get((name or "").upper())
+        return it.get("file") if isinstance(it, dict) else None
+
+    def records_of(self, file_name: str) -> List[str]:
+        return [n for n, it in self.data.items()
+                if isinstance(it, dict) and it.get("file") == file_name
+                and not it.get("parent") and it.get("kind") != "condition-name"]
+
+    def leaves(self, name: str, limit: int = 64) -> List[str]:
+        """Elementary (leaf) fields under `name`, in dictionary order; the record's
+        actual field layout, for field-level interface fidelity."""
+        out: List[str] = []
+        stack = [(name or "").upper()]
+        while stack and len(out) < limit:
+            cur = stack.pop(0)
+            kids = [k for k in self.children.get(cur, [])
+                    if isinstance(self.data.get(k), dict)
+                    and self.data[k].get("kind") != "condition-name"]
+            if not kids:
+                if cur in self.data and cur != (name or "").upper():
+                    out.append(cur)
+                elif cur == (name or "").upper() and not self.children.get(cur):
+                    out.append(cur)
+            else:
+                stack = kids + stack
+        return out
+
+    def record_fields(self, record: str) -> List[str]:
+        """`record` plus its elementary fields (the data crossing with the record)."""
+        leaves = self.leaves(record)
+        if not leaves or leaves == [record]:
+            return [record] if record in self.data or record else []
+        return [record] + leaves
+
+
+# --------------------------------------------------------------------------- #
+# classification
+# --------------------------------------------------------------------------- #
+
+def _display_fields(cobol: str, data: dict) -> List[str]:
+    """Identifiers among DISPLAY operands (literals dropped, UPON clause skipped)."""
+    body = re.sub(r"^\s*DISPLAY\b", "", cobol or "", flags=re.I)
+    body = re.split(r"\bUPON\b", body, flags=re.I)[0]
+    body = _STR_LIT.sub(" ", body)
+    out = []
+    for w in _WORD.findall(body.upper()):
+        if w in ("NO", "WITH", "ADVANCING"):
+            continue
+        if w in data and w not in out:
+            out.append(w)
+    return out
+
+
+def _sql_host_vars(text: str) -> List[str]:
+    out = []
+    for v in _SQL_HOSTVAR.findall(text or ""):
+        u = v.upper()
+        if u not in out:
+            out.append(u)
+    return out
+
+
+def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
+                   cursors: Dict[str, str]) -> List[dict]:
+    """Classify an EXEC SQL / CICS / DLI action -> list of boundary hits."""
     up = cobol.upper()
     verb = (spec or {}).get("verb", "")
     if not verb:
@@ -75,93 +179,190 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict]
         verb = toks[1] if len(toks) > 1 and toks[0] in ("SQL", "CICS", "DLI") else (
             toks[0] if toks else "")
     verb = verb.upper()
-    fields = [a["target"] for a in (spec or {}).get("assignments", [])
-              if isinstance(a, dict) and "target" in a]
+    into_fields = [a["target"] for a in (spec or {}).get("assignments", [])
+                   if isinstance(a, dict) and "target" in a]
+    host_vars = [h.lstrip(":").upper()
+                 for h in ((spec or {}).get("hostVars") or _sql_host_vars(up))]
 
     is_sql = "EXEC SQL" in up or name.startswith("exec_sql")
     is_cics = "EXEC CICS" in up or name.startswith("exec_cics")
 
     if is_sql:
         if verb in ("SELECT", "FETCH"):
-            m = _SQL_FROM.search(up)
-            return ("get", _DB2, m.group(1) if m else "<cursor>", verb, fields)
+            endpoint = None
+            if verb == "FETCH":
+                fm = re.match(r".*?\bFETCH\s+(?:NEXT\s+|PRIOR\s+|FIRST\s+|FROM\s+)*"
+                              r"([A-Z0-9_-]+)", up)
+                if fm:
+                    endpoint = cursors.get(fm.group(1)) or f"<cursor {fm.group(1)}>"
+            if endpoint is None:
+                m = _SQL_FROM.search(up)
+                endpoint = m.group(1) if m else "<cursor>"
+            params = [h for h in host_vars if h not in into_fields]
+            return [_hit("get", _DB2, endpoint, verb, into_fields, params)]
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
-            return ("create", _DB2, m.group(1) if m else "<table>", verb, [])
+            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
         if verb == "UPDATE":
             m = _SQL_UPDATE.search(up)
-            return ("create", _DB2, m.group(1) if m else "<table>", verb, [])
+            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
         if verb == "DELETE":
             m = _SQL_FROM.search(up)
-            return ("create", _DB2, m.group(1) if m else "<table>", verb, [])
-        return None  # OPEN/CLOSE cursor, COMMIT, WHENEVER, etc. - not a data crossing
+            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
+        return []  # OPEN/CLOSE cursor, DECLARE, COMMIT, WHENEVER - not a data crossing
 
     if is_cics:
         res = _CICS_RESOURCE.search(up)
         endpoint = res.group(1) if res else ""
+        opts = {k.upper(): v.upper() for k, v in _CICS_OPT.findall(up)}
         ca = _CICS_COMMAREA.search(up)
         commarea = [ca.group(1).upper()] if ca else []
+        into = [opts["INTO"]] if "INTO" in opts else []
+        from_ = [opts["FROM"]] if "FROM" in opts else []
+        ridfld = [opts["RIDFLD"]] if "RIDFLD" in opts else []
         if verb in ("LINK", "XCTL"):
-            return ("create", _PROGRAM, endpoint or "<program>", "CICS " + verb, commarea)
-        if verb == "RETURN" and commarea:
-            return ("create", _CALLER, "CALLER", "CICS RETURN", commarea)
-        if verb == "SEND":
-            return ("create", _TERMINAL, endpoint or "terminal", "CICS SEND", [])
-        if verb == "RECEIVE":
-            return ("get", _TERMINAL, endpoint or "terminal", "CICS RECEIVE", [])
-        if verb == "READ":
-            return ("get", _FILE, endpoint or "<file>", "CICS READ", [])
-        if verb in ("WRITE", "REWRITE", "DELETE"):
-            return ("create", _FILE, endpoint or "<file>", "CICS " + verb, [])
+            return [_hit("create", _PROGRAM, endpoint or "<program>", "CICS " + verb,
+                         commarea)]
         if verb == "RETURN":
-            return ("create", _CALLER, "CALLER", "CICS RETURN", [])
-        return None  # HANDLE (-> handler region), ADDRESS, ASKTIME, etc.
+            v = "CICS RETURN"
+            if "TRANSID" in opts:
+                v += f" TRANSID({opts['TRANSID']})"
+            return [_hit("create", _CALLER, "CALLER", v, commarea)]
+        if verb == "SEND":
+            return [_hit("create", _TERMINAL, endpoint or "terminal", "CICS SEND", from_)]
+        if verb == "RECEIVE":
+            return [_hit("get", _TERMINAL, endpoint or "terminal", "CICS RECEIVE", into)]
+        if verb in ("READ", "READNEXT", "READPREV"):
+            return [_hit("get", _FILE, endpoint or "<file>", "CICS " + verb,
+                         into or dv.record_fields(endpoint), ridfld)]
+        if verb in ("STARTBR", "RESETBR"):
+            return [_hit("get", _FILE, endpoint or "<file>", "CICS " + verb, [], ridfld)]
+        if verb == "ENDBR":
+            return []
+        if verb in ("WRITE", "REWRITE", "DELETE"):
+            return [_hit("create", _FILE, endpoint or "<file>", "CICS " + verb,
+                         from_, ridfld)]
+        if verb in ("READQ",):
+            q = endpoint or opts.get("QUEUE", "<queue>")
+            qtype = "TD" if re.search(r"\bREADQ\s+TD\b", up) else "TS"
+            return [_hit("get", _QUEUE, q, f"CICS READQ {qtype}", into)]
+        if verb in ("WRITEQ",):
+            q = endpoint or opts.get("QUEUE", "<queue>")
+            qtype = "TD" if re.search(r"\bWRITEQ\s+TD\b", up) else "TS"
+            return [_hit("create", _QUEUE, q, f"CICS WRITEQ {qtype}", from_)]
+        if verb == "DELETEQ":
+            q = endpoint or opts.get("QUEUE", "<queue>")
+            return [_hit("create", _QUEUE, q, "CICS DELETEQ", [])]
+        if verb == "START":
+            t = opts.get("TRANSID", "<transid>")
+            return [_hit("create", _TRANSACTION, t, "CICS START", from_)]
+        if verb == "RETRIEVE":
+            return [_hit("get", _TRANSACTION, "RETRIEVE", "CICS RETRIEVE", into)]
+        if verb == "ABEND":
+            code = opts.get("ABCODE", "ABEND")
+            return [_hit("create", _CONDITION, code, "CICS ABEND", [])]
+        return []  # HANDLE (-> handler region), ADDRESS, ASKTIME, etc.
 
     # DLI / IMS
     if verb in ("GU", "GN", "GNP", "GHU", "GHN"):
-        return ("get", _IMS, "IMS-DB", "DLI " + verb, [])
+        return [_hit("get", _IMS, "IMS-DB", "DLI " + verb, [])]
     if verb in ("ISRT", "REPL", "DLET"):
-        return ("create", _IMS, "IMS-DB", "DLI " + verb, [])
-    return None
+        return [_hit("create", _IMS, "IMS-DB", "DLI " + verb, [])]
+    return []
 
 
-def _classify(name: str, cobol: str, spec: Optional[dict]
-              ) -> Optional[Tuple[str, str, str, str, List[str]]]:
-    """Classify one entry action -> (direction, etype, endpoint, verb, fields) or None."""
+_OPEN_MODES = re.compile(r"\b(INPUT|OUTPUT|I-O|EXTEND)\b((?:\s+[A-Z0-9-]+)+)", re.I)
+
+
+def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
+              files: Dict[str, dict], cursors: Dict[str, str]) -> List[dict]:
+    """Classify one entry action -> list of boundary hits (empty if internal)."""
     up = (cobol or "").upper().strip()
     verb = up.split()[0] if up else ""
 
     if verb == "EXEC" or name.startswith(("exec_sql", "exec_cics", "exec_dli")):
-        return _classify_exec(name, up, spec)
-    if verb == "READ":
-        return ("get", _FILE, _name_suffix(name), "READ", [])
-    if verb == "WRITE":
-        return ("create", _FILE, _name_suffix(name), "WRITE", [])
-    if verb == "REWRITE":
-        return ("create", _FILE, _name_suffix(name), "REWRITE", [])
-    if verb == "DELETE":
-        return ("create", _FILE, _name_suffix(name), "DELETE", [])
-    if verb == "START":
-        return ("get", _FILE, _name_suffix(name), "START", [])
+        return _classify_exec(name, up, spec, dv, cursors)
+
+    io = spec if (spec or {}).get("kind") == "io" else {}
+
+    if verb in ("READ", "START"):
+        f = io.get("file") or _name_suffix(name)
+        if io.get("into"):
+            fields = [io["into"]]
+        else:  # no INTO: the data lands in the FD record - list its field layout
+            fields = [x for r in dv.records_of(f) for x in dv.record_fields(r)]
+        return [_hit("get", _FILE, f, verb, fields)]
+    if verb in ("WRITE", "REWRITE", "DELETE"):
+        rec = io.get("file") or _name_suffix(name)
+        f = dv.file_of(rec) or (rec if rec in files else rec)
+        fields = dv.record_fields(rec) if dv.file_of(rec) else ([rec] if rec else [])
+        if io.get("from"):
+            fields = fields + [io["from"]]
+        return [_hit("create", _FILE, f, verb, fields)]
+    if verb == "RETURN":  # sort OUTPUT PROCEDURE: RETURN sort-file [INTO x]
+        f = io.get("file") or _name_suffix(name)
+        fields = [io["into"]] if io.get("into") else []
+        return [_hit("get", _FILE, f, "RETURN (sort)", fields)]
+    if verb == "RELEASE":  # sort INPUT PROCEDURE: RELEASE rec [FROM x]
+        m = re.match(r"RELEASE\s+([A-Z0-9-]+)(?:\s+FROM\s+([A-Z0-9-]+))?", up)
+        rec = m.group(1) if m else _name_suffix(name)
+        fields = [rec] + ([m.group(2)] if m and m.group(2) else [])
+        return [_hit("create", _FILE, dv.file_of(rec) or rec, "RELEASE (sort)", fields)]
+    if verb in ("SORT", "MERGE"):
+        hits = []
+        um = re.search(r"\bUSING((?:\s+[A-Z0-9-]+)+?)(?=\s+(?:GIVING|OUTPUT|$))",
+                       up + " ")
+        gm = re.search(r"\bGIVING((?:\s+[A-Z0-9-]+)+)", up)
+        for m2, direction in ((um, "get"), (gm, "create")):
+            if m2:
+                for f in m2.group(1).split():
+                    hits.append(_hit(direction, _FILE, f, f"{verb} {'USING' if direction == 'get' else 'GIVING'}",
+                                     [x for r in dv.records_of(f) for x in dv.record_fields(r)]))
+        return hits
+    if verb == "OPEN":
+        # OPEN INPUT/OUTPUT/I-O/EXTEND f...: declares the channel and its direction
+        # (a file that is only ever OPENed still appears on the perimeter).
+        hits = []
+        for mode, names in _OPEN_MODES.findall(up):
+            for f in names.split():
+                if mode.upper() == "INPUT":
+                    hits.append(_hit("get", _FILE, f, "OPEN INPUT", []))
+                elif mode.upper() in ("OUTPUT", "EXTEND"):
+                    hits.append(_hit("create", _FILE, f, f"OPEN {mode.upper()}", []))
+                else:  # I-O
+                    hits.append(_hit("get", _FILE, f, "OPEN I-O", []))
+                    hits.append(_hit("create", _FILE, f, "OPEN I-O", []))
+        return hits
     if verb == "DISPLAY":
-        return ("create", _CONSOLE, "SYSOUT", "DISPLAY", [])
+        return [_hit("create", _CONSOLE, "SYSOUT", "DISPLAY",
+                     _display_fields(cobol, dv.data))]
     if verb == "ACCEPT":
-        return ("get", _CONSOLE, "SYSIN", "ACCEPT", [])
+        fields = [a["target"] for a in (spec or {}).get("assignments", [])
+                  if isinstance(a, dict) and "target" in a]
+        sysm = _ACCEPT_SYSTEM.search(up)
+        if sysm:
+            return [_hit("get", _SYSTEM, "SYSTEM-" + sysm.group(1).upper(),
+                         f"ACCEPT FROM {sysm.group(1).upper()}", fields)]
+        return [_hit("get", _CONSOLE, "SYSIN", "ACCEPT", fields)]
     if verb == "CALL":
-        return ("create", _PROGRAM, _name_suffix(name), "CALL", _parse_call_args(cobol))
-    return None  # OPEN / CLOSE / internal MOVE/COMPUTE/etc. - not an external crossing
+        params = []
+        rm = _CALL_RETURNING.search(up)
+        if rm:
+            params = [rm.group(1).upper()]
+        return [_hit("create", _PROGRAM, _name_suffix(name), "CALL",
+                     _parse_call_args(cobol), params)]
+    return []  # CLOSE / internal MOVE/COMPUTE/etc. - not an external crossing
 
 
-def _classify_condition_event(event_name: str
-                              ) -> Optional[Tuple[str, str, str, str, List[str]]]:
+def _classify_condition_event(event_name: str) -> Optional[dict]:
     """A handler-region watch event (``IO.ERROR.CUST-FILE`` / ``CICS.NOTFND``) is an
     external condition the program *gets* (an error/exception raised by an external actor)."""
     parts = event_name.split(".")
     if parts[0] == "IO":                      # IO.<TRIGGER>.<FILE>
         endpoint = parts[-1] if len(parts) > 2 else (parts[1] if len(parts) > 1 else "IO")
-        return ("get", _CONDITION, endpoint, "->".join(parts[:2]), [])
+        return _hit("get", _CONDITION, endpoint, "->".join(parts[:2]), [])
     if parts[0] == "CICS":                     # CICS.<CONDITION>
-        return ("get", _CONDITION, parts[-1], "CICS " + parts[-1], [])
+        return _hit("get", _CONDITION, parts[-1], "CICS " + parts[-1], [])
     return None
 
 
@@ -190,46 +391,49 @@ def _iter_states(config: dict):
             yield from rec(st.get("states"), program)
 
 
-_WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
-
-
-def _classify_move(spec: Optional[dict], linkage: set
-                   ) -> List[Tuple[str, str, str, str, List[str]]]:
-    """A MOVE touching a LINKAGE item is a boundary crossing: reading a linkage field is
-    receiving the caller's request (get); writing one is sending a response (create).
-    Plain WS-to-WS moves are internal and return nothing."""
-    hits: List[Tuple[str, str, str, str, List[str]]] = []
+def _classify_dataflow(spec: Optional[dict], linkage: set) -> List[dict]:
+    """Any assignment touching a LINKAGE item (or RETURN-CODE) is a boundary crossing:
+    reading a linkage field is receiving the caller's request (get); writing one - by
+    MOVE, COMPUTE, ADD, SET, ... - is producing the caller-visible response (create).
+    RETURN-CODE is a special register the caller/JCL sees. Plain WS-to-WS stays internal."""
+    hits: List[dict] = []
+    verb = (spec or {}).get("verb", "?")
     for a in (spec or {}).get("assignments", []):
         if not isinstance(a, dict):
             continue
         target = (a.get("target") or "").upper()
         expr = (a.get("expr") or "").upper()
         if target in linkage:
-            hits.append(("create", _CALLER, "CALLER",
-                         "MOVE -> linkage (send response)", [target]))
+            hits.append(_hit("create", _CALLER, "CALLER",
+                             f"{verb} -> linkage (send response)", [target]))
+        elif target == "RETURN-CODE":
+            hits.append(_hit("create", _CALLER, "CALLER",
+                             f"{verb} -> RETURN-CODE (caller-visible)", ["RETURN-CODE"]))
         for w in _WORD.findall(expr):
             if w in linkage:
-                hits.append(("get", _CALLER, "CALLER",
-                             "MOVE <- linkage (receive request)", [w]))
+                hits.append(_hit("get", _CALLER, "CALLER",
+                                 f"{verb} <- linkage (receive request)", [w]))
     return hits
 
 
-def _response_item(node) -> Optional[str]:
-    """The external response/return item (SQLCODE / EIBRESP / ...) a guard tree tests, if any."""
-    if isinstance(node, str):
-        up = node.upper()
-        return next((r for r in _RESPONSE_ITEMS if r in up), None)
-    if isinstance(node, dict):
-        for v in node.values():
-            got = _response_item(v)
-            if got:
-                return got
-    if isinstance(node, list):
-        for v in node:
-            got = _response_item(v)
-            if got:
-                return got
-    return None
+def _guard_items(node, wanted: Dict[str, str]) -> List[str]:
+    """All items from `wanted` (name -> kind) that a guard tree references."""
+    found: List[str] = []
+
+    def rec(n):
+        if isinstance(n, str):
+            for w in _WORD.findall(n.upper()):
+                if w in wanted and w not in found:
+                    found.append(w)
+        elif isinstance(n, dict):
+            for v in n.values():
+                rec(v)
+        elif isinstance(n, list):
+            for v in n:
+                rec(v)
+
+    rec(node)
+    return found
 
 
 def _perimeter_kind(gets: List[str], creates: List[str]) -> str:
@@ -278,41 +482,67 @@ def _linkage_records(data: Optional[dict]) -> List[str]:
     return out
 
 
+def _cursor_tables(provenance: dict) -> Dict[str, str]:
+    """cursor-name -> table, from ``DECLARE c CURSOR FOR SELECT ... FROM t`` texts."""
+    out: Dict[str, str] = {}
+    for prov in (provenance or {}).values():
+        m = _DECLARE_CURSOR.search((prov or {}).get("cobol", "") or "")
+        if m:
+            out[m.group(1).upper()] = m.group(2).upper()
+    return out
+
+
 def build_interface(config: dict, semantics: dict, provenance: dict,
                     data: Optional[dict] = None, using: Optional[List[str]] = None,
-                    returning: Optional[str] = None) -> dict:
+                    returning: Optional[str] = None,
+                    files: Optional[Dict[str, dict]] = None) -> dict:
     """Return the external-interface overlay: events, per-state get/create, endpoints,
     and the program's own parameter interface.
 
     Pure read over the emitted machine - attributes each boundary crossing to the state
-    that hosts it, the direction, the external endpoint, and the source line. The program
-    entry's LINKAGE / ``PROCEDURE DIVISION USING`` / ``RETURNING`` (its COMMAREA /
-    parameters) is the perimeter at the entry point and is surfaced under ``parameters``.
+    that hosts it, the direction, the external endpoint, the source line, and the
+    fields crossing. The program entry's LINKAGE / ``PROCEDURE DIVISION USING`` /
+    ``RETURNING`` (its COMMAREA / parameters) is the perimeter at the entry point and
+    is surfaced under ``parameters``.
     """
     actions = (semantics or {}).get("actions", {})
     guards = (semantics or {}).get("guards", {})
+    files = files or {}
+    dv = _DataView(data)
+    cursors = _cursor_tables(provenance)
     linkage_all = {n.upper() for n, it in (data or {}).items()
                    if isinstance(it, dict) and it.get("section") == "LINKAGE"}
+    # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and
+    # each file's FILE STATUS field (the file subsystem's response register).
+    status_fields = {v["statusField"]: k for k, v in files.items()
+                     if isinstance(v, dict) and v.get("statusField")}
     events: List[dict] = []
     perimeter: Dict[str, dict] = {}
     endpoints: Dict[str, dict] = {}
 
-    def add(state: str, region: str, direction: str, etype: str, endpoint: str,
-            verb: str, fields: List[str], line: int, cobol: str) -> None:
-        ev = _event(direction, etype, endpoint)
-        events.append({
-            "event": ev, "direction": direction, "endpointType": etype,
-            "endpoint": endpoint, "verb": verb, "fields": fields,
+    def add(state: str, region: str, hit: dict, line: int, cobol: str) -> None:
+        ev = _event(hit["direction"], hit["etype"], hit["endpoint"])
+        entry = {
+            "event": ev, "direction": hit["direction"], "endpointType": hit["etype"],
+            "endpoint": hit["endpoint"], "verb": hit["verb"], "fields": hit["fields"],
             "state": state, "region": region, "line": line, "cobol": cobol,
-        })
+        }
+        if hit.get("params"):
+            entry["params"] = hit["params"]
+        events.append(entry)
         slot = perimeter.setdefault(
             state, {"region": region, "gets": [], "creates": []})
-        bucket = slot["gets"] if direction == "get" else slot["creates"]
+        bucket = slot["gets"] if hit["direction"] == "get" else slot["creates"]
         if ev not in bucket:
             bucket.append(ev)
-        ep = endpoints.setdefault(endpoint, {"type": etype, "directions": []})
-        if direction not in ep["directions"]:
-            ep["directions"].append(direction)
+        ep = endpoints.setdefault(hit["endpoint"], {"type": hit["etype"], "directions": []})
+        if hit["direction"] not in ep["directions"]:
+            ep["directions"].append(hit["direction"])
+        fc = files.get(hit["endpoint"])
+        if isinstance(fc, dict):
+            for k in ("assign", "organization", "access", "recordKey", "statusField"):
+                if fc.get(k):
+                    ep.setdefault(k, fc[k])
 
     for state, region, st in _iter_states(config):
         for aname in st.get("entry", []) or []:
@@ -320,28 +550,50 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             cobol = prov.get("cobol", "")
             line = prov.get("line", 0)
             spec = actions.get(aname)
-            hit = _classify(aname, cobol, spec)
-            if hit:
-                direction, etype, endpoint, verb, fields = hit
-                add(state, region, direction, etype, endpoint, verb, fields, line, cobol)
-            elif linkage_all and spec and spec.get("verb") == "MOVE":
-                for direction, etype, endpoint, verb, fields in _classify_move(
-                        spec, linkage_all):
-                    add(state, region, direction, etype, endpoint, verb, fields, line, cobol)
-        # Branching on an external return item (SQLCODE / EIBRESP) is the program
-        # reacting to a *response event* from that subsystem.
+            hits = _classify(aname, cobol, spec, dv, files, cursors)
+            for hit in hits:
+                add(state, region, hit, line, cobol)
+            if not hits:
+                for hit in _classify_dataflow(spec, linkage_all):
+                    add(state, region, hit, line, cobol)
+        # Branching on an external return item (SQLCODE / EIBRESP / a FILE STATUS
+        # field) is the program reacting to a *response event* from that subsystem;
+        # branching on an EIB input field consumes CICS-supplied input; branching on
+        # a linkage field reads the caller's request.
         for edge in st.get("always", []) or []:
             g = edge.get("guard")
-            item = _response_item(guards.get(g)) if g else None
-            if item:
-                sub = "DB2" if item.startswith("SQL") else "CICS"
-                add(state, region, "get", _RESPONSE, sub, f"response ({item})",
-                    [item], 0, f"branch on {item}")
+            if not g:
+                continue
+            tree = guards.get(g)
+            wanted = {r: "response" for r in _RESPONSE_ITEMS}
+            wanted.update({e: "eib" for e in _EIB_INPUTS})
+            wanted.update({s: "status" for s in status_fields})
+            wanted.update({l: "linkage" for l in linkage_all})
+            for item in _guard_items(tree, wanted):
+                kind = wanted[item]
+                if kind == "response":
+                    sub = "DB2" if item.startswith("SQL") else "CICS"
+                    add(state, region,
+                        _hit("get", _RESPONSE, sub, f"response ({item})", [item]),
+                        0, f"branch on {item}")
+                elif kind == "status":
+                    add(state, region,
+                        _hit("get", _RESPONSE, status_fields[item],
+                             f"file status ({item})", [item]),
+                        0, f"branch on {item}")
+                elif kind == "eib":
+                    add(state, region,
+                        _hit("get", _RESPONSE, "CICS-EIB", f"EIB input ({item})", [item]),
+                        0, f"branch on {item}")
+                else:  # linkage
+                    add(state, region,
+                        _hit("get", _CALLER, "CALLER", f"guard reads linkage ({item})",
+                             [item]),
+                        0, f"branch on {item}")
         for event_name in (st.get("on", {}) or {}):
             hit = _classify_condition_event(event_name)
             if hit:
-                direction, etype, endpoint, verb, fields = hit
-                add(state, region, direction, etype, endpoint, verb, fields, 0, event_name)
+                add(state, region, hit, 0, event_name)
 
     # The program's OWN parameter interface (LINKAGE / PROCEDURE DIVISION USING /
     # RETURNING / COMMAREA) is the perimeter at the entry point: the caller passes these
@@ -354,14 +606,18 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     # Parameters received from the caller: the USING list, else the COMMAREA/LINKAGE record.
     inbound = using or commarea or linkage
     if inbound:
-        add(entry, program, "get", _CALLER, "CALLER", "PROCEDURE DIVISION USING",
-            list(inbound), 0, "PROCEDURE DIVISION USING " + " ".join(inbound))
+        add(entry, program,
+            _hit("get", _CALLER, "CALLER", "PROCEDURE DIVISION USING", list(inbound)),
+            0, "PROCEDURE DIVISION USING " + " ".join(inbound))
         # USING is BY REFERENCE by default, so the caller also sees updates -> create.
-        add(entry, program, "create", _CALLER, "CALLER", "USING (by reference)",
-            list(inbound), 0, "USING (by reference) " + " ".join(inbound))
+        add(entry, program,
+            _hit("create", _CALLER, "CALLER", "USING (by reference)", list(inbound)),
+            0, "USING (by reference) " + " ".join(inbound))
     if returning:
-        add(entry, program, "create", _CALLER, "CALLER", "PROCEDURE DIVISION RETURNING",
-            [returning.upper()], 0, "RETURNING " + returning.upper())
+        add(entry, program,
+            _hit("create", _CALLER, "CALLER", "PROCEDURE DIVISION RETURNING",
+                 [returning.upper()]),
+            0, "RETURNING " + returning.upper())
 
     # Label each perimeter state input / output / input-output, and tag the state node
     # itself so the boundary is visible on the machine (meta.perimeter), not just here.
@@ -371,7 +627,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
 
     return {
         "endpoints": [
-            {"endpoint": k, "type": v["type"], "directions": sorted(v["directions"])}
+            {"endpoint": k, **{**v, "directions": sorted(v["directions"])}}
             for k, v in sorted(endpoints.items())
         ],
         "events": events,
@@ -381,5 +637,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             "returning": returning.upper() if returning else None,
             "linkage": linkage,
             "commarea": bool(commarea),
+            # Each parameter record expanded to its elementary fields (PIC-typed in
+            # 'data'), so the caller contract is field-level, not just record names.
+            "fields": {rec: dv.leaves(rec) for rec in (using or linkage)},
         },
     }
