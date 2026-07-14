@@ -379,3 +379,47 @@ def test_read_into_and_accept_exception_captured():
     assert isinstance(acc, HandledStmt)
     assert acc.inner.verb == "ACCEPT"
     assert set(acc.handlers) == {"ON_EXCEPTION"}
+
+
+def test_same_line_paragraph_header_keeps_code():
+    prog = parse_program(_wrap(
+        "       0000-MAIN. PERFORM 1000-SUB\n"
+        "           STOP RUN.\n"
+        "       1000-SUB. ADD 1 TO WS-A.\n"
+    ))
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN", "1000-SUB"]
+    sub = prog.paragraphs[1]
+    assert sub.statements, "code on the header line must land in the paragraph body"
+    assert "ADD" in sub.statements[0].text.upper()
+
+
+def test_goto_qualified_target_drops_qualification_only():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           GO TO 1000-SUB OF 2000-SEC.\n"
+        "       1000-SUB.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert isinstance(st, GoToStmt)
+    assert st.targets == ["1000-SUB"]          # not [1000-SUB, OF, 2000-SEC]
+
+
+def test_goto_unknown_target_is_flagged_and_rerouted():
+    from cobol_xstate.statechart import build_machine
+    machine = build_machine(parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           GO TO NO-SUCH-PARA.\n"
+        "       1000-NEXT.\n"
+        "           STOP RUN.\n"
+    )))
+    assert any("NO-SUCH-PARA" in f["message"] and "does not exist" in f["message"]
+               for f in machine.flags)
+    # no dangling edge survives anywhere in the machine
+    def targets(states):
+        for st in states.values():
+            for tr in st.get("always", []) or []:
+                yield tr["target"]
+            yield from targets(st.get("states", {}))
+    known = set(machine.config["states"])
+    assert all(t in known for t in targets(machine.config["states"]))

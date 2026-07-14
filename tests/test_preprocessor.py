@@ -179,3 +179,40 @@ def test_cics_program_flags_handle_and_xctl():
     assert any(s.get("type") == "final" for s in program.values())  # RETURN -> final
     # the HANDLE target is dispatched from the watcher.
     assert "CICS.NOTFND" in machine.config["states"]["HANDLERS"]["states"]["__WATCH__"]["on"]
+
+
+def test_code_before_copy_in_same_sentence_is_kept(tmp_path):
+    from cobol_xstate.normalizer import normalize
+    from cobol_xstate.preprocessor import CopybookResolver, preprocess
+    (tmp_path / "FOO.cpy").write_text("           ADD 1 TO WS-A.\n")
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       M.\n"
+        "           MOVE 1 TO WS-IDX. COPY FOO.\n"
+    )
+    res = preprocess(lines, CopybookResolver(paths=[str(tmp_path)]))
+    text = " ".join(cl.text for cl in res.lines)
+    assert "MOVE 1 TO WS-IDX" in text           # the code before COPY survives
+    assert "ADD 1 TO WS-A" in text              # and the copybook expanded
+
+
+def test_standalone_replace_directive_applies_until_off():
+    from cobol_xstate.normalizer import normalize
+    from cobol_xstate.preprocessor import preprocess
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       M.\n"
+        "           REPLACE ==:TAG:== BY ==WS-REAL==.\n"
+        "           MOVE 1 TO :TAG:-FIELD.\n"
+        "           REPLACE OFF.\n"
+        "           MOVE 2 TO :TAG:-OTHER.\n"
+    )
+    res = preprocess(lines)
+    text = " ".join(cl.text for cl in res.lines)
+    assert "WS-REAL-FIELD" in text              # substitution applied while active
+    assert ":TAG:-OTHER" in text                # and stopped after REPLACE OFF
+    assert "REPLACE ==" not in text             # directives removed from the stream
