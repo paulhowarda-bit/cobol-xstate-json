@@ -92,6 +92,7 @@ class _BusinessView:
         self.iface = iface
         self.perimeter = iface["perimeterStates"]
         self.ordered: List[str] = machine.paragraph_order
+        self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
         self.flags: List[str] = []
 
@@ -156,7 +157,7 @@ class _BusinessView:
         performs = self._perform_names(st)
         if performs:                                   # a call
             name = performs[0]
-            owner, init = _target_owner(name, self.ordered)
+            owner, init = _target_owner(name, self.ordered, self.sections)
             cont = self._continuation(st)
             if len(performs) > 1:
                 self._flag(f"{state}: {len(performs)} PERFORMs in one state; "

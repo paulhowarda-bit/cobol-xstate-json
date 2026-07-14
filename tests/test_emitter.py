@@ -385,6 +385,14 @@ def test_perform_thru_range_runs_all_paragraphs(repo_tmp):
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_section_runs_all_member_paragraphs(repo_tmp):
+    # PERFORM 1000-CALC where 1000-CALC is a SECTION must run the whole section extent
+    # (1010-STEP1 adds 5, 1020-STEP2 adds 7), not just the header pseudo-paragraph;
+    # then PERFORM 2000-POST copies the result.
+    _run_to_done(repo_tmp, "sectperf.cbl", {"WS-A": "12", "WS-B": "12"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
 def test_declarative_handler_fires_on_its_event(repo_tmp):
     # The USE procedure is orthogonal: it runs only when its error event is sent, and its
     # effect threads back into the shared context.
