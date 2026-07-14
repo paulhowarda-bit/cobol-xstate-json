@@ -119,6 +119,12 @@ class _BusinessView:
             return "boundary"
         if decision:
             return "decision"
+        # A state whose entry does real arithmetic/COMPUTE work IS business logic (a
+        # pricing/accumulation step), even with no boundary or branch - keep it rather
+        # than collapsing it as technical scaffolding.
+        if any((self.actions.get(a) or {}).get("kind") in ("arith", "compute")
+               for a in (st.get("entry", []) or [])):
+            return "calculation"
         return "technical"
 
     def _is_business(self, name: str) -> bool:

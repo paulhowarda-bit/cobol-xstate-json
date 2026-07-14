@@ -806,12 +806,18 @@ class StmtParser:
             self._next()
         targets: List[str] = []
         depending = False
+        depending_on: Optional[str] = None
         while not self._eof():
             t = self._peek()
             if t.kind == "period":
                 break
             if t.is_word("DEPENDING"):
                 depending = True
+                self._next()
+                if self._peek() and self._peek().is_word("ON"):
+                    self._next()
+                if self._peek() and self._peek().kind == "word":
+                    depending_on = self._next().up  # the index variable
                 while not self._eof() and not self._at_period():
                     self._next()
                 break
@@ -828,7 +834,8 @@ class StmtParser:
                 targets.append(self._next().up)
             else:
                 break
-        return GoToStmt(line=line, targets=targets, depending=depending)
+        return GoToStmt(line=line, targets=targets, depending=depending,
+                        depending_on=depending_on)
 
     # -- CALL --------------------------------------------------------------
     def parse_call(self) -> Stmt:

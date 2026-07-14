@@ -30,6 +30,6 @@
        1900-DONE.
            EXIT.
        2000-CYCLE.
-           PERFORM 1000-SWITCH
+           PERFORM 1000-SWITCH THRU 1900-DONE
            MOVE WS-ROUTE TO WS-PGM
            CALL WS-PGM USING WS-CNT.

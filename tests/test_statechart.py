@@ -149,11 +149,18 @@ def test_alter_modeled_as_context_driven_guard_switch():
     targets = {e["target"] for e in switch}
     assert targets == {"1100-FIRST", "1200-NORMAL"}
     assert all("guard" in e for e in switch)
-    # ...seeded from a context variable holding the initial (head GO TO) target...
-    assert machine.config["context"]["alt_1000-SWITCH"] == "1100-FIRST"
-    # ...the ALTER itself is the set-action that flips the switch...
+    # ...seeded from a typed synthetic context field holding the head GO TO target...
+    assert machine.config["context"]["ALT-1000-SWITCH"] == "1100-FIRST"
+    assert "ALT-1000-SWITCH" in machine.data          # typed, so the js target stores it
+    # ...the ALTER itself is a REAL set-action assignment that flips the switch...
     first = machine.config["states"]["1100-FIRST"]["entry"]
-    assert any(a.startswith("set_alt_1000-SWITCH_to_1200-NORMAL") for a in first)
+    set_name = next(a for a in first if a.startswith("set_alt_1000-SWITCH_to_1200-NORMAL"))
+    sem = machine.semantics["actions"][set_name]
+    assert sem["assignments"] == [{"target": "ALT-1000-SWITCH", "expr": "'1200-NORMAL'"}]
+    # ...the exit guards are real evaluable conditions over that field...
+    guards = machine.semantics["guards"]
+    switch_guards = [e["guard"] for e in switch]
+    assert all(g in guards for g in switch_guards)
     # ...and it is still flagged as runtime-switched (verify, don't trust blindly).
     assert any("ALTER-switched" in f["message"] for f in machine.flags)
 
