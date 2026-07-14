@@ -229,6 +229,9 @@ class Program:
     # DATA DIVISION recovery (data_division.DataItem); duck-typed to avoid coupling.
     data_items: List = field(default_factory=list)
     data_by_name: Dict[str, object] = field(default_factory=dict)
+    # FILE-CONTROL SELECT entries: file -> {assign, organization, access, recordKey,
+    # statusField} (the file's external binding and its status-response field).
+    files: Dict[str, dict] = field(default_factory=dict)
 
 
 def walk_statements(stmts: List[Stmt]):

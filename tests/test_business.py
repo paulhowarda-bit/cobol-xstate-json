@@ -133,9 +133,11 @@ def test_perform_returns_loop_back_to_the_read():
     assert "2000-DISPATCH__io7" in _outs(v, "2100-DEPOSIT")
 
 
-def test_entry_reaches_the_first_read():
+def test_entry_reaches_the_first_boundary_state():
     v = _view("banktran.cbl")
-    assert v["entry"][0]["to"] == "1000-OPEN__io5"
+    # 1000-OPEN itself is now a boundary state (OPEN INPUT declares the file channel),
+    # so the entry path stops there rather than at the READ sub-state.
+    assert v["entry"][0]["to"] == "1000-OPEN"
 
 
 def test_goto_out_of_perform_is_flagged():

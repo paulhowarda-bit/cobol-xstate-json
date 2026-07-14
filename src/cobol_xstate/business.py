@@ -88,9 +88,13 @@ class _BusinessView:
         self.provenance = machine.provenance
         iface = _iface.build_interface(
             machine.config, machine.semantics, machine.provenance,
-            data=machine.data, using=machine.using, returning=machine.returning)
+            data=machine.data, using=machine.using, returning=machine.returning,
+            files=getattr(machine, "files", {}) or {})
         self.iface = iface
         self.perimeter = iface["perimeterStates"]
+        self.files = getattr(machine, "files", {}) or {}
+        self._dv = _iface._DataView(machine.data)
+        self._cursors = _iface._cursor_tables(machine.provenance)
         self.ordered: List[str] = machine.paragraph_order
         self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
@@ -263,10 +267,14 @@ class _BusinessView:
         primary_prov = None
         for aname in st.get("entry", []) or []:
             prov = self.provenance.get(aname, {})
-            hit = _iface._classify(aname, prov.get("cobol", ""), self.actions.get(aname))
-            if hit:
-                boundary_actions.append({"action": aname, "verb": hit[3],
-                                         "endpoint": hit[2], "direction": hit[0]})
+            hits = _iface._classify(aname, prov.get("cobol", ""),
+                                    self.actions.get(aname), self._dv,
+                                    self.files, self._cursors)
+            if hits:
+                for hit in hits:
+                    boundary_actions.append({"action": aname, "verb": hit["verb"],
+                                             "endpoint": hit["endpoint"],
+                                             "direction": hit["direction"]})
                 primary_prov = primary_prov or prov
             else:
                 internal_steps.append(aname)

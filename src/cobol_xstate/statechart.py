@@ -95,6 +95,8 @@ class Machine:
     sections: Dict[str, List[str]] = field(default_factory=dict)
     using: List[str] = field(default_factory=list)       # PROCEDURE DIVISION USING params
     returning: Optional[str] = None                      # PROCEDURE DIVISION RETURNING
+    # FILE-CONTROL SELECT entries (file -> assign/organization/statusField/...).
+    files: Dict[str, dict] = field(default_factory=dict)
 
     def bundle(self) -> dict:
         return {
@@ -122,7 +124,8 @@ class Machine:
                           "guards": self.semantics.get("guards", {})},
             "interface": build_interface(
                 self.config, self.semantics, self.provenance,
-                data=self.data, using=self.using, returning=self.returning),
+                data=self.data, using=self.using, returning=self.returning,
+                files=self.files),
             "provenance": self.provenance,
             "flags": self.flags,
             "notes": self.notes,
@@ -248,7 +251,12 @@ def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
 
 def _io_action(st: IoStmt, reg: NameRegistry) -> str:
     base = f"{st.verb.lower()}_{st.file or 'file'}"
-    return reg.action_named(base, f"{st.verb} {st.file or ''}".strip(), st.line)
+    label = f"{st.verb} {st.file or ''}".strip()
+    if st.into:
+        label += f" INTO {st.into}"
+    if st.from_:
+        label += f" FROM {st.from_}"
+    return reg.action_named(base, label, st.line)
 
 
 def _io_guard(st: IoStmt, key: str, reg: NameRegistry) -> str:
@@ -384,7 +392,9 @@ class _ParaCompiler:
         if isinstance(st, PerformStmt):
             return [self._perform_action(st)]
         if isinstance(st, IoStmt):
-            return [_io_action(st, reg)]
+            name = _io_action(st, reg)
+            self._io_sem(st, name)
+            return [name]
         if isinstance(st, ExecStmt):
             return [self._exec_action(st)]
         if isinstance(st, AlterStmt):
@@ -399,6 +409,16 @@ class _ParaCompiler:
                                   f"paragraph has no head GO TO; switch not modeled")
             return names
         return []  # ContinueStmt / ExitStmt PLAIN: no-op
+
+    def _io_sem(self, st: IoStmt, name: str) -> None:
+        """Record the I/O statement's data endpoints (file, INTO/FROM areas) so the
+        external-interface overlay can surface the fields crossing the boundary."""
+        spec = {"verb": st.verb, "kind": "io", "file": st.file}
+        if st.into:
+            spec["into"] = st.into
+        if st.from_:
+            spec["from"] = st.from_
+        self.ctx.action_sem.setdefault(name, spec)
 
     def _perform_action(self, st: PerformStmt) -> str:
         thru = f" THRU {st.thru}" if st.thru else ""
@@ -472,7 +492,12 @@ class _ParaCompiler:
             meta = {"kind": f"cics-{st.verb.lower()}", "cobolLine": st.line}
             if st.target:
                 meta["target"] = st.target
-            return self._emit(name, {"type": "final", "meta": meta})
+            # The terminating command itself is a boundary crossing (CICS RETURN sends
+            # the COMMAREA/TRANSID back to the caller; XCTL passes it on; ABEND raises
+            # a condition) - carry it as the final state's entry action so the external
+            # interface sees it. It was invisible here before.
+            eff = self._exec_action(st)
+            return self._emit(name, {"type": "final", "entry": [eff], "meta": meta})
         if isinstance(st, ContinueStmt):  # NEXT SENTENCE (plain CONTINUE is straight-line)
             self.ctx.flag(self.pname, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")
             name = root or self._fresh("next")
@@ -749,7 +774,9 @@ class _ParaCompiler:
             tgt = self.compile_block(body, after) if body else after
             edges.append(self._edge(tgt, "io-handler", st.line, guard=g, note=key))
         edges.append(self._edge(after, "io-continue", st.line, note="normal (no condition)"))
-        return self._emit(name, {"entry": [_io_action(st, self.reg)], "always": edges})
+        io_name = _io_action(st, self.reg)
+        self._io_sem(st, io_name)
+        return self._emit(name, {"entry": [io_name], "always": edges})
 
 
 _VARYING_RE = re.compile(
@@ -891,8 +918,12 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
             entry["parent"] = it.parent
         if it.redefines:
             entry["redefines"] = it.redefines
+        if getattr(it, "file", None):
+            entry["file"] = it.file
         if it.occurs:
             entry["occurs"] = it.occurs
+        if getattr(it, "occurs_depending", None):
+            entry["occursDependingOn"] = it.occurs_depending
         if it.value is not None:
             entry["value"] = it.value
         if it.is_group:
@@ -1129,4 +1160,5 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         sections=_section_map(program),
         using=program.using,
         returning=program.returning,
+        files=program.files,
     )
