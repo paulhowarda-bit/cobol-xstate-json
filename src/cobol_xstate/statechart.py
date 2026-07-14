@@ -45,6 +45,7 @@ from .model import (
     ExecStmt,
     ExitStmt,
     GoToStmt,
+    HandledStmt,
     IfStmt,
     IoStmt,
     Paragraph,
@@ -63,6 +64,18 @@ _IO_GUARD_KEY = {
     "NOT_AT_END": "notAtEnd",
     "INVALID_KEY": "invalidKey",
     "NOT_INVALID_KEY": "notInvalidKey",
+    "AT_EOP": "atEop",
+    "NOT_AT_EOP": "notAtEop",
+}
+
+# ON-condition handler keys (CALL / arithmetic / ACCEPT / DISPLAY) -> guard stems.
+_HANDLED_GUARD_KEY = {
+    "ON_SIZE_ERROR": "sizeError",
+    "NOT_ON_SIZE_ERROR": "notSizeError",
+    "ON_EXCEPTION": "exception",
+    "NOT_ON_EXCEPTION": "notException",
+    "ON_OVERFLOW": "overflow",
+    "NOT_ON_OVERFLOW": "notOverflow",
 }
 
 
@@ -296,8 +309,12 @@ class _ParaCompiler:
         return self.compile_control(first, rest, root)
 
     def _is_straightline(self, st: Stmt) -> bool:
-        if isinstance(st, (Action, CallStmt, AlterStmt)):
+        if isinstance(st, CallStmt):
+            return not st.handlers
+        if isinstance(st, (Action, AlterStmt)):
             return True
+        if isinstance(st, HandledStmt):
+            return False
         if isinstance(st, PerformStmt):
             return st.kind == "call" and st.target is not None  # simple PERFORM p [THRU q]
         if isinstance(st, IoStmt):
@@ -402,6 +419,10 @@ class _ParaCompiler:
             return self.compile_search(st, after, root)
         if isinstance(st, IoStmt):
             return self.compile_io(st, after, root)
+        if isinstance(st, HandledStmt):
+            return self.compile_handled(st, st.inner, st.handlers, after, root)
+        if isinstance(st, CallStmt):       # CALL with ON EXCEPTION/OVERFLOW handlers
+            return self.compile_handled(st, st, st.handlers, after, root)
         if isinstance(st, ExecStmt):       # terminate (RETURN/ABEND) or transfer (XCTL)
             name = root or self._fresh("exec")
             self.reg.state(name, f"EXEC {st.lang} {st.verb} ({st.kind})", st.line)
@@ -623,6 +644,34 @@ class _ParaCompiler:
                       f"edges, but the index iteration (advance until match) is an opaque "
                       f"effect - verify the loop/index behavior")
         return self._emit(name, {"entry": [effect], "always": edges})
+
+    def compile_handled(self, st: Stmt, inner: Stmt, handlers: Dict[str, List[Stmt]],
+                        after: str, root: Optional[str]) -> str:
+        """An imperative with [NOT] ON SIZE ERROR / EXCEPTION / OVERFLOW handlers:
+        the action runs on entry, then each handler body is a guarded branch. The
+        triggering condition is a runtime event (external guard) - flagged, never
+        hoisted into the unconditional flow and never invented."""
+        name = root or self._fresh("stmt")
+        entry = self._straight_actions(inner)
+        base = _slug(entry[0]) if entry else name
+        edges = []
+        for key, body in handlers.items():
+            stem = _HANDLED_GUARD_KEY.get(key, key.lower())
+            g = self.reg.guard_named(
+                f"{base}_{stem}", f"{key.replace('_', ' ')} raised at runtime "
+                f"by {base} - runtime condition", st.line)
+            tgt = self.compile_block(body, after) if body else after
+            edges.append(self._edge(tgt, "on-condition", st.line, guard=g, note=key))
+        edges.append(self._edge(after, "on-continue", st.line,
+                                note="normal (condition not raised)"))
+        keys = ", ".join(k.replace("_", " ") for k in handlers)
+        self.ctx.flag(self.pname, st.line,
+                      f"{keys} handler(s) modeled as guarded branch(es); the trigger "
+                      f"is a runtime condition (external guard) - verify")
+        state: dict = {"always": edges}
+        if entry:
+            state["entry"] = entry
+        return self._emit(name, state)
 
     def compile_io(self, st: IoStmt, after: str, root: Optional[str]) -> str:
         name = root or self._fresh("io")
