@@ -298,3 +298,68 @@ def test_end_to_end_compute_overflow_and_sign_flagged_and_captured():
     # ...and the sign condition captured as a guard expression.
     assert any(t.get("op") == "sign" and t.get("sign") == "NEGATIVE"
                for t in machine.semantics["guards"].values())
+
+
+# --------------------------------------------------------------------------- #
+# DIVIDE ... REMAINDER / reference-modified stores / OCCURS DEPENDING
+# --------------------------------------------------------------------------- #
+
+def test_divide_remainder_receiver_is_modeled():
+    from cobol_xstate.semantics import parse_operation
+    spec = parse_operation("DIVIDE 7 BY 2 GIVING WS-Q REMAINDER WS-R")
+    assigns = {a["target"]: a["expr"] for a in spec["assignments"]}
+    assert assigns["WS-Q"] == "7 / 2"
+    assert assigns["WS-R"] == "7 - ( WS-Q * 2 )"
+    # quotient must be assigned BEFORE the remainder reads it
+    targets = [a["target"] for a in spec["assignments"]]
+    assert targets.index("WS-Q") < targets.index("WS-R")
+
+
+def test_divide_into_remainder_orients_operands():
+    from cobol_xstate.semantics import parse_operation
+    spec = parse_operation("DIVIDE 2 INTO 7 GIVING WS-Q REMAINDER WS-R")
+    assigns = {a["target"]: a["expr"] for a in spec["assignments"]}
+    assert assigns["WS-Q"] == "7 / 2"
+    assert assigns["WS-R"] == "7 - ( WS-Q * 2 )"
+
+
+def test_occurs_depending_sized_at_maximum():
+    from cobol_xstate.data_division import parse_data_division
+    from cobol_xstate.normalizer import normalize
+    src = (
+        "       01  WS-TAB.\n"
+        "           05  WS-CNT   PIC S9(4) COMP.\n"
+        "           05  WS-ENTRY PIC X(3) OCCURS 1 TO 50 TIMES\n"
+        "                DEPENDING ON WS-CNT.\n"
+    )
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n" + src +
+        "       PROCEDURE DIVISION.\n       M. STOP RUN.\n")
+    items, by_name = parse_data_division(lines)
+    entry = by_name["WS-ENTRY"]
+    assert entry.occurs == 50                 # max, not min
+    assert entry.occurs_depending == "WS-CNT"
+
+
+def test_refmod_write_target_is_flagged_and_not_a_phantom_key():
+    from cobol_xstate.parser import parse_program
+    from cobol_xstate.statechart import build_machine
+    from cobol_xstate.emitter import emit_setup_module
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-NAME  PIC X(10).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       M.\n"
+        "           MOVE 'AB' TO WS-NAME(1:2)\n"
+        "           STOP RUN.\n"
+    )
+    machine = build_machine(parse_program(src))
+    assert any("reference-modified" in f["message"] for f in machine.flags)
+    mod = emit_setup_module(machine)
+    # never a silent phantom store; the runnable machine fails loudly instead
+    assert "notModeled" in mod
+    assert 'FIELDS["WS-NAME(1 : 2)"]' not in mod

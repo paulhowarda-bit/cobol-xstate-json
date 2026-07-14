@@ -65,6 +65,9 @@ class DataItem:
     usage: Optional[str] = None
     value: Optional[str] = None
     occurs: Optional[int] = None
+    # OCCURS min TO max DEPENDING ON var: `occurs` holds the MAXIMUM (the table is
+    # seeded at full size); the dynamic length variable is kept here and flagged.
+    occurs_depending: Optional[str] = None
     redefines: Optional[str] = None
     parent: Optional[str] = None
     is_group: bool = False
@@ -201,9 +204,13 @@ def parse_data_division(lines: List[CodeLine]):
         vm = re.search(r"\bVALUE\b\s+(?:IS\s+)?('(?:[^']*)'|\"(?:[^\"]*)\"|\S+)", rest, re.I)
         if vm:
             item.value = vm.group(1).rstrip(".")
-        om = re.search(r"\bOCCURS\b\s+(\d+)", rest, re.I)
+        om = re.search(r"\bOCCURS\b\s+(\d+)(?:\s+TO\s+(\d+))?", rest, re.I)
         if om:
-            item.occurs = int(om.group(1))
+            # A variable-length table (OCCURS min TO max) is sized at its MAXIMUM.
+            item.occurs = int(om.group(2) or om.group(1))
+            dm = re.search(r"\bDEPENDING\s+(?:ON\s+)?([A-Z0-9][A-Z0-9-]*)", rest, re.I)
+            if dm:
+                item.occurs_depending = dm.group(1).upper()
         rm = re.search(r"\bREDEFINES\b\s+([A-Z0-9-]+)", rest, re.I)
         if rm:
             item.redefines = rm.group(1).upper()

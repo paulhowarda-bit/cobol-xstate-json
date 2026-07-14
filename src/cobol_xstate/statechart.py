@@ -179,6 +179,15 @@ class _BuildCtx:
         if spec is None:
             return
         self.action_sem[name] = spec
+        # A reference-modified store (MOVE x TO F(a:b)) is a substring write the data
+        # model cannot express; the runnable machine fails loudly instead of writing a
+        # phantom key - surface it here so a reviewer sees it without running.
+        for a in spec.get("assignments", []):
+            if ":" in a.get("target", ""):
+                self.flag(para, line,
+                          f"{spec.get('verb', '?')} writes reference-modified target "
+                          f"{a['target']} - substring store is not modeled (routed to "
+                          f"notModeled in the runnable machine); verify")
         # The global decimal-arithmetic caveat is a note; only flag genuine per-site
         # concerns: arithmetic writing a known non-numeric item, or an ON SIZE ERROR
         # overflow path the rewrite must replicate.
@@ -362,6 +371,13 @@ class _ParaCompiler:
                 self.ctx.flag(self.pname, st.line,
                               f"{st.verb} ON OVERFLOW handler is folded into the opaque "
                               f"action; its conditional branch is not modeled - verify")
+            # STRING/UNSTRING/INSPECT transform data (receivers, TALLYING counters) but
+            # are modeled as opaque effects: their receivers stay UNCHANGED in the model.
+            if st.verb in ("STRING", "UNSTRING", "INSPECT"):
+                self.ctx.flag(self.pname, st.line,
+                              f"{st.verb} is an opaque effect: its receiver/tally data "
+                              f"changes are NOT modeled (receivers unchanged in the "
+                              f"contract) - verify")
             return [name]
         if isinstance(st, CallStmt):
             return [_call_action(st, self.ctx, self.pname)]
@@ -988,6 +1004,11 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
             ctx.flag(it.section or "DATA", it.line,
                      f"OCCURS on group {it.name}: subscripting its subordinate items "
                      f"is not modeled (only elementary-item OCCURS is)")
+        if getattr(it, "occurs_depending", None):
+            ctx.flag(it.section or "DATA", it.line,
+                     f"{it.name} OCCURS ... DEPENDING ON {it.occurs_depending}: the "
+                     f"table is modeled at its MAXIMUM size ({it.occurs}); the dynamic "
+                     f"length is not enforced - verify uses of the variable extent")
         if it.redefines:
             tgt = ctx.data.get(it.redefines)
             if _redefines_compatible(it, tgt):

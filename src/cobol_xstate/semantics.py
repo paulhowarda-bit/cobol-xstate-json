@@ -201,7 +201,7 @@ def _arith_mul(core, spec):
 
 
 def _arith_div(core, spec):
-    # DIVIDE a INTO b [GIVING c]  |  DIVIDE a BY b GIVING c
+    # DIVIDE a INTO b [GIVING c [REMAINDER r]]  |  DIVIDE a BY b GIVING c [REMAINDER r]
     m = re.match(r"DIVIDE\s+(.+?)\s+(INTO|BY)\s+(.+)$", core, re.I)
     if not m:
         return spec("effect")
@@ -209,9 +209,21 @@ def _arith_div(core, spec):
     if re.search(r"\bGIVING\b", core, re.I):
         parts = re.split(r"\bGIVING\b", rest, flags=re.I)
         b = _operands(parts[0])[0]
-        targets = _operands(re.split(r"\bREMAINDER\b", parts[1], flags=re.I)[0])
-        expr = f"{b} / {a}" if kw == "INTO" else f"{a} / {b}"
-        return spec("arith", [{"target": t, "expr": expr} for t in targets])
+        rem_split = re.split(r"\bREMAINDER\b", parts[1], flags=re.I)
+        targets = _operands(rem_split[0])
+        dividend, divisor = (b, a) if kw == "INTO" else (a, b)
+        assigns = [{"target": t, "expr": f"{dividend} / {divisor}"} for t in targets]
+        if len(rem_split) > 1 and targets:
+            # REMAINDER = dividend - stored (truncated) quotient * divisor. Assignments
+            # apply in order, so the quotient target already holds its stored value.
+            q = targets[0]
+            for rt in _operands(rem_split[1]):
+                assigns.append({
+                    "target": rt,
+                    "expr": f"{dividend} - ( {q} * {divisor} )",
+                    "note": "REMAINDER = dividend - stored quotient * divisor",
+                })
+        return spec("arith", assigns)
     targets = _operands(rest)
     return spec("arith", [{"target": t, "expr": f"{t} / {a}"} for t in targets])
 

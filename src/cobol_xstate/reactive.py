@@ -248,7 +248,7 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
     # data ops: (context) => partial context
     out.append("export const ops = {")
     for name, body in ops.items():
-        out.append(f"  {_js_str(name)}: (context) => ({body}),")
+        out.append(f"  {_js_str(name)}: (context) => {body},")
     out.append("};")
     out.append("")
 
