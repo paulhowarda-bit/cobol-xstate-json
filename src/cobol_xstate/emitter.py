@@ -342,12 +342,23 @@ def _build_ops(machine: Machine, fields: Dict[str, dict]
                 bu = base.upper()
                 val = _emit_assignment_value(bu, a.get("expr", ""), kind, rounded, fields)
                 val = f"setElem(context[{_js_str(bu)}], {_subscript_js(sub)}, {val})"
-                pairs.append(f"{_js_str(bu)}: {val}")
+                pairs.append((_js_str(bu), val))
+            elif "(" in a["target"]:
+                # Reference modification / unresolved subscript target: never write a
+                # phantom context key - fail loudly instead (flagged at build time).
+                tu = a["target"].upper()
+                pairs.append((_js_str(tu),
+                              f'notModeled({_js_str(f"store into {tu}")})'))
             else:
                 val = _emit_assignment_value(a["target"], a.get("expr", ""), kind,
                                              rounded, fields)
-                pairs.append(f"{_js_str(a['target'])}: {val}")
-        ops[name] = "{ " + ", ".join(pairs) + " }"
+                pairs.append((_js_str(a["target"]), val))
+        # Assignments apply IN ORDER and later ones see earlier results (DIVIDE ...
+        # REMAINDER reads the stored quotient), so the op body is sequential over a
+        # shadow copy; the returned partial holds only the written keys.
+        stmts = " ".join(f"out[{k}] = context[{k}] = {v};" for k, v in pairs)
+        ops[name] = ("{ const out = {}; context = Object.assign({}, context); "
+                     f"{stmts} return out; }}")
     return ops, effects
 
 
@@ -807,7 +818,7 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     # data actions: (context) => partial context
     out.append("export const ops = {")
     for name, body in ops.items():
-        out.append(f"  {_js_str(name)}: (context) => ({body}),")
+        out.append(f"  {_js_str(name)}: (context) => {body},")
     out.append("};")
     out.append("")
 

@@ -153,9 +153,10 @@ def test_module_has_setup_and_createmachine():
     assert "import { setup, assign } from 'xstate';" in mod
     assert "setup({ actions, guards, actors }).createMachine(machineConfig)" in mod
     assert "export const ops" in mod and "export const guardFns" in mod
-    # ADD becomes a decimal store into the receiver's type
-    assert ('"ADD_1_TO_WS-COUNT": (context) => ({ "WS-COUNT": '
-            'store(add(D(context["WS-COUNT"]), D("1")), FIELDS["WS-COUNT"]) })') in mod
+    # ADD becomes a decimal store into the receiver's type (sequential op body so
+    # later assignments in one statement see earlier stored results)
+    assert ('out["WS-COUNT"] = context["WS-COUNT"] = '
+            'store(add(D(context["WS-COUNT"]), D("1")), FIELDS["WS-COUNT"]);') in mod
 
 
 def test_module_routes_io_handler_guard_to_external():
@@ -204,8 +205,8 @@ def test_perform_thru_builds_a_range_actor():
 def test_occurs_field_carries_count_and_writes_use_setelem():
     mod = emit_setup_module(_machine("tblsum.cbl"))
     assert '"occurs": 5' in mod                              # FIELDS records the table size
-    assert ('"TBL-AMT": setElem(context["TBL-AMT"], "1", '
-            'store(D("10"), FIELDS["TBL-AMT"]))') in mod      # MOVE 10 TO TBL-AMT(1)
+    assert ('out["TBL-AMT"] = context["TBL-AMT"] = setElem(context["TBL-AMT"], "1", '
+            'store(D("10"), FIELDS["TBL-AMT"]));') in mod      # MOVE 10 TO TBL-AMT(1)
     assert 'D(elem(context["TBL-AMT"], context["WS-I"]))' in mod  # ADD TBL-AMT(WS-I) ...
 
 
@@ -382,6 +383,12 @@ def test_sort_runs_input_then_output_under_stock_xstate(repo_tmp):
 def test_perform_thru_range_runs_all_paragraphs(repo_tmp):
     # PERFORM 1000-A THRU 3000-C runs A, B, C in order then returns: 100 + 20 + 3 = 123.
     _run_to_done(repo_tmp, "thrurange.cbl", {"WS-N": "123"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_divide_remainder_computes_both_receivers(repo_tmp):
+    # DIVIDE 7 BY 2 GIVING WS-Q REMAINDER WS-R: quotient truncates to 3, remainder 1.
+    _run_to_done(repo_tmp, "divrem.cbl", {"WS-Q": "3", "WS-R": "1"})
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
