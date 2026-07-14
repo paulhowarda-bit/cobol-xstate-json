@@ -86,6 +86,13 @@ class CallStmt(Stmt):
     on_exception: bool = False
     using: List[str] = field(default_factory=list)      # CALL ... USING args (data passed)
     returning: Optional[str] = None                     # RETURNING receiver
+    # BY CONTENT / BY VALUE args (a subset of `using`): passed one-way, the callee's
+    # writes are NOT visible to this program - the caller-output claim excludes them.
+    by_content: List[str] = field(default_factory=list)
+    # ON EXCEPTION / ON OVERFLOW handler bodies, keyed 'ON_EXCEPTION' /
+    # 'NOT_ON_EXCEPTION' / 'ON_OVERFLOW': real conditional branches, compiled as
+    # guarded edges (the trigger is a runtime condition -> external guard).
+    handlers: Dict[str, List[Stmt]] = field(default_factory=dict)
 
 
 @dataclass
@@ -93,12 +100,26 @@ class IoStmt(Stmt):
     """READ / WRITE / REWRITE / DELETE / START with their implicit handlers.
 
     handlers maps a handler key to the statements guarded by it:
-      'AT_END', 'NOT_AT_END', 'INVALID_KEY', 'NOT_INVALID_KEY'
+      'AT_END', 'NOT_AT_END', 'INVALID_KEY', 'NOT_INVALID_KEY', 'AT_EOP', 'NOT_AT_EOP'
     The handler edges are control flow that is invisible at the I/O site.
     """
 
     verb: str
     file: Optional[str]
+    handlers: Dict[str, List[Stmt]] = field(default_factory=dict)
+    into: Optional[str] = None   # READ/RETURN ... INTO target (data lands here too)
+    from_: Optional[str] = None  # WRITE/REWRITE ... FROM source (data comes from here)
+
+
+@dataclass
+class HandledStmt(Stmt):
+    """An imperative statement carrying an ON-condition handler phrase: arithmetic with
+    [NOT] ON SIZE ERROR, or ACCEPT/DISPLAY with [NOT] ON EXCEPTION. The inner statement
+    is the action itself; handlers maps 'ON_SIZE_ERROR' / 'NOT_ON_SIZE_ERROR' /
+    'ON_EXCEPTION' / ... to the guarded bodies - real conditional branches whose trigger
+    is a runtime condition (compiled as flagged external guards, never hoisted)."""
+
+    inner: Stmt
     handlers: Dict[str, List[Stmt]] = field(default_factory=dict)
 
 
@@ -226,6 +247,13 @@ def walk_statements(stmts: List[Stmt]):
         elif isinstance(st, PerformStmt):
             yield from walk_statements(st.inline_body)
         elif isinstance(st, IoStmt):
+            for body in st.handlers.values():
+                yield from walk_statements(body)
+        elif isinstance(st, CallStmt):
+            for body in st.handlers.values():
+                yield from walk_statements(body)
+        elif isinstance(st, HandledStmt):
+            yield from walk_statements([st.inner])
             for body in st.handlers.values():
                 yield from walk_statements(body)
         elif isinstance(st, SearchStmt):

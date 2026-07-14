@@ -21,7 +21,7 @@ the statechart stage, never silently smoothed.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
@@ -36,6 +36,7 @@ from .model import (
     ExecStmt,
     ExitStmt,
     GoToStmt,
+    HandledStmt,
     IfStmt,
     IoStmt,
     Paragraph,
@@ -66,6 +67,19 @@ STARTERS: Set[str] = ACTION_VERBS | CONTROL_VERBS
 OPAQUE_SCOPED = {"STRING": "END-STRING", "UNSTRING": "END-UNSTRING"}
 
 IO_VERBS = {"READ", "WRITE", "REWRITE", "DELETE", "START", "RETURN"}
+
+# Verbs whose trailing [NOT] ON SIZE ERROR / EXCEPTION phrase guards an imperative:
+# the handler body is a conditional branch, captured as a HandledStmt (never hoisted).
+_SIZE_VERBS = {"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE"}
+_EXC_VERBS = {"ACCEPT", "DISPLAY"}
+_HANDLED_VERBS = _SIZE_VERBS | _EXC_VERBS
+
+# Clause words that may follow the file/record name inside an I/O statement; NEXT
+# collides with the NEXT SENTENCE starter, so it must be recognized as a clause here
+# (READ f NEXT RECORD is the standard VSAM browse idiom).
+_IO_CLAUSE_WORDS = {"NEXT", "PREVIOUS", "RECORD", "KEY", "WITH", "NO", "LOCK",
+                    "KEPT", "WAIT", "ADVANCING", "BEFORE", "AFTER", "PAGE",
+                    "LINE", "LINES", "IGNORING"}
 
 _HEADER_RE = re.compile(r"^([A-Z0-9][A-Z0-9-]*)(\s+SECTION)?\s*\.\s*$", re.I)
 _RESERVED_HEADER = STARTERS | {
@@ -417,6 +431,8 @@ class StmtParser:
             return TerminateStmt(line=ln, kind="GOBACK")
         if v in OPAQUE_SCOPED:
             return self.parse_opaque_scoped(OPAQUE_SCOPED[v], stops)
+        if v in _HANDLED_VERBS:
+            return self.parse_handled_action(stops)
         return self.parse_action(stops)
 
     # -- opaque action -----------------------------------------------------
@@ -425,6 +441,7 @@ class StmtParser:
         verb = start.up
         parts = [start.text]
         line = start.line
+        exc_verb = verb in _EXC_VERBS
         while not self._eof():
             t = self._peek()
             if t.kind == "period":
@@ -436,12 +453,78 @@ class StmtParser:
                 if u in {"ELSE", "WHEN", "THEN"}:
                     break
                 if u == "AT" or (u == "NOT" and self._peek(1)
-                                 and self._peek(1).up in {"AT", "INVALID", "ON"}):
+                                 and self._peek(1).up in {"AT", "INVALID", "ON",
+                                                          "SIZE", "EXCEPTION"}):
                     break
                 if u == "INVALID":
                     break
+                # An ON-condition handler phrase opens here: [NOT] [ON] SIZE ERROR,
+                # or (for ACCEPT/DISPLAY) [NOT] [ON] EXCEPTION. Its imperative is a
+                # conditional branch - stop so the caller captures it as a handler.
+                if u == "SIZE" and self._peek(1) and self._peek(1).is_word("ERROR"):
+                    break
+                if u == "ON" and self._peek(1) and self._peek(1).up in {
+                        "SIZE", "EXCEPTION", "OVERFLOW"}:
+                    break
+                if exc_verb and u in {"EXCEPTION", "OVERFLOW"}:
+                    break
             parts.append(self._next().text)
         return Action(line=line, text=" ".join(parts), verb=verb)
+
+    def _handler_phrase(self, exc_ok: bool) -> Optional[str]:
+        """If the upcoming tokens open an ON-condition handler phrase, consume the
+        phrase words and return its key ('ON_SIZE_ERROR', 'NOT_ON_EXCEPTION', ...);
+        otherwise consume nothing and return None."""
+        j = 0
+        neg = False
+        t = self._peek(j)
+        if t is None or t.kind != "word":
+            return None
+        if t.up == "NOT":
+            neg = True
+            j += 1
+            t = self._peek(j)
+            if t is None or t.kind != "word":
+                return None
+        if t.up == "ON":
+            j += 1
+            t = self._peek(j)
+            if t is None or t.kind != "word":
+                return None
+        if t.up == "SIZE":
+            nxt = self._peek(j + 1)
+            if nxt is not None and nxt.is_word("ERROR"):
+                for _ in range(j + 2):
+                    self._next()
+                return ("NOT_" if neg else "") + "ON_SIZE_ERROR"
+            return None
+        if t.up in ("EXCEPTION", "OVERFLOW") and (exc_ok or j > 0 or neg):
+            for _ in range(j + 1):
+                self._next()
+            return ("NOT_" if neg else "") + "ON_" + t.up
+        return None
+
+    def parse_handled_action(self, stops: Set[str]) -> Stmt:
+        """An arithmetic / ACCEPT / DISPLAY statement whose [NOT] ON SIZE ERROR /
+        EXCEPTION handler imperatives are captured as real conditional branches."""
+        inner = self.parse_action(stops)
+        endword = "END-" + inner.verb
+        exc_ok = inner.verb in _EXC_VERBS
+        handlers: Dict[str, List[Stmt]] = {}
+        while not self._eof():
+            t = self._peek()
+            if t.kind == "period":
+                break
+            if t.kind == "word" and t.up == endword:
+                self._next()
+                break
+            key = self._handler_phrase(exc_ok)
+            if key is None:
+                break
+            handlers[key] = self.parse_block(stops={"NOT", "ON", "SIZE"})
+        if handlers:
+            return HandledStmt(line=inner.line, inner=inner, handlers=handlers)
+        return inner
 
     def parse_opaque_scoped(self, endword: str, stops: Set[str]) -> Stmt:
         """Consume a STRING / UNSTRING statement as one opaque action.
@@ -677,10 +760,12 @@ class StmtParser:
                 target = t.up
                 dynamic = True
                 self._next()
-        on_exc = False
         using: List[str] = []
+        by_content: List[str] = []
         returning: Optional[str] = None
+        handlers: Dict[str, List[Stmt]] = {}
         mode = None  # 'using' | 'returning' while collecting arg names
+        passing = "REFERENCE"  # BY REFERENCE (default) | CONTENT | VALUE, sticky per arg
         while not self._eof():
             t = self._peek()
             if t.kind == "period":
@@ -689,30 +774,45 @@ class StmtParser:
                 if t.up == "END-CALL":
                     self._next()
                     break
-                if t.up in {"EXCEPTION", "OVERFLOW"}:
-                    on_exc = True
-                    mode = None
-                elif t.up == "USING":
+                if t.up in {"NOT", "ON", "EXCEPTION", "OVERFLOW"}:
+                    # [NOT] [ON] EXCEPTION/OVERFLOW imperative: a conditional branch,
+                    # captured as a handler body (not hoisted into the main flow).
+                    key = self._handler_phrase(exc_ok=True)
+                    if key is not None:
+                        handlers[key] = self.parse_block(stops={"NOT", "ON"})
+                        mode = None
+                        continue
+                    self._next()  # stray NOT/ON: skip so we make progress
+                    continue
+                if t.up == "USING":
                     mode = "using"
+                    passing = "REFERENCE"
                     self._next()
                     continue
-                elif t.up in {"RETURNING", "GIVING"}:
+                if t.up in {"RETURNING", "GIVING"}:
                     mode = "returning"
                     self._next()
                     continue
-                elif t.up in {"BY", "REFERENCE", "CONTENT", "VALUE"}:
+                if t.up == "BY":
                     self._next()
                     continue
-                elif t.up in STARTERS and t.up != "CALL":
+                if t.up in {"REFERENCE", "CONTENT", "VALUE"}:
+                    passing = t.up
+                    self._next()
+                    continue
+                if t.up in STARTERS and t.up != "CALL":
                     break
-                elif mode == "using":
+                if mode == "using":
                     using.append(t.up)
+                    if passing in ("CONTENT", "VALUE"):
+                        by_content.append(t.up)
                 elif mode == "returning":
                     returning = t.up
                     mode = None
             self._next()
-        return CallStmt(line=line, target=target, dynamic=dynamic, on_exception=on_exc,
-                        using=using, returning=returning)
+        return CallStmt(line=line, target=target, dynamic=dynamic,
+                        on_exception=bool(handlers), using=using, returning=returning,
+                        by_content=by_content, handlers=handlers)
 
     # -- ALTER -------------------------------------------------------------
     def parse_alter(self) -> Stmt:
@@ -929,7 +1029,23 @@ class StmtParser:
         if self._peek() and self._peek().kind == "word" and self._peek().up not in STARTERS:
             file_name = self._next().up
         handlers = {}
-        # Skip clause noise (INTO/FROM/KEY/...) until a handler intro, end, or period.
+        into: Optional[str] = None
+        from_: Optional[str] = None
+
+        def _end_key(consume_at: bool) -> str:
+            """Consume the END / END-OF-PAGE word after [NOT] AT and return the key stem."""
+            if consume_at and self._peek() and self._peek().is_word("AT"):
+                self._next()
+            t = self._peek()
+            if t is not None and t.kind == "word" and t.up in ("END-OF-PAGE", "EOP"):
+                self._next()
+                return "AT_EOP"
+            if t is not None and t.is_word("END"):
+                self._next()
+            return "AT_END"
+
+        # Skip clause noise (NEXT/KEY/ADVANCING/...) until a handler intro, end, or
+        # period; capture INTO/FROM data targets on the way.
         while not self._eof():
             t = self._peek()
             if t.kind == "period":
@@ -939,10 +1055,18 @@ class StmtParser:
                 if u == endword:
                     self._next()
                     break
-                if u == "AT":
+                if u == "INTO" or u == "FROM":
                     self._next()
-                    key = "AT_END"
-                    if self._peek() and self._peek().is_word("END"):
+                    nxt = self._peek()
+                    if nxt is not None and nxt.kind == "word" and nxt.up not in STARTERS:
+                        if u == "INTO":
+                            into = self._next().up
+                        else:
+                            from_ = self._next().up
+                    continue
+                if u == "AT" or u in ("END-OF-PAGE", "EOP"):
+                    key = _end_key(consume_at=(u == "AT")) if u == "AT" else "AT_EOP"
+                    if u != "AT":
                         self._next()
                     handlers[key] = self.parse_block(stops={"NOT", "AT", "END"})
                     continue
@@ -954,23 +1078,28 @@ class StmtParser:
                     continue
                 if u == "NOT":
                     self._next()
-                    if self._peek() and self._peek().is_word("AT"):
-                        self._next()
-                        if self._peek() and self._peek().is_word("END"):
-                            self._next()
-                        handlers["NOT_AT_END"] = self.parse_block(stops={"AT", "INVALID"})
+                    nxt = self._peek()
+                    if nxt is not None and (nxt.is_word("AT") or nxt.kind == "word"
+                                            and nxt.up in ("END", "END-OF-PAGE", "EOP")):
+                        key = "NOT_" + _end_key(consume_at=nxt.is_word("AT"))
+                        handlers[key] = self.parse_block(stops={"AT", "INVALID", "NOT"})
                         continue
-                    if self._peek() and self._peek().is_word("INVALID"):
+                    if nxt is not None and nxt.is_word("INVALID"):
                         self._next()
                         if self._peek() and self._peek().is_word("KEY"):
                             self._next()
-                        handlers["NOT_INVALID_KEY"] = self.parse_block(stops={"AT", "INVALID"})
+                        handlers["NOT_INVALID_KEY"] = self.parse_block(
+                            stops={"AT", "INVALID", "NOT"})
                         continue
+                    continue
+                if u in _IO_CLAUSE_WORDS:
+                    self._next()  # I/O clause word (READ f NEXT RECORD, AFTER ADVANCING...)
                     continue
                 if u in STARTERS:
                     break
             self._next()
-        return IoStmt(line=line, verb=verb, file=file_name, handlers=handlers)
+        return IoStmt(line=line, verb=verb, file=file_name, handlers=handlers,
+                      into=into, from_=from_)
 
 
 def _perform_kind(control: str, inline: bool):

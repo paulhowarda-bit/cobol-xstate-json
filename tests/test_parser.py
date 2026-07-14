@@ -285,3 +285,97 @@ def test_string_without_end_string_inside_if_does_not_eat_end_if():
                       if isinstance(s, Action) and s.verb == "STRING"]
     assert len(string_actions) == 1
     assert "MOVE" not in string_actions[0].text
+
+
+# --------------------------------------------------------------------------- #
+# ON-condition handlers are real conditional branches (never hoisted)
+# --------------------------------------------------------------------------- #
+
+def test_call_on_exception_handler_captured_as_branch():
+    from cobol_xstate.model import Action, walk_statements
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           CALL 'SUBPGM' USING BY REFERENCE WS-A BY CONTENT WS-B\n"
+        "               ON EXCEPTION MOVE 8 TO WS-RC\n"
+        "           END-CALL\n"
+        "           MOVE 1 TO WS-OK.\n"
+    ))
+    stmts = prog.paragraphs[0].statements
+    call = next(s for s in walk_statements(stmts) if isinstance(s, CallStmt))
+    assert call.using == ["WS-A", "WS-B"]
+    assert call.by_content == ["WS-B"]           # BY CONTENT tracked per argument
+    assert "ON" not in call.using               # the old 'ON' leak
+    assert "ON_EXCEPTION" in call.handlers
+    handler_moves = [s for s in call.handlers["ON_EXCEPTION"]
+                     if isinstance(s, Action) and "8" in s.text]
+    assert handler_moves, "handler imperative must live inside the handler body"
+    # the MOVE after END-CALL is unconditional top-level flow, not the handler
+    top_moves = [s for s in stmts if isinstance(s, Action) and "WS-OK" in s.text]
+    assert top_moves
+
+
+def test_arith_on_size_error_captured_as_branches():
+    from cobol_xstate.model import HandledStmt
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           ADD 1 TO WS-A\n"
+        "               ON SIZE ERROR MOVE 9 TO WS-RC\n"
+        "               NOT ON SIZE ERROR MOVE 1 TO WS-RC\n"
+        "           END-ADD\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert isinstance(st, HandledStmt)
+    assert st.inner.verb == "ADD"
+    assert "SIZE" not in st.inner.text          # the clause is out of the action text
+    assert set(st.handlers) == {"ON_SIZE_ERROR", "NOT_ON_SIZE_ERROR"}
+
+
+def test_read_next_record_keeps_at_end_handlers():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           READ IN-FILE NEXT RECORD\n"
+        "               AT END MOVE 'Y' TO WS-EOF\n"
+        "               NOT AT END ADD 1 TO WS-CNT\n"
+        "           END-READ\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert isinstance(st, IoStmt)
+    assert st.file == "IN-FILE"
+    assert set(st.handlers) == {"AT_END", "NOT_AT_END"}
+    assert st.handlers["AT_END"], "AT END imperative must be inside the handler"
+
+
+def test_write_at_end_of_page_is_its_own_handler_key():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           WRITE OUT-REC FROM WS-LINE\n"
+        "               AT END-OF-PAGE MOVE 1 TO WS-EOP\n"
+        "           END-WRITE\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert isinstance(st, IoStmt)
+    assert st.from_ == "WS-LINE"
+    assert set(st.handlers) == {"AT_EOP"}
+
+
+def test_read_into_and_accept_exception_captured():
+    from cobol_xstate.model import HandledStmt
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           READ IN-FILE INTO WS-REC\n"
+        "               AT END MOVE 'Y' TO WS-EOF\n"
+        "           END-READ\n"
+        "           ACCEPT WS-MSG\n"
+        "               ON EXCEPTION MOVE 7 TO WS-RC\n"
+        "           END-ACCEPT\n"
+        "           STOP RUN.\n"
+    ))
+    rd = prog.paragraphs[0].statements[0]
+    assert isinstance(rd, IoStmt) and rd.into == "WS-REC"
+    acc = prog.paragraphs[0].statements[1]
+    assert isinstance(acc, HandledStmt)
+    assert acc.inner.verb == "ACCEPT"
+    assert set(acc.handlers) == {"ON_EXCEPTION"}
