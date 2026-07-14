@@ -81,7 +81,7 @@ _IO_CLAUSE_WORDS = {"NEXT", "PREVIOUS", "RECORD", "KEY", "WITH", "NO", "LOCK",
                     "KEPT", "WAIT", "ADVANCING", "BEFORE", "AFTER", "PAGE",
                     "LINE", "LINES", "IGNORING"}
 
-_HEADER_RE = re.compile(r"^([A-Z0-9][A-Z0-9-]*)(\s+SECTION)?\s*\.\s*$", re.I)
+_HEADER_RE = re.compile(r"^([A-Z0-9][A-Z0-9-]*)(\s+SECTION)?\s*\.\s*(.*)$", re.I)
 _RESERVED_HEADER = STARTERS | {
     "END-IF", "END-PERFORM", "END-EVALUATE", "END-READ", "END-WRITE", "END-CALL",
     "ELSE", "WHEN", "THEN", "DECLARATIVES",
@@ -102,6 +102,19 @@ def _find_program_id(lines: List[CodeLine]) -> str:
 
 def _header_name(cl: CodeLine) -> Optional[str]:
     """Return the paragraph/section name if this line is an Area-A header."""
+    split = _split_header(cl)
+    return split[0] if split else None
+
+
+def _rest_line(cl: CodeLine, rest: str) -> CodeLine:
+    """A synthetic Area-B line carrying the code that followed a same-line header."""
+    return CodeLine(text=rest, line=cl.line, area_a=False, origin=cl.origin)
+
+
+def _split_header(cl: CodeLine) -> Optional[Tuple[str, bool, str]]:
+    """If this line is an Area-A paragraph/section header, return
+    ``(name, is_section, rest)`` where ``rest`` is any code following the header
+    period on the same line (the legal ``PARA-1. MOVE ...`` style); otherwise None."""
     if not cl.area_a:
         return None
     m = _HEADER_RE.match(cl.text.strip())
@@ -110,7 +123,7 @@ def _header_name(cl: CodeLine) -> Optional[str]:
     name = m.group(1).upper()
     if name in _RESERVED_HEADER:
         return None
-    return name
+    return name, bool(m.group(2)), (m.group(3) or "").strip()
 
 
 _VALUE_RE = re.compile(
@@ -248,17 +261,17 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
     buckets: List[Paragraph] = [current]
     bucket_lines: List[List[CodeLine]] = [[]]
     for cl in body:
-        name = _header_name(cl)
-        if name is not None:
-            is_section = bool(re.search(r"\bSECTION\b", cl.text, re.I))
+        split = _split_header(cl)
+        if split is not None:
+            name, is_section, rest = split
             section = name if is_section else section
             current = Paragraph(name=name, line=cl.line,
                                 section=None if is_section else section,
                                 origin=cl.origin)
             buckets.append(current)
             bucket_lines.append([])
-            if is_section:
-                continue
+            if rest:  # PARA-1. MOVE ... - code on the header line belongs to the body
+                bucket_lines[-1].append(_rest_line(cl, rest))
         else:
             bucket_lines[-1].append(cl)
 
@@ -754,6 +767,13 @@ class StmtParser:
                 while not self._eof() and not self._at_period():
                     self._next()
                 break
+            if t.kind == "word" and t.up in {"OF", "IN"}:
+                # GO TO para OF section: consume the qualification (the unqualified
+                # name is the edge target; qualification does not change it here).
+                self._next()
+                if self._peek() and self._peek().kind == "word":
+                    self._next()
+                continue
             if (t.kind == "word" and t.up not in STARTERS
                     and t.up not in {"ELSE", "WHEN", "THEN"}
                     and not self._is_end_word(t)):

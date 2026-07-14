@@ -106,20 +106,47 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
     out: List[CodeLine] = []
     res = PreprocessResult(lines=out)
 
+    active_replace: List[Tuple[str, str]] = []
+
+    def emit(cl: CodeLine) -> None:
+        if active_replace:
+            cl = CodeLine(text=_apply_replacing(cl.text, active_replace), line=cl.line,
+                          area_a=cl.area_a, origin=cl.origin)
+        out.append(cl)
+
     i = 0
     while i < len(lines):
         line = lines[i]
         up = line.text.upper()
+        if re.match(r"\s*REPLACE\b", up):
+            # standalone REPLACE ==a== BY ==b== ... / REPLACE OFF: text substitution
+            # active on every following line until turned off.
+            stmt, nxt = _gather_statement(lines, i)
+            if re.search(r"\bREPLACE\s+(?:OFF|LAST\s+OFF)\b", stmt, re.I):
+                active_replace = []
+                i = nxt
+                continue
+            prs = _parse_replacing(re.sub(r"^\s*REPLACE\b", "", stmt, flags=re.I))
+            if prs:
+                active_replace = prs
+                i = nxt
+                continue
         if "COPY" in up or re.search(r"\bEXEC\s+SQL\s+INCLUDE\b", up):
             stmt, nxt = _gather_statement(lines, i)
             m = _COPY_RE.search(stmt) or _SQL_INCLUDE_RE.search(stmt)
             if m:
+                # Code preceding the COPY in the same gathered sentence (e.g.
+                # ``MOVE 1 TO WS-IDX. COPY FOO.``) is real code - keep it.
+                prefix = stmt[:m.start()].strip()
+                if prefix:
+                    emit(CodeLine(text=prefix, line=line.line,
+                                  area_a=line.area_a, origin=line.origin))
                 member = m.group(1)
                 pairs = _parse_replacing(m.groupdict().get("rep") or "") if hasattr(m, "groupdict") else []
-                _expand_member(member, pairs, resolver, res, _seen, fmt)
+                _expand_member(member, pairs + active_replace, resolver, res, _seen, fmt)
                 i = nxt
                 continue
-        out.append(line)
+        emit(line)
         i += 1
     return res
 

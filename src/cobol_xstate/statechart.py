@@ -1053,6 +1053,20 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
             sec_exit = names[j + 1] if j + 1 < len(names) else _END
         _ParaCompiler(ctx, para).compile(cont, section_exit=sec_exit)
 
+    # Validate every transition target: a GO TO / PERFORM naming a paragraph that does
+    # not exist would emit a dangling edge (a broken machine) - flag it and reroute to
+    # the program end instead of failing silently at run time.
+    known = set(ctx.states) | {_END, _DECL_END}
+    for sname, sdict in ctx.states.items():
+        for tr in sdict.get("always", []) or []:
+            tgt = tr.get("target")
+            if tgt and tgt not in known:
+                ctx.flag(sname, (tr.get("meta") or {}).get("cobolLine", 0),
+                         f"transition target {tgt} does not exist in the program "
+                         f"(GO TO / reference to an unknown paragraph) - rerouted to "
+                         f"program end; verify")
+                tr["target"] = _END
+
     # The shared final state (reached by falling off the physical end, or by any
     # paragraph whose continuation is end-of-program).
     if any(tr.get("target") == _END
