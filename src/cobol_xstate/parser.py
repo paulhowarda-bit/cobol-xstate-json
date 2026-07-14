@@ -320,6 +320,21 @@ def _collect_cics_handlers(paras: List[Paragraph]):
 # Pass 2: statement parser (recursive descent over a paragraph's tokens)
 # --------------------------------------------------------------------------- #
 
+def _share_stacked_when_bodies(whens: List[Tuple[str, List[Stmt]]],
+                               other_body: Optional[List[Stmt]]) -> None:
+    """Stacked WHENs (``WHEN 1 WHEN 2 body``) fall into the next branch's body: a WHEN
+    with no imperative of its own executes the body of the WHEN (or WHEN OTHER) that
+    follows it. Share the body backwards so the first WHEN doesn't silently skip it."""
+    for i in range(len(whens) - 1, -1, -1):
+        cond, body = whens[i]
+        if body:
+            continue
+        if i + 1 < len(whens):
+            whens[i] = (cond, whens[i + 1][1])
+        elif other_body:
+            whens[i] = (cond, other_body)
+
+
 class StmtParser:
     def __init__(self, tokens: List[Token]):
         self.toks = tokens
@@ -614,6 +629,7 @@ class StmtParser:
                 ev.whens.append((cond.strip(), body))
         if self._peek() and self._peek().is_word("END-EVALUATE"):
             self._next()
+        _share_stacked_when_bodies(ev.whens, ev.other_body)
         return ev
 
     def _collect_condition_when(self) -> str:
@@ -665,6 +681,7 @@ class StmtParser:
                 continue
             # Stray token inside SEARCH: consume to make progress.
             self._next()
+        _share_stacked_when_bodies(st.whens, None)
         return st
 
     def _collect_until_word(self, words: Set[str]) -> str:

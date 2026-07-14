@@ -38,7 +38,8 @@ const HALT_ACTIONS = new Set(['STOP_RUN', 'STOPRUN', 'GOBACK', 'EXIT_PROGRAM']);
  *   cycles:  context snapshot after each READ (the per-record-cycle trace)
  */
 export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {}) {
-  const { machineConfig, actorConfigs = {}, ops, guardFns, externalGuards = [] } = mod;
+  const { machineConfig, actorConfigs = {}, ops, guardFns, externalGuards = [],
+          negatedExternal = {} } = mod;
   const context = { ...machineConfig.context, __cobol_external: {} };
   const display = [];
   const cycles = [];
@@ -57,6 +58,9 @@ export function drive(mod, { files = {}, guards = {}, maxSteps = 1_000_000 } = {
     if (name == null) return true;
     if (Object.prototype.hasOwnProperty.call(guards, name)) return Boolean(guards[name](context));
     if (guardFns[name]) return Boolean(guardFns[name](context));
+    // NOT AT END / NOT INVALID KEY / NOT ON SIZE ERROR ... = the positive runtime
+    // condition has NOT been raised (this is the normal path in COBOL).
+    if (negatedExternal[name] !== undefined) return !context.__cobol_external[negatedExternal[name]];
     if (extSet.has(name)) return Boolean(context.__cobol_external[name]);
     return false; // unknown guard: external, defaults false (COBOL hasn't set it)
   }

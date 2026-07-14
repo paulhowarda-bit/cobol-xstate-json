@@ -385,6 +385,14 @@ def test_perform_thru_range_runs_all_paragraphs(repo_tmp):
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_times_exit_perform_exit_paragraph_stacked_whens(repo_tmp):
+    # PERFORM 3 TIMES steps a modeled synthetic counter (WS-T = 6, not an infinite
+    # loop); EXIT PARAGRAPH skips the +100; EXIT PERFORM breaks the loop at WS-I = 4;
+    # stacked WHEN 1 WHEN 2 fall into the shared body (WS-R = 'A' for WS-X = 1).
+    _run_to_done(repo_tmp, "timesexit.cbl", {"WS-T": "6", "WS-I": "4", "WS-R": "A"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
 def test_perform_section_runs_all_member_paragraphs(repo_tmp):
     # PERFORM 1000-CALC where 1000-CALC is a SECTION must run the whole section extent
     # (1010-STEP1 adds 5, 1020-STEP2 adds 7), not just the header pseudo-paragraph;

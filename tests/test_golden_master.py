@@ -106,3 +106,21 @@ def test_terminates_within_step_bound(repo_tmp):
     r = _run(repo_tmp, "custrpt.cbl", _amts(["1.00", "2.00", "3.00"]))
     assert r["context"]["WS-TOTAL"] == "6.00"
     assert r["steps"] < 1000   # the AT-END guard actually breaks the loop
+
+
+# --------------------------------------------------------------------------- #
+# notend.cbl — NOT AT END is the per-record path (negation of the AT-END guard)
+# --------------------------------------------------------------------------- #
+
+def test_not_at_end_body_runs_for_every_record(repo_tmp):
+    files = {"IN-FILE": [{"IN-AMT": v} for v in ["1.50", "2.25", "3.00"]]}
+    r = _run(repo_tmp, "notend.cbl", files)
+    assert r["context"]["WS-CNT"] == "3"       # NOT AT END ran per record
+    assert r["context"]["WS-SUM"] == "6.75"    # and its ADD is exact decimal
+    assert r["context"]["WS-EOF"] == "Y"       # AT END still fired at exhaustion
+
+
+def test_not_at_end_body_skipped_on_empty_file(repo_tmp):
+    r = _run(repo_tmp, "notend.cbl", {"IN-FILE": []})
+    assert r["context"]["WS-CNT"] == "0"
+    assert r["context"]["WS-EOF"] == "Y"
