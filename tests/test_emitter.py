@@ -386,6 +386,22 @@ def test_perform_thru_range_runs_all_paragraphs(repo_tmp):
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_alter_switch_actually_flips_at_runtime(repo_tmp):
+    # ALTSWITCH: PERFORM 2000-CYCLE 3 TIMES; each cycle performs 1000-SWITCH whose
+    # ALTERed exit starts at 1100-FIRST (which flips the switch to 1200-NORMAL).
+    # With real guards over the synthetic ALT- field, the machine runs to done and
+    # the switch holds the flipped target (previously an all-guarded dead end).
+    _run_to_done(repo_tmp, "altswitch.cbl",
+                 {"ALT-1000-SWITCH": "1200-NORMAL", "TIMES-CTR-1": "3"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_goto_depending_selects_by_index(repo_tmp):
+    # GO TO A B C DEPENDING ON WS-BRANCH with WS-BRANCH = 2 must take branch B.
+    _run_to_done(repo_tmp, "depending.cbl", {"WS-R": "B"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
 def test_divide_remainder_computes_both_receivers(repo_tmp):
     # DIVIDE 7 BY 2 GIVING WS-Q REMAINDER WS-R: quotient truncates to 3, remainder 1.
     _run_to_done(repo_tmp, "divrem.cbl", {"WS-Q": "3", "WS-R": "1"})

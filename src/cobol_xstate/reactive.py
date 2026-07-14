@@ -215,14 +215,17 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
                    cursors=_iface._cursor_tables(machine.provenance))
     rw.run(config.get("states", {}), ev_by_state)
 
-    # Flag any perimeter state that lives inside a performed paragraph (an actor in the js
-    # target): the slice inlines to stay flat, so a leftover perform_ into a perimeter state
-    # is out of scope here.
+    # Flag PERFORMs honestly: the reactive slice does NOT apply the PERFORM->invoke
+    # transform, so every perform_ entry action is a NO-OP here - the performed
+    # paragraph's logic (not just its perimeter states) does not execute in this
+    # target. Use the full js target, or inline the paragraphs, when that matters.
     if any(a.startswith("perform_")
            for st in config.get("states", {}).values()
            for a in (st.get("entry", []) or [])):
-        rw.flags.append("machine contains PERFORM into a paragraph; perimeter states inside "
-                        "a performed actor are not lowered in this slice")
+        rw.flags.append("machine contains PERFORM into a paragraph: PERFORM is a NO-OP "
+                        "in this reactive slice (the call-return transform is not "
+                        "applied), so performed paragraphs' logic does not run here - "
+                        "the slice is faithful only for flat (non-PERFORM) flow")
 
     ref_actions, ref_guards = _collect_referenced({"main": config, "actors": {}})
     ops, sem_effects = _build_ops(machine, fields)

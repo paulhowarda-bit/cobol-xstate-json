@@ -69,6 +69,7 @@ class PerformStmt(Stmt):
 class GoToStmt(Stmt):
     targets: List[str]
     depending: bool = False     # GO TO ... DEPENDING ON  -> computed multi-target
+    depending_on: Optional[str] = None  # the index variable (target i taken when var = i)
 
 
 @dataclass

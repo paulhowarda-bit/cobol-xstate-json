@@ -158,7 +158,8 @@ class _BuildCtx:
     synthetic_data: Dict[str, dict] = field(default_factory=dict)
 
     def new_times_counter(self, line: int) -> str:
-        name = f"TIMES-CTR-{len(self.synthetic_data) + 1}"
+        n = sum(1 for k in self.synthetic_data if k.startswith("TIMES-CTR-")) + 1
+        name = f"TIMES-CTR-{n}"
         self.synthetic_data[name] = {
             "level": 77, "line": line, "section": "SYNTHETIC",
             "type": {"category": "numeric-display", "digits": 9, "scale": 0,
@@ -400,13 +401,23 @@ class _ParaCompiler:
         if isinstance(st, AlterStmt):
             names = []
             for altered, target in st.pairs:
-                names.append(reg.action_named(
+                name = reg.action_named(
                     f"set_alt_{_slug(altered)}_to_{_slug(target)}",
-                    f"ALTER {altered} TO PROCEED TO {target}", st.line))
+                    f"ALTER {altered} TO PROCEED TO {target}", st.line)
+                names.append(name)
                 if altered not in self.ctx.alter_targets:
                     self.ctx.flag(self.pname, st.line,
                                   f"ALTER {altered} TO PROCEED TO {target} - altered "
                                   f"paragraph has no head GO TO; switch not modeled")
+                else:
+                    # The switch is a real assignment to the synthetic ALT- field, so
+                    # the runnable machine actually flips the exit at run time.
+                    self.ctx.action_sem.setdefault(name, {
+                        "verb": "ALTER", "kind": "assign",
+                        "assignments": [{"target": f"ALT-{_slug(altered)}",
+                                         "expr": f"'{target}'"}],
+                        "raw": f"ALTER {altered} TO PROCEED TO {target}",
+                    })
             return names
         return []  # ContinueStmt / ExitStmt PLAIN: no-op
 
@@ -642,22 +653,32 @@ class _ParaCompiler:
         name = root or self._fresh("goto")
         if self.pname in self.ctx.alter_targets:
             slug_p = _slug(self.pname)
+            key = f"ALT-{slug_p}"
             edges = []
             for t in self.ctx.alter_targets[self.pname]:
                 gg = reg.guard_named(f"alt_{slug_p}_is_{_slug(t)}",
                                      f"ALTER-switched exit of {self.pname} -> {t} "
-                                     f"(context.alt_{slug_p})", st.line)
+                                     f"(context.{key})", st.line)
+                # A real, evaluable guard over the synthetic switch field.
+                self.ctx.record_guard(gg, f"{key} = '{t}'", self.pname, st.line)
                 edges.append(self._edge(t, "alter-switch", st.line, guard=gg))
             self.ctx.flag(self.pname, st.line,
-                          f"ALTER-switched exit: target of {self.pname} is set at runtime; "
-                          f"verify context.alt_{slug_p}")
+                          f"ALTER-switched exit: target of {self.pname} is set at runtime "
+                          f"(modeled as guards over context.{key}); verify")
             return self._emit(name, {"always": edges})
         if st.depending:
-            self.ctx.flag(self.pname, st.line, "GO TO ... DEPENDING ON - computed multi-target; verify")
+            self.ctx.flag(self.pname, st.line,
+                          "GO TO ... DEPENDING ON - computed multi-target"
+                          + ("" if st.depending_on else " (index variable unknown)")
+                          + "; verify")
             edges = []
             for idx, t in enumerate(st.targets, start=1):
                 gg = reg.guard_named(f"depending_eq_{idx}",
                                      f"GO TO DEPENDING ON selects target {idx} ({t})", st.line)
+                if st.depending_on:
+                    # DEPENDING ON var: target i is taken exactly when var = i.
+                    self.ctx.record_guard(gg, f"{st.depending_on} = {idx}",
+                                          self.pname, st.line)
                 edges.append(self._edge(t, "goto-depending", st.line, guard=gg))
             edges.append(self._edge(after, "goto-depending-oob", st.line,
                                     note="index out of range falls through"))
@@ -871,7 +892,17 @@ def _compute_alter_targets(program: Program, ctx: _BuildCtx) -> None:
             continue
         ordered = [orig] + [t for t in targets if t != orig]
         ctx.alter_targets[altered] = ordered
-        ctx.context[f"alt_{_slug(altered)}"] = orig
+        # The switch variable is a real (synthetic, typed) context field, so the
+        # alter-exit guards and set-actions are executable data, not external stubs.
+        key = f"ALT-{_slug(altered)}"
+        ctx.context[key] = orig
+        # No PIC on purpose: the value is a paragraph-name token, compared and stored
+        # unpadded (a PIC X(n) would space-pad it on every store).
+        ctx.synthetic_data[key] = {
+            "level": 77, "line": 0, "section": "SYNTHETIC",
+            "type": {"category": "alphanumeric"},
+            "note": f"ALTER switch: the active exit target of {altered}",
+        }
 
 
 def _initial_value(item) -> object:
