@@ -150,6 +150,20 @@ class _BuildCtx:
     guard_sem: Dict[str, dict] = field(default_factory=dict)   # guard name  -> condition tree
     flags: List[dict] = field(default_factory=list)
     _seen_flags: set = field(default_factory=set)
+    # Synthetic data items the compiler introduces (PERFORM n TIMES loop counters):
+    # merged into the data dictionary so the emitter types and seeds them.
+    synthetic_data: Dict[str, dict] = field(default_factory=dict)
+
+    def new_times_counter(self, line: int) -> str:
+        name = f"TIMES-CTR-{len(self.synthetic_data) + 1}"
+        self.synthetic_data[name] = {
+            "level": 77, "line": line, "section": "SYNTHETIC",
+            "type": {"category": "numeric-display", "digits": 9, "scale": 0,
+                     "signed": False, "pic": "9(9)"},
+            "note": "synthetic loop counter introduced for PERFORM n TIMES",
+        }
+        self.context[name] = 0
+        return name
 
     def flag(self, para: str, line: int, message: str) -> None:
         key = (para, message)
@@ -251,6 +265,13 @@ class _ParaCompiler:
         self.reg = ctx.reg
         self.para = para
         self.pname = para.name
+        # The paragraph's own continuation (where EXIT PARAGRAPH lands) and the first
+        # state after the enclosing section (where EXIT SECTION lands); set by compile().
+        self.cont: str = _END
+        self.section_exit: str = _END
+        # Enclosing inline-loop targets: (break_target, cycle_target) per nesting level,
+        # for EXIT PERFORM / EXIT PERFORM CYCLE.
+        self._loops: List[tuple] = []
 
     # -- emit / name -------------------------------------------------------
     def _fresh(self, hint: str) -> str:
@@ -277,7 +298,9 @@ class _ParaCompiler:
         return e
 
     # -- entry point -------------------------------------------------------
-    def compile(self, cont: str) -> str:
+    def compile(self, cont: str, section_exit: Optional[str] = None) -> str:
+        self.cont = cont
+        self.section_exit = section_exit if section_exit is not None else cont
         return self.compile_block(self.para.statements, cont, root=self.pname)
 
     # -- a sequence of statements -----------------------------------------
@@ -439,10 +462,27 @@ class _ParaCompiler:
             name = root or self._fresh("next")
             return self._emit(name, {"always": [self._edge(after, "next-sentence", st.line)]})
         if isinstance(st, ExitStmt):
-            if st.kind in ("PERFORM", "PERFORM_CYCLE"):
-                self.ctx.flag(self.pname, st.line,
-                              f"EXIT {st.kind.replace('_', ' ')} - inline-PERFORM break/continue; verify")
             name = root or self._fresh("exit")
+            if st.kind == "PARAGRAPH":
+                return self._emit(name, {"always": [self._edge(
+                    self.cont, "exit-paragraph", st.line,
+                    note="EXIT PARAGRAPH - skips the rest of the paragraph")]})
+            if st.kind == "SECTION":
+                return self._emit(name, {"always": [self._edge(
+                    self.section_exit, "exit-section", st.line,
+                    note="EXIT SECTION - skips the rest of the section")]})
+            if st.kind in ("PERFORM", "PERFORM_CYCLE"):
+                if self._loops:
+                    brk, cyc = self._loops[-1]
+                    tgt = cyc if st.kind == "PERFORM_CYCLE" else brk
+                    return self._emit(name, {"always": [self._edge(
+                        tgt, "exit-perform", st.line,
+                        note=("EXIT PERFORM CYCLE - next iteration"
+                              if st.kind == "PERFORM_CYCLE"
+                              else "EXIT PERFORM - loop break"))]})
+                self.ctx.flag(self.pname, st.line,
+                              f"EXIT {st.kind.replace('_', ' ')} outside an inline "
+                              f"PERFORM - modeled as fall-through; verify")
             return self._emit(name, {"always": [self._edge(after, "exit", st.line)]})
         name = root or self._fresh("stmt")
         return self._emit(name, {"always": [self._edge(after, "seq", getattr(st, "line", 0))]})
@@ -480,6 +520,14 @@ class _ParaCompiler:
     def compile_loop(self, st: PerformStmt, after: str, root: Optional[str]) -> str:
         varying = _parse_varying(st.control_text) if st.kind == "varying" else []
         until = _until_text(st.control_text)
+        if st.kind == "times" and not varying:
+            # PERFORM n TIMES: the count is statically known - model it as a synthetic
+            # counter stepped like a VARYING index (init 0, +1 each iteration, exit at n).
+            m = re.match(r"\s*(\S+?)\s+TIMES\b", st.control_text or "", re.I)
+            if m:
+                ctr = self.ctx.new_times_counter(st.line)
+                varying = [(ctr, "0", "1")]
+                until = f"{ctr} >= {m.group(1)}"
         # Name the guard from the full control clause (stable name); model its semantics
         # from the bounded UNTIL condition (so a VARYING ... AFTER doesn't over-capture).
         g = self.reg.guard(st.control_text or f"{st.kind} clause", st.line)
@@ -508,7 +556,9 @@ class _ParaCompiler:
                                    {"entry": [step],
                                     "always": [self._edge(head, "loop-step", st.line)]})
             if st.inline_body:
+                self._loops.append((after, loop_back))
                 body_entry = self.compile_block(st.inline_body, loop_back)
+                self._loops.pop()
             else:
                 state = {"always": [self._edge(loop_back, "loop-iter", st.line)]}
                 if st.target:
@@ -531,7 +581,9 @@ class _ParaCompiler:
             head = root or self._fresh("loop")
             body_root = None
         if st.inline_body:
+            self._loops.append((after, head))
             body_entry = self.compile_block(st.inline_body, head, root=body_root)
+            self._loops.pop()
         else:
             nm = body_root or self._fresh("iter")
             state = {"always": [self._edge(head, "loop-iter", st.line)]}
@@ -970,7 +1022,15 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
                      f"paragraph body did not parse ({para.parse_error}); recovered as one "
                      f"opaque action - logic here is NOT modeled; review manually")
         cont = names[idx + 1] if idx + 1 < len(names) else _END
-        _ParaCompiler(ctx, para).compile(cont)
+        sec_exit = cont
+        if para.section:
+            # EXIT SECTION lands on the first paragraph after the section's extent.
+            j = idx
+            while (j + 1 < len(program.paragraphs)
+                   and program.paragraphs[j + 1].section == para.section):
+                j += 1
+            sec_exit = names[j + 1] if j + 1 < len(names) else _END
+        _ParaCompiler(ctx, para).compile(cont, section_exit=sec_exit)
 
     # The shared final state (reached by falling off the physical end, or by any
     # paragraph whose continuation is end-of-program).
@@ -1027,7 +1087,7 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         notes=notes,
         program_id=program.program_id,
         source_name=source_name,
-        data=_data_dictionary(program),
+        data={**_data_dictionary(program), **ctx.synthetic_data},
         semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem},
         paragraph_order=[p.name for p in program.paragraphs]
         + [p.name for p in program.declaratives],

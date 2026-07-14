@@ -459,6 +459,30 @@ def _build_guards(machine: Machine, referenced: set, fields: Dict[str, dict]
     return guard_fns, external
 
 
+# A NOT-handler guard (NOT AT END / NOT INVALID KEY / NOT ON SIZE ERROR / ...) is by
+# definition the negation of its positive runtime condition: when the driver has not
+# raised `X_atEnd`, `X_notAtEnd` must be TRUE (this is the normal path in COBOL). Map
+# each negative external-guard stem to the positive guard it negates.
+_NEG_GUARD_STEMS = {
+    "notAtEnd": "atEnd",
+    "notInvalidKey": "invalidKey",
+    "notAtEop": "atEop",
+    "notSizeError": "sizeError",
+    "notException": "exception",
+    "notOverflow": "overflow",
+}
+
+
+def _negated_externals(external_guards: List[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k in external_guards:
+        for neg, pos in _NEG_GUARD_STEMS.items():
+            if k.endswith("_" + neg):
+                out[k] = k[: -len(neg)] + pos
+                break
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # machine config (strip provenance meta; numeric context -> decimal strings)
 # --------------------------------------------------------------------------- #
@@ -794,6 +818,10 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     out.append("")
 
     out.append("export const externalGuards = " + json.dumps(external_guards) + ";")
+    out.append("// negative handler guards (NOT AT END, ...) = negation of the positive")
+    out.append("// runtime condition: TRUE when the condition has not been raised.")
+    out.append("export const negatedExternal = "
+               + json.dumps(_negated_externals(external_guards)) + ";")
     out.append("export const effectActions = " + json.dumps(effect_actions) + ";")
     out.append("")
 
@@ -804,9 +832,14 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     out.append("const guards = {};")
     out.append("for (const [k, fn] of Object.entries(guardFns)) "
                "guards[k] = ({ context }) => fn(context);")
-    out.append("for (const k of externalGuards) "
-               "guards[k] = ({ context }) => Boolean(context.__cobol_external "
+    out.append("for (const k of externalGuards) {")
+    out.append("  const pos = negatedExternal[k];")
+    out.append("  guards[k] = pos !== undefined")
+    out.append("    ? ({ context }) => !(context.__cobol_external "
+               "&& context.__cobol_external[pos])")
+    out.append("    : ({ context }) => Boolean(context.__cobol_external "
                "&& context.__cobol_external[k]);")
+    out.append("}")
     out.append("")
 
     # PERFORM-target paragraphs, each an invokable actor machine. Context threads in via
