@@ -65,28 +65,28 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 
 ## 2. Install and first run
 
-There is **no build step**. Pure standard library, no runtime dependencies.
-Python ≥ 3.9. `pytest` only for the tests.
+A normal Python package: install it, then run it. Pure standard library — **no runtime
+dependencies**, no build step. Python ≥ 3.9. `pytest` only for the tests.
 
 ```bash
-# simplest: run straight from a clone
-python cobol-xstate.py prog.cbl
-
-# or install the console script
-python -m pip install -e .
-cobol-xstate prog.cbl
-
-# or run the module directly
-PYTHONPATH=src python -m cobol_xstate.cli prog.cbl           # bash
-$env:PYTHONPATH="src"; python -m cobol_xstate.cli prog.cbl   # PowerShell
+python -m pip install -e .        # editable (development)
+python -m pip install .           # regular
 ```
 
-`git pull` is the whole upgrade procedure.
+That gives you two equivalent ways to run it:
+
+```bash
+cobol-xstate prog.cbl             # the console script
+python -m cobol_xstate prog.cbl   # interpreter-explicit
+```
+
+Prefer `python -m cobol_xstate` in scripts and CI: it bypasses PATH and Windows
+file-association surprises entirely.
 
 ### First run
 
 ```bash
-python cobol-xstate.py examples/custrpt.cbl --summary
+cobol-xstate examples/custrpt.cbl --summary
 ```
 
 This writes `./custrpt.json` and prints a summary to stderr:

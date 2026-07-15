@@ -22,22 +22,18 @@ on runtime data is *flagged*, never smoothed over.
 
 ## Install
 
+A normal Python package. Install it, then run it:
+
 ```bash
-# simplest: run straight from a clone, no install, no PYTHONPATH
-python cobol-xstate.py <file.cbl>
+python -m pip install -e .        # editable (development)
+python -m pip install .           # regular
 
-# or install the console script
-python -m pip install -e .
-cobol-xstate <file.cbl>
-
-# or run the module directly
-PYTHONPATH=src python -m cobol_xstate.cli <file.cbl>      # bash
-$env:PYTHONPATH="src"; python -m cobol_xstate.cli <file.cbl>   # PowerShell
+cobol-xstate <file.cbl>           # the console script
+python -m cobol_xstate <file.cbl> # equivalent, interpreter-explicit
 ```
 
-There is no build step and nothing to package — a `git pull` of the public repo is
-all that is needed to get the latest code. Pure standard library, no runtime
-dependencies. Python ≥ 3.9. `pytest` for tests.
+Pure standard library — **no runtime dependencies**, no build step. Python ≥ 3.9.
+`pytest` for the tests.
 
 ## Usage
 
@@ -301,8 +297,10 @@ install (`npm install`); they skip cleanly when those are absent.
 Layout:
 
 ```
-src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · emitter · cli
-runtime/            cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
+src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · emitter · cli · __main__
+src/cobol_xstate/runtime/   package data, emitted alongside `--target js` output (never
+                    executed by the converter itself):
+                    cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
                     cobolDriver.mjs  (reference driver: invoke interpreter + file I/O for golden-master)
 examples/           custrpt.cbl  (canonical batch loop)
                     banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
