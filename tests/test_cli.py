@@ -167,8 +167,17 @@ def test_the_three_views_are_each_well_formed(tmp_path):
     assert business["format"] == "xstate-v5-config"     # both are renderable machines
     assert business["metadata"]["view"] == "business"
     assert lineage["format"] == "cobol-xstate-lineage"
-    # the distillation is smaller than what it distils
-    assert len(business["machine"]["states"]) < len(faithful["machine"]["states"])
+    # the distillation is smaller than what it distils. Count LEAVES: the faithful
+    # machine is hierarchical (paragraphs are compound states), so comparing top-level
+    # keys would compare 1 compound against 12 flat states.
+    def leaves(states):
+        n = 0
+        for s in states.values():
+            n += leaves(s["states"]) if "states" in s else 1
+        return n
+    faithful_n = leaves(faithful["machine"]["states"]) + sum(
+        leaves(c["states"]) for c in faithful["charts"].values())
+    assert leaves(business["machine"]["states"]) < faithful_n
 
 
 def test_no_business_opts_out_of_just_that_view(tmp_path):

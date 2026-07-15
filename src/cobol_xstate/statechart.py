@@ -99,6 +99,15 @@ class Machine:
     files: Dict[str, dict] = field(default_factory=dict)
 
     def bundle(self) -> dict:
+        from .harel import to_harel
+        # Build the interface FIRST: it tags meta.perimeter/gets/creates onto the flat
+        # IR's state nodes, and the Harel view is derived from that IR - so it has to
+        # run before the restructuring copies the nodes, or the boundary tags are lost.
+        iface = build_interface(
+            self.config, self.semantics, self.provenance,
+            data=self.data, using=self.using, returning=self.returning,
+            files=self.files)
+        config, charts = to_harel(self)
         return {
             "format": "xstate-v5-config",
             "metadata": {
@@ -106,26 +115,29 @@ class Machine:
                 "source": self.source_name,
                 "generator": "cobol-xstate 0.1.0",
                 "disclaimer": (
-                    "Each paragraph's full statement tree is compiled to faithful "
-                    "guarded structure (IF/EVALUATE/loops/I-O handlers), and the data "
-                    "transformation logic is captured too: 'data' is the typed data "
-                    "dictionary (PIC/USAGE/sign), 'semantics.actions' give each action's "
-                    "target := expression, and 'semantics.guards' give each guard's "
-                    "Boolean expression tree - all traced to source in 'provenance', "
-                    "nothing invented. COBOL arithmetic is fixed-point DECIMAL: a "
-                    "rewrite must honor the data types, not use binary float. PERFORM is "
-                    "a call-return action into a separately-compiled paragraph. Items "
-                    "under 'flags' need verification against source."
+                    "A Harel statechart of the program's LOGIC, not a transcript of its "
+                    "text: paragraphs are compound (OR) states, PERFORM is resolved to a "
+                    "real call/return ('invoke' of the callee's chart in 'charts', "
+                    "returning on onDone), and source-order fall-through that the program "
+                    "never executes is pruned. Every state keeps its COBOL name as its "
+                    "'id' and traces to source via 'provenance' - nothing is invented. "
+                    "The data logic travels too: 'data' is the typed dictionary "
+                    "(PIC/USAGE/sign), 'semantics.actions' give each action's "
+                    "target := expression, 'semantics.guards' each guard's Boolean tree. "
+                    "COBOL arithmetic is fixed-point DECIMAL: a rewrite must honor the "
+                    "data types, not use binary float. Items under 'flags' need "
+                    "verification against source."
                 ),
             },
-            "machine": self.config,
+            "machine": config,
+            # Each performed paragraph as its own chart - the statechart model of a
+            # subroutine (a classical Harel chart has no call stack; a child chart that
+            # runs to completion and returns is the faithful equivalent).
+            "charts": charts,
             "data": self.data,
             "semantics": {"actions": self.semantics.get("actions", {}),
                           "guards": self.semantics.get("guards", {})},
-            "interface": build_interface(
-                self.config, self.semantics, self.provenance,
-                data=self.data, using=self.using, returning=self.returning,
-                files=self.files),
+            "interface": iface,
             "provenance": self.provenance,
             "flags": self.flags,
             "notes": self.notes,
