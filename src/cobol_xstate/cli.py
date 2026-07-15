@@ -24,25 +24,41 @@ def _format(name: Optional[str]) -> Optional[SourceFormat]:
     return {"fixed": SourceFormat.FIXED, "free": SourceFormat.FREE}[name]
 
 
-def _resolve_out_path(args, default_stem: Optional[str],
-                      program_id: str) -> Optional[Path]:
-    """Where to write the output, or ``None`` for stdout.
+# Suffix per target. Companions are built from the same base, so every artifact of one
+# run has a distinct name and none can land on another's path.
+_TARGET_EXT = {"js": ".mjs", "reactive": ".mjs",
+               "lineage": ".lineage.json", "business": ".business.json"}
+_COMPANION_EXT = (".business.json", ".lineage.json")
 
-    ``-o -`` -> stdout; ``-o PATH`` -> that exact path; otherwise an auto-named
-    ``<stem><ext>`` placed in ``--outdir`` (stem = source name, or PROGRAM-ID for
-    stdin). ``Path`` handles relative-vs-absolute; ``.`` is the current directory.
+
+def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
+    """The shared base name every artifact of this run is built from.
+
+    Derived from the SOURCE stem (or an explicit ``-o`` path), never by chopping a
+    written filename at its first dot - a source called ``MY.PROG.cbl`` would otherwise
+    yield companions named ``MY.*``, and one called ``X.business.cbl`` would have its
+    bundle silently overwritten by the business view landing on the same path.
+    """
+    if args.output and args.output != "-":
+        name = Path(args.output).name
+        for suf in _COMPANION_EXT:          # -o out/prog.business.json -> base "prog"
+            if name.endswith(suf):
+                return name[: -len(suf)]
+        return Path(args.output).stem       # strips only the final extension
+    return default_stem or program_id or "machine"
+
+
+def _resolve_out_path(args, base: str) -> Optional[Path]:
+    """Where to write this run's primary artifact, or ``None`` for stdout.
+
+    ``-o -`` -> stdout; ``-o PATH`` -> that exact path; otherwise ``<base><ext>`` in
+    ``--outdir``. ``Path`` handles relative-vs-absolute; ``.`` is the current directory.
     """
     if args.output == "-":
         return None
     if args.output:
         return Path(args.output)
-    stem = default_stem or program_id or "machine"
-    # Each target gets a distinct name, so running several over the same source builds
-    # up a set of artifacts side by side instead of clobbering one another.
-    ext = {"js": ".mjs", "reactive": ".mjs",
-           "lineage": ".lineage.json", "business": ".business.json"}.get(
-        args.target, ".json")
-    return Path(args.outdir) / f"{stem}{ext}"
+    return Path(args.outdir) / f"{base}{_TARGET_EXT.get(args.target, '.json')}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,7 +146,8 @@ def run(argv: Optional[List[str]] = None) -> int:
     program = parse_program(source, fmt, resolver=resolver)
     machine = build_machine(program, source_name=source_name)
 
-    out_path = _resolve_out_path(args, default_stem, machine.program_id)
+    base = _artifact_base(args, default_stem, machine.program_id)
+    out_path = _resolve_out_path(args, base)
     if out_path is not None:
         # Create the destination directory (and parents) if it does not exist.
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +160,14 @@ def run(argv: Optional[List[str]] = None) -> int:
     import json as _json
 
     def _companion(beside: Path, suffix: str, obj) -> None:
-        path = beside.with_name(beside.name.split(".")[0] + suffix)
+        path = beside.with_name(base + suffix)
+        if path == beside:
+            # Refuse to write a companion over the artifact we just wrote. Reachable
+            # only for a source whose own name ends in a companion suffix; losing the
+            # bundle silently is far worse than an odd filename.
+            path = beside.with_name(base + ".view" + suffix)
+            print(f"[{source_name}] note: companion would collide with {beside.name}; "
+                  f"writing {path.name} instead", file=sys.stderr)
         _write(path, _json.dumps(obj, indent=args.indent) + "\n")
         print(f"[{source_name}] wrote {path}", file=sys.stderr)
 
