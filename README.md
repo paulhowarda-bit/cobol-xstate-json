@@ -38,12 +38,12 @@ Pure standard library — **no runtime dependencies**, no build step. Python ≥
 ## Usage
 
 ```bash
-cobol-xstate prog.cbl                              # -> ./prog.json + ./prog.lineage.json
+cobol-xstate prog.cbl                              # -> 3 files (see below)
 cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir created)
 cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
 cobol-xstate prog.cbl -o out/custom.json           # exact path (overrides --outdir/name)
 cobol-xstate prog.cbl -o -                          # write the bundle to stdout instead
-cobol-xstate prog.cbl --no-lineage                 # bundle only, skip the companion
+cobol-xstate prog.cbl --no-business --no-lineage   # bundle only, skip the companions
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
 cobol-xstate prog.cbl --format free                # force free-format source
@@ -53,16 +53,18 @@ cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ 
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
 
-A default run writes **two files**, named after the source, in the current directory:
+A default run writes **three files** — three views of the same program, each answering a
+different question:
 
-| File | What it is |
+| File | Answers |
 |---|---|
-| `prog.json` | the state machine bundle (config + data + semantics + interface + provenance) |
-| `prog.lineage.json` | the companion field table: one row per (external event, field), with the event each field's value originates from |
+| `prog.json` | **What does it do?** The faithful machine: config + data dictionary + semantics + interface + provenance. Complete, verbose. |
+| `prog.business.json` | **Which steps matter?** The business distillation: scaffolding collapsed, only boundary/decision/calculation states. Also a renderable XState config. |
+| `prog.lineage.json` | **Where did each value come from?** One row per (external event, field), with the event each field's value originates from. |
 
 Use `--outdir` to choose the directory (created if absent), `-o PATH` for an exact path
-(the companion follows it as `PATH.lineage.json`), or `-o -` to stream the bundle to
-stdout. `--no-lineage` skips the companion; `--machine-only` emits the bare config alone.
+(companions follow it), or `-o -` to stream the bundle to stdout. Opt out with
+`--no-business` / `--no-lineage`; `--machine-only` emits the bare config alone.
 
 ### Output
 
@@ -295,7 +297,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 235 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+PYTHONPATH=src python -m pytest -q     # 240 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -317,7 +319,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
                     thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (235 tests)
+tests/              one module per pipeline stage (240 tests)
 ```
 
 ## License
