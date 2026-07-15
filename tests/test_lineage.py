@@ -143,3 +143,50 @@ def test_cli_lineage_target_writes_its_own_file(tmp_path):
     assert out.exists()
     d = json.loads(out.read_text(encoding="utf-8"))
     assert d["format"] == "cobol-xstate-lineage"
+
+
+# --------------------------------------------------------------------------- #
+# the lineage json is a COMPANION of the bundle: one run writes both
+# --------------------------------------------------------------------------- #
+
+def test_default_run_writes_bundle_and_lineage_side_by_side(tmp_path):
+    import json
+    from cobol_xstate.cli import run
+    rc = run([str(EXAMPLES / "lineage.cbl"), "--outdir", str(tmp_path)])
+    assert rc == 0
+    bundle, lin = tmp_path / "lineage.json", tmp_path / "lineage.lineage.json"
+    assert bundle.exists() and lin.exists()      # the machine, and its table
+    assert json.loads(bundle.read_text(encoding="utf-8"))["format"] == "xstate-v5-config"
+    assert json.loads(lin.read_text(encoding="utf-8"))["format"] == "cobol-xstate-lineage"
+
+
+def test_companion_lineage_follows_an_explicit_output_path(tmp_path):
+    from cobol_xstate.cli import run
+    out = tmp_path / "custom.json"
+    assert run([str(EXAMPLES / "lineage.cbl"), "-o", str(out)]) == 0
+    assert out.exists()
+    assert (tmp_path / "custom.lineage.json").exists()
+
+
+def test_no_lineage_opts_out(tmp_path):
+    from cobol_xstate.cli import run
+    assert run([str(EXAMPLES / "lineage.cbl"), "--no-lineage",
+                "--outdir", str(tmp_path)]) == 0
+    assert (tmp_path / "lineage.json").exists()
+    assert not (tmp_path / "lineage.lineage.json").exists()
+
+
+def test_machine_only_writes_the_bare_config_alone(tmp_path):
+    from cobol_xstate.cli import run
+    assert run([str(EXAMPLES / "lineage.cbl"), "--machine-only",
+                "--outdir", str(tmp_path)]) == 0
+    assert (tmp_path / "lineage.json").exists()
+    assert not (tmp_path / "lineage.lineage.json").exists()
+
+
+def test_stdout_carries_only_the_bundle(capsys, tmp_path):
+    import json
+    from cobol_xstate.cli import run
+    assert run([str(EXAMPLES / "lineage.cbl"), "-o", "-"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)["format"] == "xstate-v5-config"   # one stream, one document

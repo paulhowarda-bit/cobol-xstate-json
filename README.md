@@ -38,25 +38,30 @@ Pure standard library — **no runtime dependencies**, no build step. Python ≥
 ## Usage
 
 ```bash
-cobol-xstate prog.cbl                              # -> ./prog.json (same name, current dir)
-cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/prog.json (dir created)
-cobol-xstate prog.cbl --outdir .                   # -> ./prog.json (. = current dir)
+cobol-xstate prog.cbl                              # -> ./prog.json + ./prog.lineage.json
+cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir created)
 cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
 cobol-xstate prog.cbl -o out/custom.json           # exact path (overrides --outdir/name)
 cobol-xstate prog.cbl -o -                          # write the bundle to stdout instead
+cobol-xstate prog.cbl --no-lineage                 # bundle only, skip the companion
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
 cobol-xstate prog.cbl --format free                # force free-format source
 cobol-xstate prog.cbl --target js                  # -> ./prog.mjs (+ cobolRuntime.mjs)
-cobol-xstate prog.cbl --target lineage             # -> ./prog.lineage.json (event x field)
+cobol-xstate prog.cbl --target lineage             # the lineage table on its own
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
 
-By default the output is written to a file named after the source with a `.json`
-extension (`.mjs` for `--target js`), in the current directory. Use `--outdir` to
-choose the directory (relative paths resolve against the current directory, `.` is
-the current directory, and the directory is created if it does not exist), `-o PATH`
-for an exact path, or `-o -` to stream to stdout.
+A default run writes **two files**, named after the source, in the current directory:
+
+| File | What it is |
+|---|---|
+| `prog.json` | the state machine bundle (config + data + semantics + interface + provenance) |
+| `prog.lineage.json` | the companion field table: one row per (external event, field), with the event each field's value originates from |
+
+Use `--outdir` to choose the directory (created if absent), `-o PATH` for an exact path
+(the companion follows it as `PATH.lineage.json`), or `-o -` to stream the bundle to
+stdout. `--no-lineage` skips the companion; `--machine-only` emits the bare config alone.
 
 ### Output
 
@@ -289,7 +294,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 221 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+PYTHONPATH=src python -m pytest -q     # 226 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -311,7 +316,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
                     thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (221 tests)
+tests/              one module per pipeline stage (226 tests)
 ```
 
 ## License

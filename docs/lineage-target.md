@@ -10,12 +10,13 @@ event they are the ones that **fill it** — traced back through the program's a
 to the external event(s) their data ultimately came from.
 
 ```bash
-cobol-xstate prog.cbl --target lineage --outdir out    # -> out/prog.lineage.json
+cobol-xstate prog.cbl --outdir out    # -> out/prog.json + out/prog.lineage.json
 ```
 
-It is a **projection**, like `--target business`: a pure read over the validated IR, its
-own artifact, opt-in. The default bundle is unchanged and a normal conversion pays
-nothing for it.
+It is a **projection**: a pure read over the validated IR, in its own file. A default
+run writes it alongside the bundle (`prog.json` + `prog.lineage.json`) because the table
+is a companion to the machine - they are read together. `--target lineage` emits the
+table alone; `--no-lineage` skips it.
 
 ## The row
 
