@@ -11,6 +11,10 @@ rule is **no invented logic**: every state, guard, action, and expression is a f
 translation of source that traces back via a provenance table, and what genuinely rides
 on runtime data is *flagged*, never smoothed over.
 
+> **[MANUAL.md](MANUAL.md) is the complete reference** — every flag, every output field,
+> every COBOL construct understood, flag triage, and troubleshooting. This README is the
+> overview.
+
 > Built with the `ibm-cobol` skill. The mapping follows its
 > `references/cobol-to-statecharts.md` (COBOL → XState v5) and
 > `references/harel-statecharts.md` (statechart semantics); the parser follows
