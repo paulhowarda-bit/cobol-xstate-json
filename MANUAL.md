@@ -13,7 +13,7 @@ exact meaning of everything it emits.
 1. [What this program is](#1-what-this-program-is)
 2. [Install and first run](#2-install-and-first-run)
 3. [Command-line reference](#3-command-line-reference)
-4. [The four output targets](#4-the-four-output-targets)
+4. [The output targets](#4-the-output-targets)
 5. [The JSON bundle, section by section](#5-the-json-bundle-section-by-section)
 6. [What COBOL it understands](#6-what-cobol-it-understands)
 7. [The external interface (inputs, outputs, fields)](#7-the-external-interface-inputs-outputs-fields)
@@ -60,6 +60,7 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 | A machine that actually runs and computes | `--target js` |
 | An event-driven (queue/async) machine | `--target reactive` |
 | The business-level story, scaffolding removed | `--target business` |
+| Which event is responsible for each field | `--target lineage` |
 
 ---
 
@@ -156,7 +157,7 @@ cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
 
 ### `--target {json,js,reactive,business}`
 
-Which artifact to emit. Default `json`. See [section 4](#4-the-four-output-targets).
+Which artifact to emit. Default `json`. See [section 4](#4-the-output-targets).
 Extension follows the target: `.json` for `json`/`business`, `.mjs` for `js`/`reactive`.
 
 ### `--format {fixed,free}`
@@ -221,9 +222,9 @@ A program that parses badly does **not** fail the run — it emits with flags. S
 
 ---
 
-## 4. The four output targets
+## 4. The output targets
 
-All four derive from the **same validated intermediate representation**. The faithful
+All of them derive from the **same validated intermediate representation**. The faithful
 machine is the trusted core; the other targets are mechanical projections of it, so they
 inherit that trust rather than re-deriving it from COBOL text.
 
@@ -232,7 +233,8 @@ COBOL ──► faithful IR (validated, golden-master tested)
              ├──► --target json      the contract (default)
              ├──► --target js        runnable, decimal-exact
              ├──► --target reactive  event-driven lowering
-             └──► --target business  business-level distillation
+             ├──► --target business  business-level distillation
+             └──► --target lineage   which event fills each field
 ```
 
 ### `--target json` — the contract (default)
@@ -315,6 +317,39 @@ the same resolution as the runnable emitter, so the business flow matches real c
 semantics.
 
 See [docs/business-view.md](docs/business-view.md).
+
+### `--target lineage` — which event is responsible for each field
+
+One row per **(external event, field)**, answering *where did this value come from*. For
+an input event the fields are the ones it **fills**; for an output event, the ones that
+**fill it** — traced back through the program's assignments to the external event(s) the
+data ultimately came from.
+
+```bash
+cobol-xstate prog.cbl --target lineage --outdir out   # -> out/prog.lineage.json
+```
+
+```jsonc
+{ "event": "CREATE.FILE.OUT-FILE", "direction": "output", "field": "OUT-FEE",
+  "changedByProgram": true,
+  "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44 }],
+  "origins": [{ "event": "GET.CALLER.CALLER" }, { "event": "GET.CONSOLE.SYSIN" }] }
+```
+
+*The WRITE emits `OUT-FEE`; this program computed it at line 44; its value came from the
+caller's parameter combined with a console `ACCEPT`.*
+
+- **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
+  `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
+- **`changedByProgram`** means the program *assigns* it. An input event's own fill
+  (`ACCEPT`, `SELECT ... INTO`) doesn't count — the value came from outside.
+- **Flow-sensitive**: only origins that actually reach that event. PERFORM is followed as
+  a real call; loop self-references (`WS-TOTAL := WS-TOTAL + CUST-AMT`) collapse to the
+  real source.
+- **`CALL ... USING`** is by reference and the callee is another program, so its arguments
+  get a `maybe` origin with `resolvedBy` naming the program that would settle it.
+
+See [docs/lineage-target.md](docs/lineage-target.md) for the algorithm and its limits.
 
 ---
 
