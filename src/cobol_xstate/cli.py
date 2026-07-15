@@ -80,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
+    p.add_argument("--no-lineage", action="store_true",
+                   help="skip the companion <name>.lineage.json that the default json "
+                        "target writes alongside the bundle")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
@@ -160,12 +163,21 @@ def run(argv: Optional[List[str]] = None) -> int:
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
             print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
     else:
+        import json as _json
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
         if out_path is None:
-            print(text)
+            print(text)          # stdout carries the bundle only - one stream, one doc
         else:
             _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+            # The field-lineage table is a companion to the machine, in its own file:
+            # the two are read together, so one run produces both. `--machine-only`
+            # asks for the bare config and gets exactly that.
+            if not args.machine_only and not args.no_lineage:
+                lin_path = out_path.with_name(out_path.stem + ".lineage.json")
+                _write(lin_path,
+                       _json.dumps(build_lineage(machine), indent=args.indent) + "\n")
+                print(f"[{source_name}] wrote {lin_path}", file=sys.stderr)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))

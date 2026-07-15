@@ -90,7 +90,8 @@ file-association surprises entirely.
 cobol-xstate examples/custrpt.cbl --summary
 ```
 
-This writes `./custrpt.json` and prints a summary to stderr:
+This writes **two files** — `./custrpt.json` (the state machine) and
+`./custrpt.lineage.json` (its companion field table) — and prints a summary to stderr:
 
 ```
 [custrpt.cbl] detected source format = fixed (97%: column 7 is a valid indicator on all 40 lines, incl. 5 comment/continuation line(s))
@@ -144,16 +145,22 @@ cobol-xstate prog.cbl -o - | jq '.flags'
 
 ### `--outdir DIR`
 
-Directory for the auto-named output file. Default: current directory. Relative paths
+Directory for the auto-named output files. Default: current directory. Relative paths
 resolve against the current directory; `.` is the current directory. **Created with
 parents if it does not exist.**
 
-The file is named after the source stem (`prog.cbl` → `prog.json`), or after the
-PROGRAM-ID when reading stdin.
+Files are named after the source stem (`prog.cbl` → `prog.json` +
+`prog.lineage.json`), or after the PROGRAM-ID when reading stdin.
 
 ```bash
 cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
+                                                #  + build/charts/prog.lineage.json
 ```
+
+### `--no-lineage`
+
+Skip the companion `<name>.lineage.json`. The default json target writes it alongside
+the bundle because the two are read together; this opts out when you only want the chart.
 
 ### `--target {json,js,reactive,business}`
 
@@ -325,8 +332,14 @@ an input event the fields are the ones it **fills**; for an output event, the on
 **fill it** — traced back through the program's assignments to the external event(s) the
 data ultimately came from.
 
+**A default run already writes this** as `prog.lineage.json` beside the bundle — the
+table is a companion to the machine, and the two are read together. This target emits it
+*alone*, for when you want to refresh only the table:
+
 ```bash
-cobol-xstate prog.cbl --target lineage --outdir out   # -> out/prog.lineage.json
+cobol-xstate prog.cbl --outdir out                    # -> out/prog.json + out/prog.lineage.json
+cobol-xstate prog.cbl --target lineage --outdir out   # -> out/prog.lineage.json only
+cobol-xstate prog.cbl --no-lineage --outdir out       # -> out/prog.json only
 ```
 
 ```jsonc
