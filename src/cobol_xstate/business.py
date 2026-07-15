@@ -329,18 +329,30 @@ class _BusinessView:
         # Collapse to the business flow by reachability over configurations (call/return
         # aware), so out-of-line PERFORM is followed - not flagged-and-skipped.
         entry, transitions = self._build_flow()
+        config = self._as_machine(business_states, entry, transitions)
 
         return {
-            "format": "cobol-xstate-business-view",
-            "program": self.machine.program_id,
-            "source": self.machine.source_name,
-            "note": ("Read-only distillation of the faithful machine: technical scaffolding "
-                     "collapsed, only boundary-crossing and business-decision states kept. "
-                     "Nothing invented - every state/transition traces to the faithful "
-                     "machine. 'suggestedName'/'label' are null: supply the business "
-                     "vocabulary (the one step this pass cannot infer)."),
-            "entry": entry,
+            "format": "xstate-v5-config",
+            "metadata": {
+                "program": self.machine.program_id,
+                "source": self.machine.source_name,
+                "generator": "cobol-xstate 0.1.0 (--target business)",
+                "view": "business",
+                "disclaimer": (
+                    "Read-only BUSINESS distillation of the faithful machine: technical "
+                    "scaffolding collapsed, only boundary-crossing, decision, and "
+                    "calculation states kept. This is a real XState v5 config so it can "
+                    "be rendered, but it is a VIEW, not a runnable machine - the "
+                    "collapsed steps are summarised in each state's meta, not executed. "
+                    "Nothing invented: every state/transition traces to the faithful "
+                    "machine (meta.cobol). 'suggestedName'/'label' are null on purpose - "
+                    "supply the business vocabulary, the one step this pass cannot infer."
+                ),
+            },
+            "machine": config,
+            # The same content, indexed for reading rather than drawing.
             "businessStates": business_states,
+            "entry": entry,
             "transitions": transitions,
             "collapsed": [{"state": n, "reason": "technical scaffolding"}
                           for n in technical_names],
@@ -354,6 +366,78 @@ class _BusinessView:
             },
             "flags": self.flags,
         }
+
+    # -- serialization as a real XState config ------------------------------
+    #
+    # The distillation IS a state machine (it has an entry, states, and guarded
+    # transitions), so it is emitted as one: a renderer that draws the faithful bundle
+    # draws this identically, with no special-casing. Everything the report shape
+    # carried that XState has no slot for - role, the collapsed `via` path,
+    # suggestedName, the stripped internal steps - rides in `meta`, which is exactly
+    # where a renderer already looks for provenance and perimeter data.
+
+    _ENTRY = "__ENTRY__"
+
+    def _guard_label(self, guards: List[dict]) -> Optional[str]:
+        """A single edge label from the guards accumulated along a collapsed path.
+        XState allows one guard per transition; the full list stays in meta."""
+        names = [g["name"] for g in guards if g.get("kind") == "business"] \
+            or [g["name"] for g in guards]
+        if not names:
+            return None
+        return names[0] if len(names) == 1 else " AND ".join(names)
+
+    def _as_machine(self, business_states: Dict[str, dict], entry: List[dict],
+                    transitions: List[dict]) -> dict:
+        states: Dict[str, dict] = {}
+        for name, s in business_states.items():
+            node: dict = {}
+            meta = {k: v for k, v in s.items() if k != "role"}
+            meta["role"] = s["role"]
+            if s["role"] == "terminal":
+                node["type"] = "final"
+            if s.get("gets") or s.get("creates"):
+                meta["perimeter"] = ("input-output" if s.get("gets") and s.get("creates")
+                                     else "input" if s.get("gets") else "output")
+            node["meta"] = meta
+            states[name] = node
+
+        for t in transitions:
+            src = states.get(t["from"])
+            if src is None or src.get("type") == "final":
+                continue
+            edge: dict = {}
+            g = self._guard_label(t["guards"])
+            if g:
+                edge["guard"] = g
+            edge["target"] = t["to"]
+            edge["meta"] = {"via": t["via"], "guards": t["guards"],
+                            "events": t["events"], "label": t["label"]}
+            src.setdefault("always", []).append(edge)
+
+        # A synthetic entry node: the collapse can reach several first business states
+        # under different guards, which one XState `initial` cannot express.
+        if entry:
+            ent: dict = {"meta": {"role": "entry",
+                                  "note": "synthetic: the program's first business "
+                                          "state(s) after collapsing scaffolding"}}
+            for e in entry:
+                edge = {}
+                g = self._guard_label(e["guards"])
+                if g:
+                    edge["guard"] = g
+                edge["target"] = e["to"]
+                edge["meta"] = {"via": e["via"], "guards": e["guards"],
+                                "events": e["events"]}
+                ent.setdefault("always", []).append(edge)
+            states[self._ENTRY] = ent
+
+        cfg: dict = {"id": f"{self.machine.program_id}__business", "states": states}
+        if entry:
+            cfg["initial"] = self._ENTRY
+        elif states:
+            cfg["initial"] = next(iter(states))
+        return cfg
 
 
 def build_business_view(machine: Machine) -> dict:

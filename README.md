@@ -49,6 +49,7 @@ cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRA
 cobol-xstate prog.cbl --format free                # force free-format source
 cobol-xstate prog.cbl --target js                  # -> ./prog.mjs (+ cobolRuntime.mjs)
 cobol-xstate prog.cbl --target lineage             # the lineage table on its own
+cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ lineage)
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
 
@@ -294,7 +295,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 226 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+PYTHONPATH=src python -m pytest -q     # 235 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -316,7 +317,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
                     thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (226 tests)
+tests/              one module per pipeline stage (235 tests)
 ```
 
 ## License

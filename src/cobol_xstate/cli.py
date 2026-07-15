@@ -37,12 +37,11 @@ def _resolve_out_path(args, default_stem: Optional[str],
     if args.output:
         return Path(args.output)
     stem = default_stem or program_id or "machine"
-    if args.target in ("js", "reactive"):
-        ext = ".mjs"
-    elif args.target == "lineage":
-        ext = ".lineage.json"      # a peer artifact, never overwrites the bundle
-    else:
-        ext = ".json"
+    # Each target gets a distinct name, so running several over the same source builds
+    # up a set of artifacts side by side instead of clobbering one another.
+    ext = {"js": ".mjs", "reactive": ".mjs",
+           "lineage": ".lineage.json", "business": ".business.json"}.get(
+        args.target, ".json")
     return Path(args.outdir) / f"{stem}{ext}"
 
 
@@ -138,8 +137,18 @@ def run(argv: Optional[List[str]] = None) -> int:
     def _write(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
 
+    import json as _json
+
+    def _write_lineage_companion(beside: Path) -> None:
+        """The field-lineage table travels with any machine view: the rows reference the
+        machine's events and fields, so the two are read together."""
+        if args.machine_only or args.no_lineage:
+            return
+        lin = beside.with_name(beside.name.split(".")[0] + ".lineage.json")
+        _write(lin, _json.dumps(build_lineage(machine), indent=args.indent) + "\n")
+        print(f"[{source_name}] wrote {lin}", file=sys.stderr)
+
     if args.target in ("business", "lineage"):
-        import json as _json
         obj = (build_lineage(machine) if args.target == "lineage"
                else build_business_view(machine))
         text = _json.dumps(obj, indent=args.indent)
@@ -148,6 +157,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         else:
             _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+            if args.target == "business":
+                _write_lineage_companion(out_path)
     elif args.target in ("js", "reactive"):
         text = (emit_reactive_module(machine) if args.target == "reactive"
                 else emit_setup_module(machine))
@@ -163,21 +174,13 @@ def run(argv: Optional[List[str]] = None) -> int:
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
             print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
     else:
-        import json as _json
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
         if out_path is None:
             print(text)          # stdout carries the bundle only - one stream, one doc
         else:
             _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
-            # The field-lineage table is a companion to the machine, in its own file:
-            # the two are read together, so one run produces both. `--machine-only`
-            # asks for the bare config and gets exactly that.
-            if not args.machine_only and not args.no_lineage:
-                lin_path = out_path.with_name(out_path.stem + ".lineage.json")
-                _write(lin_path,
-                       _json.dumps(build_lineage(machine), indent=args.indent) + "\n")
-                print(f"[{source_name}] wrote {lin_path}", file=sys.stderr)
+            _write_lineage_companion(out_path)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))
