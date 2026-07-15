@@ -267,6 +267,13 @@ class _BusinessView:
                 worklist.append(nb["to_config"])
         return entry, transitions
 
+    def _pic(self, field: str) -> Optional[str]:
+        """The declared picture/category of a field, so a boundary label can show the
+        shape of the data crossing, not just its name."""
+        it = self.machine.data.get((field or "").upper()) or {}
+        t = it.get("type") or {}
+        return t.get("pic") or t.get("category")
+
     # -- per-state business summary ----------------------------------------
     def _state_summary(self, name: str, st: dict, role: str) -> dict:
         boundary_actions, internal_steps = [], []
@@ -278,9 +285,23 @@ class _BusinessView:
                                     self.files, self._cursors)
             if hits:
                 for hit in hits:
-                    boundary_actions.append({"action": aname, "verb": hit["verb"],
-                                             "endpoint": hit["endpoint"],
-                                             "direction": hit["direction"]})
+                    # The FIELDS crossing here are the point of a boundary state: an
+                    # input event fills them, an output event is filled by them. A
+                    # business reader needs the data, not just "it talks to Db2".
+                    ba = {"action": aname, "verb": hit["verb"],
+                          "endpoint": hit["endpoint"],
+                          "endpointType": hit["etype"],
+                          "direction": hit["direction"],
+                          "event": _iface._event(hit["direction"], hit["etype"],
+                                                 hit["endpoint"]),
+                          "fields": [{"name": f, "pic": self._pic(f)}
+                                     for f in hit["fields"]]}
+                    if hit.get("params"):     # data flowing the other way (keys, WHERE)
+                        ba["params"] = [{"name": f, "pic": self._pic(f)}
+                                        for f in hit["params"]]
+                    if prov.get("line"):
+                        ba["line"] = prov["line"]
+                    boundary_actions.append(ba)
                 primary_prov = primary_prov or prov
             else:
                 internal_steps.append(aname)
@@ -350,6 +371,9 @@ class _BusinessView:
                 ),
             },
             "machine": config,
+            # The external perimeter, same shape as the faithful bundle's, so the
+            # boundary (endpoints, directions, and the FIELDS crossing) draws here too.
+            "interface": self._business_interface(business_names),
             # The same content, indexed for reading rather than drawing.
             "businessStates": business_states,
             "entry": entry,
@@ -378,6 +402,41 @@ class _BusinessView:
 
     _ENTRY = "__ENTRY__"
 
+    def _business_interface(self, business_names: List[str]) -> dict:
+        """The external perimeter, re-anchored onto the surviving states.
+
+        Same shape as the faithful bundle's `interface`, so a renderer draws the
+        boundary here exactly as it does there - typed endpoint nodes, and arrows to
+        the state that performs each crossing, labelled with the fields that cross.
+
+        Boundary states are never collapsed (a perimeter makes a state `boundary`), so
+        an event's host survives. The exceptions are re-anchored honestly: the program's
+        own parameter events hang off the machine's `initial`, which is often technical,
+        so they move to the synthetic `__ENTRY__`; anything else whose host did not
+        survive is kept with `collapsedHost` rather than dropped.
+        """
+        keep = set(business_names)
+        initial = self.config.get("initial")
+        events: List[dict] = []
+        for e in self.iface.get("events", []):
+            ev = dict(e)
+            host = e.get("state")
+            if host in keep:
+                pass
+            elif host == initial or host == "__ENTRY__":
+                ev["state"] = self._ENTRY          # the caller contract, at the entry
+            else:
+                ev["collapsedHost"] = host          # honest: host collapsed away
+                ev["state"] = self._ENTRY
+            events.append(ev)
+        used = {e["endpoint"] for e in events}
+        return {
+            "endpoints": [ep for ep in self.iface.get("endpoints", [])
+                          if ep["endpoint"] in used],
+            "events": events,
+            "parameters": self.iface.get("parameters", {}),
+        }
+
     def _guard_label(self, guards: List[dict]) -> Optional[str]:
         """A single edge label from the guards accumulated along a collapsed path.
         XState allows one guard per transition; the full list stays in meta."""
@@ -397,8 +456,19 @@ class _BusinessView:
             if s["role"] == "terminal":
                 node["type"] = "final"
             if s.get("gets") or s.get("creates"):
+                # Tagged on the node itself, like the faithful bundle does, so a
+                # consumer reading only `machine` still sees the boundary and the
+                # fields crossing it without joining to `interface`.
                 meta["perimeter"] = ("input-output" if s.get("gets") and s.get("creates")
                                      else "input" if s.get("gets") else "output")
+                meta["inputFields"] = sorted({f["name"]
+                                              for a in s.get("boundaryActions", [])
+                                              if a["direction"] == "get"
+                                              for f in a.get("fields", [])})
+                meta["outputFields"] = sorted({f["name"]
+                                               for a in s.get("boundaryActions", [])
+                                               if a["direction"] == "create"
+                                               for f in a.get("fields", [])})
             node["meta"] = meta
             states[name] = node
 
