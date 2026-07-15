@@ -8,6 +8,9 @@ import pytest
 
 from cobol_xstate.cli import run
 
+EXAMPLES_CBL = str(
+    Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl")
+
 
 _PROG = (
     "       IDENTIFICATION DIVISION.\n"
@@ -185,3 +188,40 @@ def test_machine_only_suppresses_both_companions(tmp_path):
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--machine-only", "--outdir", str(tmp_path)]) == 0
     assert _names(tmp_path) == {"banktran.json"}
+
+
+# --------------------------------------------------------------------------- #
+# artifact naming: a companion must never land on another artifact's path
+# --------------------------------------------------------------------------- #
+
+def test_dotted_source_name_keeps_companions_matched(tmp_path):
+    """A source called MY.PROG.cbl must give MY.PROG.{json,business.json,lineage.json}.
+    Deriving the base by chopping at the FIRST dot produced companions named MY.* that
+    did not match their bundle."""
+    src = tmp_path / "MY.PROG.cbl"
+    src.write_text(_PROG)
+    out = tmp_path / "o"
+    assert run([str(src), "--outdir", str(out)]) == 0
+    assert _names(out) == {"MY.PROG.json", "MY.PROG.business.json",
+                           "MY.PROG.lineage.json"}
+
+
+def test_companion_never_overwrites_the_bundle(tmp_path):
+    """A source whose name ends in a companion suffix used to have its bundle silently
+    destroyed: the business view landed on the same path, leaving business+lineage only."""
+    import json
+    src = tmp_path / "ACCT.business.cbl"
+    src.write_text(_PROG)
+    out = tmp_path / "o"
+    assert run([str(src), "--outdir", str(out)]) == 0
+    names = _names(out)
+    assert len(names) == 3, f"an artifact was clobbered: {names}"
+    # the bundle survives and is still the FAITHFUL machine, not the distillation
+    bundle = json.loads((out / "ACCT.business.json").read_text(encoding="utf-8"))
+    assert bundle["metadata"].get("view") is None
+
+
+def test_explicit_output_path_carries_matched_companions(tmp_path):
+    assert run([str(EXAMPLES_CBL), "-o", str(tmp_path / "custom.json")]) == 0
+    assert _names(tmp_path) == {"custom.json", "custom.business.json",
+                                "custom.lineage.json"}
