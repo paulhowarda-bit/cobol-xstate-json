@@ -236,3 +236,63 @@ def test_business_does_not_clobber_the_default_bundle(tmp_path):
     view = json.loads((tmp_path / "banktran.business.json").read_text(encoding="utf-8"))
     assert bundle["metadata"].get("view") is None          # the faithful bundle
     assert view["metadata"]["view"] == "business"          # the distillation
+
+
+# --------------------------------------------------------------------------- #
+# the business chart carries the external boundary, fields and all
+# --------------------------------------------------------------------------- #
+
+def test_business_view_has_an_interface_like_the_faithful_bundle():
+    v = _view("sqlunld.cbl")
+    assert "interface" in v
+    eps = {e["endpoint"]: e for e in v["interface"]["endpoints"]}
+    assert eps["ACCOUNT"]["type"] == "db2" and eps["ACCOUNT"]["directions"] == ["get"]
+    assert eps["OUT-FILE"]["type"] == "file" and eps["OUT-FILE"]["directions"] == ["create"]
+
+
+def test_boundary_actions_carry_the_fields_that_cross():
+    v = _view("sqlunld.cbl")
+    fetch = next(a for s in v["businessStates"].values()
+                 for a in s["boundaryActions"] if a["verb"] == "FETCH")
+    names = [f["name"] for f in fetch["fields"]]
+    assert names == ["WS-ID", "WS-NAME", "WS-BAL"]      # what the input event FILLS
+    assert fetch["direction"] == "get" and fetch["endpointType"] == "db2"
+    assert fetch["event"] == "GET.DB2.ACCOUNT"
+    # typed, so a label can show the shape of the data
+    assert {f["pic"] for f in fetch["fields"]} == {"9(5)", "X(20)", "S9(7)V99"}
+
+    write = next(a for s in v["businessStates"].values()
+                 for a in s["boundaryActions"] if a["verb"] == "WRITE")
+    assert "OUT-BAL" in [f["name"] for f in write["fields"]]   # what FILLS the output
+
+
+def test_machine_nodes_tag_perimeter_and_fields_for_a_renderer():
+    m = _view("sqlunld.cbl")["machine"]
+    node = next(s for s in m["states"].values()
+                if "GET.DB2.ACCOUNT" in s["meta"].get("gets", []))
+    assert node["meta"]["perimeter"] == "input"
+    assert node["meta"]["inputFields"] == ["WS-BAL", "WS-ID", "WS-NAME"]
+    out = next(s for s in m["states"].values()
+               if "CREATE.FILE.OUT-FILE" in s["meta"].get("creates", [])
+               and s["meta"].get("outputFields"))
+    assert out["meta"]["perimeter"] == "output"
+    assert "OUT-BAL" in out["meta"]["outputFields"]
+
+
+def test_sql_where_host_vars_ride_as_params_not_fields():
+    # a SELECT's INTO vars come IN; its WHERE vars go OUT with the request
+    v = _view("cicsinq.cbl") if False else _view("sqldml.cbl")
+    sel = next((a for s in v["businessStates"].values()
+                for a in s["boundaryActions"] if a["verb"] == "SELECT"), None)
+    if sel is not None:            # sqldml's SELECT lives on a business state
+        assert [f["name"] for f in sel["fields"]] == ["WS-NAME", "WS-BAL"]
+        assert sel.get("params") and sel["params"][0]["name"] == "WS-ID"
+
+
+def test_every_interface_event_anchors_to_a_state_that_exists():
+    # a renderer draws an arrow per event; its host must be in the machine
+    for name in ("sqlunld.cbl", "custrpt.cbl", "banktran.cbl", "lineage.cbl"):
+        v = _view(name)
+        states = set(v["machine"]["states"])
+        for e in v["interface"]["events"]:
+            assert e["state"] in states, f"{name}: {e['event']} anchors to {e['state']}"

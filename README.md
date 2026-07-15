@@ -297,7 +297,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 243 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+PYTHONPATH=src python -m pytest -q     # 248 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -319,7 +319,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
                     thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (243 tests)
+tests/              one module per pipeline stage (248 tests)
 ```
 
 ## License

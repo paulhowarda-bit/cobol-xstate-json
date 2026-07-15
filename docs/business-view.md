@@ -67,9 +67,25 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
   Terminals are `type: "final"`. A synthetic **`__ENTRY__`** state fans out to the first
   business state(s) — the collapse can reach several under different guards, which a
   single XState `initial` cannot express.
-- **The report keys remain** for querying rather than drawing: `businessStates`, `entry`,
-  `transitions`, `collapsed` (every removed state, with its reason), `counts`,
-  `nameFillIn`, `flags`.
+- **`interface`** — the external perimeter, in the same shape as the faithful bundle's:
+  `endpoints` (typed external actors), `events` (each with `direction`, `endpoint`, the
+  **`fields`** crossing, and `params` for data flowing the other way), and `parameters`
+  (the caller contract). A renderer draws the boundary here exactly as it does there.
+  Each boundary state's `meta` also carries `perimeter`, `inputFields` and
+  `outputFields`, so a consumer reading only `machine` sees the data crossing without
+  joining to `interface`. Boundary states are never collapsed, so an event's host
+  survives; the program's own parameter events re-anchor to `__ENTRY__`.
+- **The report keys remain** for querying rather than drawing: `businessStates` (each
+  boundary action carrying its typed `fields`), `entry`, `transitions`, `collapsed`
+  (every removed state, with its reason), `counts`, `nameFillIn`, `flags`.
+
+### Limitation: parallel machines
+
+A program with DECLARATIVES or CICS `HANDLE CONDITION` compiles to a `type: parallel`
+machine (a PROGRAM region plus an orthogonal HANDLERS region). The business pass does not
+descend into regions, so it yields an **empty view** and flags
+`type:parallel (handler regions) - business view not lowered`. Use `--target json` for
+those programs until this is lowered.
 
 It is a **view, not a runnable machine** — the collapsed steps are summarised in `meta`,
 not executed. Use `--target js` to run anything.
