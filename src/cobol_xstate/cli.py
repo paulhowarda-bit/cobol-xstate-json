@@ -9,6 +9,7 @@ from typing import List, Optional
 
 from .business import build_business_view
 from .emitter import emit_setup_module
+from .lineage import build_lineage
 from .normalizer import SourceFormat, detect_source_format
 from .reactive import emit_reactive_module
 from .parser import parse_program
@@ -36,7 +37,12 @@ def _resolve_out_path(args, default_stem: Optional[str],
     if args.output:
         return Path(args.output)
     stem = default_stem or program_id or "machine"
-    ext = ".mjs" if args.target in ("js", "reactive") else ".json"
+    if args.target in ("js", "reactive"):
+        ext = ".mjs"
+    elif args.target == "lineage":
+        ext = ".lineage.json"      # a peer artifact, never overwrites the bundle
+    else:
+        ext = ".json"
     return Path(args.outdir) / f"{stem}{ext}"
 
 
@@ -55,14 +61,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "directory). Relative paths resolve against the current "
                         "directory; created (with parents) if it does not exist. The "
                         "file is named after the source (or the PROGRAM-ID for stdin).")
-    p.add_argument("--target", choices=["json", "js", "reactive", "business"],
+    p.add_argument("--target",
+                   choices=["json", "js", "reactive", "business", "lineage"],
                    default="json",
                    help="json = the XState config bundle (default); js = a runnable "
                         "XState v5 setup() ES module backed by the decimal runtime; "
                         "reactive = an event-driven module whose boundary I/O is push / "
                         "fire-and-forget (see docs/reactive-target.md); business = a "
                         "read-only distillation that collapses technical scaffolding and "
-                        "keeps only boundary/decision states (names left as fill-in)")
+                        "keeps only boundary/decision states (names left as fill-in); "
+                        "lineage = one row per (external event, field) with the events "
+                        "whose data reaches it (see docs/lineage-target.md)")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
     p.add_argument("-I", "--copybook-path", action="append", default=[],
@@ -126,9 +135,11 @@ def run(argv: Optional[List[str]] = None) -> int:
     def _write(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
 
-    if args.target == "business":
+    if args.target in ("business", "lineage"):
         import json as _json
-        text = _json.dumps(build_business_view(machine), indent=args.indent)
+        obj = (build_lineage(machine) if args.target == "lineage"
+               else build_business_view(machine))
+        text = _json.dumps(obj, indent=args.indent)
         if out_path is None:
             print(text)
         else:
