@@ -28,8 +28,8 @@ from cobol_xstate.statechart import build_machine
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
-RUNTIME = REPO / "runtime" / "cobolRuntime.mjs"
-DRIVER = REPO / "runtime" / "cobolDriver.mjs"
+RUNTIME = REPO / "src" / "cobol_xstate" / "runtime" / "cobolRuntime.mjs"
+DRIVER = REPO / "src" / "cobol_xstate" / "runtime" / "cobolDriver.mjs"
 
 NODE = shutil.which("node")
 HAS_XSTATE = (REPO / "node_modules" / "xstate" / "package.json").exists()

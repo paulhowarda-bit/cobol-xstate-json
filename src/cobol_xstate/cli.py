@@ -13,6 +13,7 @@ from .normalizer import SourceFormat, detect_source_format
 from .reactive import emit_reactive_module
 from .parser import parse_program
 from .preprocessor import CopybookResolver
+from .runtime_assets import read_runtime_asset
 from .statechart import build_machine
 
 
@@ -120,13 +121,18 @@ def run(argv: Optional[List[str]] = None) -> int:
         # Create the destination directory (and parents) if it does not exist.
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Always write UTF-8 explicitly: the platform default (cp1252 on Windows) cannot
+    # encode the runtime's non-ASCII text, and JSON/JS artifacts must be portable.
+    def _write(path: Path, text: str) -> None:
+        path.write_text(text, encoding="utf-8")
+
     if args.target == "business":
         import json as _json
         text = _json.dumps(build_business_view(machine), indent=args.indent)
         if out_path is None:
             print(text)
         else:
-            out_path.write_text(text + "\n")
+            _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
     elif args.target in ("js", "reactive"):
         text = (emit_reactive_module(machine) if args.target == "reactive"
@@ -134,19 +140,20 @@ def run(argv: Optional[List[str]] = None) -> int:
         if out_path is None:
             print(text)
         else:
-            out_path.write_text(text)
-            # Drop the decimal runtime beside the module so its import resolves.
-            runtime_src = Path(__file__).resolve().parents[2] / "runtime" / "cobolRuntime.mjs"
-            if runtime_src.exists():
-                (out_path.parent / "cobolRuntime.mjs").write_text(
-                    runtime_src.read_text())
+            _write(out_path, text)
+            # The emitted module imports ./cobolRuntime.mjs, so the runtime must land
+            # beside it. It ships as package data; a missing asset means a broken
+            # install and raises rather than emitting a dangling import.
+            runtime_dst = out_path.parent / "cobolRuntime.mjs"
+            _write(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+            print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
     else:
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
         if out_path is None:
             print(text)
         else:
-            out_path.write_text(text + "\n")
+            _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
 
     if args.summary:

@@ -21,6 +21,12 @@ dev = ["pytest>=7"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The JS decimal runtime + reference driver ship INSIDE the package: `--target js`
+# writes cobolRuntime.mjs beside the emitted module, so it must be importable from an
+# installed wheel, not only from a source checkout.
+[tool.setuptools.package-data]
+cobol_xstate = ["runtime/*.mjs"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Put the src/ layout on sys.path so `python -m pytest` works without installing the

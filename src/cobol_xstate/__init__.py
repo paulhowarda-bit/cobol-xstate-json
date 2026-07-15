@@ -22,6 +22,7 @@ HANDLE) are flagged rather than smoothed over.
 from .normalizer import normalize, CodeLine, SourceFormat
 from .lexer import tokenize, Token
 from .parser import parse_program, Program, Paragraph
+from .runtime_assets import RUNTIME_FILES, read_runtime_asset, runtime_asset_path
 from .statechart import build_machine, Machine
 
 __all__ = [
@@ -35,6 +36,9 @@ __all__ = [
     "Paragraph",
     "build_machine",
     "Machine",
+    "RUNTIME_FILES",
+    "read_runtime_asset",
+    "runtime_asset_path",
 ]
 
 __version__ = "0.1.0"

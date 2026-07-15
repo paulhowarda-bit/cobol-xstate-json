@@ -23,7 +23,7 @@ from cobol_xstate.statechart import build_machine
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
-RUNTIME = REPO / "runtime" / "cobolRuntime.mjs"
+RUNTIME = REPO / "src" / "cobol_xstate" / "runtime" / "cobolRuntime.mjs"
 
 
 def _machine(name):
