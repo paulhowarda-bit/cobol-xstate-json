@@ -49,11 +49,34 @@ following the `perform_` calls.
 
 ## Output
 
-A JSON overlay: `entry` (where the program starts), `businessStates` (each with role,
-`gets`/`creates`, decision guards, `internalSteps` = the stripped-out MOVE/COMPUTE detail,
-`cobol` provenance, and `suggestedName: null`), `transitions` (`from`/`to`/`via`/`guards`/
-`events`/`label: null`), `collapsed` (the technical states removed), `counts`, `nameFillIn`
-(what needs naming), and `flags`.
+**A real XState v5 config** (`format: "xstate-v5-config"`), so anything that renders the
+faithful bundle renders this identically — no special-casing. A projection of a state
+machine *is* a state machine, and this is the view a human actually wants to look at, so
+it must be drawable.
+
+```bash
+cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage.json
+```
+
+- **`machine`** — `{id: "<PROG>__business", initial, states}`. Each state carries its
+  distillation in **`meta`**: `role`, `boundaryActions`, `decisions`, `internalSteps` (the
+  stripped-out MOVE/COMPUTE detail), `cobol` provenance, `perimeter`, and
+  `suggestedName: null`. Each edge carries `meta.via` (the technical states it collapsed),
+  the full `meta.guards` list (XState allows only one `guard` per transition, so the
+  readable label rides on `guard` and the detail stays in meta), and `meta.label: null`.
+  Terminals are `type: "final"`. A synthetic **`__ENTRY__`** state fans out to the first
+  business state(s) — the collapse can reach several under different guards, which a
+  single XState `initial` cannot express.
+- **The report keys remain** for querying rather than drawing: `businessStates`, `entry`,
+  `transitions`, `collapsed` (every removed state, with its reason), `counts`,
+  `nameFillIn`, `flags`.
+
+It is a **view, not a runnable machine** — the collapsed steps are summarised in `meta`,
+not executed. Use `--target js` to run anything.
+
+The field-lineage companion (`prog.lineage.json`) is written alongside, since the two are
+read together: the business view shows *which steps matter*, the lineage table shows
+*where each field's value came from*.
 
 ## Honest limits (flagged, never faked)
 

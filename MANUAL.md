@@ -323,6 +323,17 @@ The traversal is call/return-aware — it follows PERFORM into paragraphs and ba
 the same resolution as the runnable emitter, so the business flow matches real call
 semantics.
 
+**It is a real XState v5 config**, so the same renderer that draws the faithful bundle
+draws this — which matters, because this is the view a human actually wants to look at.
+Each state's distillation (`role`, `boundaryActions`, `decisions`, the stripped
+`internalSteps`, `cobol` provenance, `suggestedName`) rides in `meta`; each edge carries
+`meta.via`, the technical states it collapsed. A synthetic `__ENTRY__` fans out to the
+first business state(s). It is a *view*, not runnable — use `--target js` to execute.
+
+```bash
+cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage.json
+```
+
 See [docs/business-view.md](docs/business-view.md).
 
 ### `--target lineage` — which event is responsible for each field

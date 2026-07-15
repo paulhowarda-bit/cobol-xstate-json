@@ -145,3 +145,94 @@ def test_goto_out_of_perform_is_flagged():
     # does); surface it so the one mis-routable edge is not silently trusted.
     v = _view("banktran.cbl")
     assert any("GO TO" in f for f in v["flags"])
+
+
+# --------------------------------------------------------------------------- #
+# the business view IS a machine: renderable, not just readable
+# --------------------------------------------------------------------------- #
+
+def test_business_view_is_a_real_xstate_config():
+    v = _view("banktran.cbl")
+    assert v["format"] == "xstate-v5-config"     # the renderer's schema, not a report
+    m = v["machine"]
+    assert m["id"] == "BANKTRAN__business"
+    assert m["initial"] in m["states"]
+    assert m["states"], "a machine needs states"
+
+
+def test_business_machine_has_no_dangling_edges():
+    # a renderer must be able to draw every edge
+    m = _view("banktran.cbl")["machine"]
+    for name, st in m["states"].items():
+        for e in st.get("always", []):
+            assert e["target"] in m["states"], f"{name} -> {e['target']} is dangling"
+
+
+def test_business_machine_carries_the_view_in_meta():
+    # everything the report shape held that XState has no slot for rides in meta
+    m = _view("banktran.cbl")["machine"]
+    disp = m["states"]["2000-DISPATCH"]
+    assert disp["meta"]["role"] == "decision"
+    assert disp["meta"]["suggestedName"] is None        # the deliberate blank
+    assert disp["meta"]["decisions"], "decision guards must survive into meta"
+    dep = m["states"]["2100-DEPOSIT"]
+    assert dep["meta"]["role"] == "boundary"
+    assert dep["meta"]["perimeter"] == "output"
+    assert dep["meta"]["boundaryActions"][0]["endpoint"] == "POSTLOG"
+
+
+def test_business_edges_keep_the_collapsed_path_and_guards():
+    m = _view("banktran.cbl")["machine"]
+    edges = m["states"]["2000-DISPATCH"]["always"]
+    guarded = [e for e in edges if e.get("guard")]
+    assert guarded, "the dispatch fan-out must carry its guards as edge labels"
+    for e in edges:
+        assert "via" in e["meta"]        # what this edge collapsed, for a hover
+        assert "guards" in e["meta"]     # the full list (XState allows only one guard)
+
+
+def test_business_terminal_states_are_final():
+    m = _view("banktran.cbl")["machine"]
+    finals = [n for n, s in m["states"].items() if s.get("type") == "final"]
+    assert finals
+    for n in finals:
+        assert m["states"][n]["meta"]["role"] == "terminal"
+
+
+def test_synthetic_entry_node_when_collapse_has_several_first_states():
+    m = _view("banktran.cbl")["machine"]
+    assert m["initial"] == "__ENTRY__"
+    ent = m["states"]["__ENTRY__"]
+    assert ent["meta"]["role"] == "entry"
+    assert ent["always"], "the entry must lead to the first business state(s)"
+
+
+def test_report_shape_is_still_there_for_reading():
+    # the machine is for drawing; these keys stay for querying
+    v = _view("banktran.cbl")
+    for k in ("businessStates", "transitions", "collapsed", "counts", "nameFillIn"):
+        assert k in v
+
+
+# --------------------------------------------------------------------------- #
+# CLI: distinct names, and the lineage companion
+# --------------------------------------------------------------------------- #
+
+def test_business_target_writes_its_own_name_and_the_lineage_companion(tmp_path):
+    from cobol_xstate.cli import run
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--target", "business", "--outdir", str(tmp_path)]) == 0
+    assert (tmp_path / "banktran.business.json").exists()   # not banktran.json
+    assert (tmp_path / "banktran.lineage.json").exists()    # the companion travels too
+
+
+def test_business_does_not_clobber_the_default_bundle(tmp_path):
+    from cobol_xstate.cli import run
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--outdir", str(tmp_path)]) == 0
+    assert run([str(src), "--target", "business", "--outdir", str(tmp_path)]) == 0
+    import json
+    bundle = json.loads((tmp_path / "banktran.json").read_text(encoding="utf-8"))
+    view = json.loads((tmp_path / "banktran.business.json").read_text(encoding="utf-8"))
+    assert bundle["metadata"].get("view") is None          # the faithful bundle
+    assert view["metadata"]["view"] == "business"          # the distillation
