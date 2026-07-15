@@ -227,9 +227,35 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   The `--target js` module *does* synthesize call-return: each performed paragraph becomes
   an XState actor, the PERFORM site `invoke`s it with the context as input and assigns the
   output back on `onDone`, so WORKING-STORAGE threads through nested calls and the machine
-  runs end-to-end under stock `createActor`. `GO TO` into another paragraph can't be told
-  apart from fall-through once provenance is stripped, so inside an actor it is modeled as
-  a return (flagged in the JSON `flags`).
+  runs end-to-end under stock `createActor`. `PERFORM section-name` owns the section's
+  whole extent (header + member paragraphs), `PERFORM p THRU q` owns the source-order
+  span (a THRU tail that is a section extends through its members), and `PERFORM n
+  TIMES` steps a synthetic typed counter with a real exit guard. `GO TO` into another
+  paragraph can't be told apart from fall-through once provenance is stripped, so inside
+  an actor it is modeled as a return (flagged in the JSON `flags`).
+- **ON-condition handlers are guarded branches, never hoisted.** `CALL ... ON
+  EXCEPTION/OVERFLOW`, arithmetic `[NOT] ON SIZE ERROR`, `ACCEPT/DISPLAY ON EXCEPTION`,
+  `READ ... [NOT] AT END`, `[NOT] INVALID KEY` and `WRITE ... AT END-OF-PAGE` handler
+  imperatives compile to guarded edges keyed to a flagged external guard (the trigger is
+  a runtime condition). The NOT-form guards are the *negation* of their positive
+  condition, so `NOT AT END` is the per-record path both under stock XState and in the
+  reference driver. `EXIT PARAGRAPH`/`EXIT SECTION` jump to the paragraph's/section's
+  continuation; `EXIT PERFORM [CYCLE]` breaks/continues the enclosing inline loop.
+  ALTER switches and `GO TO ... DEPENDING ON` compile to *real evaluable guards* over a
+  synthetic switch field / the index variable (still flagged for review). Stacked
+  `WHEN`s share the following body. STRING/UNSTRING/INSPECT remain opaque effects —
+  their receiver/tally data changes are NOT modeled, and always flagged.
+- **The `interface` overlay is field-level.** Every boundary event carries the `fields`
+  crossing in its direction (READ INTO target or the FD record's elementary layout —
+  the FD ↔ record association is recovered, so a WRITE of a record resolves to its
+  physical file; ACCEPT/DISPLAY operands; SQL host variables, with WHERE inputs under
+  `params`; COMMAREA; CALL arguments) plus FILE-CONTROL bindings on file endpoints
+  (ASSIGN/ORGANIZATION/RECORD KEY/FILE STATUS). CICS RETURN COMMAREA/TRANSID, XCTL,
+  ABEND, READQ/WRITEQ TS/TD, STARTBR/READNEXT and EIB-field reads are all visible;
+  branching on SQLCODE *or a FILE STATUS field* emits a response event; any assignment
+  crossing LINKAGE (not just MOVE), guards reading linkage fields, and `RETURN-CODE`
+  writes classify as caller traffic; `parameters.fields` expands each parameter record
+  to its elementary fields.
 - **Data semantics are captured but not *evaluated*.** `data` carries the types and
   `semantics` carries the `target := expr` / Boolean-tree logic, but the bare config
   can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must
@@ -262,7 +288,7 @@ that needs a human against the original source.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 120 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, golden-master
+PYTHONPATH=src python -m pytest -q     # 206 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -282,7 +308,7 @@ examples/           custrpt.cbl  (canonical batch loop)
                     sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
                     fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
                     thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (120 tests)
+tests/              one module per pipeline stage (206 tests)
 ```
 
 ## License
