@@ -80,8 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--no-lineage", action="store_true",
-                   help="skip the companion <name>.lineage.json that the default json "
-                        "target writes alongside the bundle")
+                   help="skip the companion <name>.lineage.json that the default run "
+                        "writes alongside the bundle")
+    p.add_argument("--no-business", action="store_true",
+                   help="skip the companion <name>.business.json that the default run "
+                        "writes alongside the bundle")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
@@ -139,14 +142,24 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     import json as _json
 
+    def _companion(beside: Path, suffix: str, obj) -> None:
+        path = beside.with_name(beside.name.split(".")[0] + suffix)
+        _write(path, _json.dumps(obj, indent=args.indent) + "\n")
+        print(f"[{source_name}] wrote {path}", file=sys.stderr)
+
     def _write_lineage_companion(beside: Path) -> None:
         """The field-lineage table travels with any machine view: the rows reference the
         machine's events and fields, so the two are read together."""
         if args.machine_only or args.no_lineage:
             return
-        lin = beside.with_name(beside.name.split(".")[0] + ".lineage.json")
-        _write(lin, _json.dumps(build_lineage(machine), indent=args.indent) + "\n")
-        print(f"[{source_name}] wrote {lin}", file=sys.stderr)
+        _companion(beside, ".lineage.json", build_lineage(machine))
+
+    def _write_business_companion(beside: Path) -> None:
+        """The business distillation: the same machine with scaffolding collapsed. It is
+        the view a human reads, so a default run produces it beside the faithful one."""
+        if args.machine_only or args.no_business:
+            return
+        _companion(beside, ".business.json", build_business_view(machine))
 
     if args.target in ("business", "lineage"):
         obj = (build_lineage(machine) if args.target == "lineage"
@@ -180,6 +193,11 @@ def run(argv: Optional[List[str]] = None) -> int:
         else:
             _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+            # A plain run yields the three views that answer different questions of the
+            # same program: the faithful machine (what it does), the business
+            # distillation (which steps matter), and the lineage table (where each
+            # field's value came from). Each is opt-out-able.
+            _write_business_companion(out_path)
             _write_lineage_companion(out_path)
 
     if args.summary:

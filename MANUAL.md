@@ -90,8 +90,9 @@ file-association surprises entirely.
 cobol-xstate examples/custrpt.cbl --summary
 ```
 
-This writes **two files** — `./custrpt.json` (the state machine) and
-`./custrpt.lineage.json` (its companion field table) — and prints a summary to stderr:
+This writes **three files** — `./custrpt.json` (the faithful machine),
+`./custrpt.business.json` (the business distillation) and `./custrpt.lineage.json` (the
+field table) — and prints a summary to stderr:
 
 ```
 [custrpt.cbl] detected source format = fixed (97%: column 7 is a valid indicator on all 40 lines, incl. 5 comment/continuation line(s))
@@ -149,18 +150,19 @@ Directory for the auto-named output files. Default: current directory. Relative 
 resolve against the current directory; `.` is the current directory. **Created with
 parents if it does not exist.**
 
-Files are named after the source stem (`prog.cbl` → `prog.json` +
-`prog.lineage.json`), or after the PROGRAM-ID when reading stdin.
+Files are named after the source stem, or after the PROGRAM-ID when reading stdin.
 
 ```bash
 cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
+                                                #  + build/charts/prog.business.json
                                                 #  + build/charts/prog.lineage.json
 ```
 
-### `--no-lineage`
+### `--no-lineage` / `--no-business`
 
-Skip the companion `<name>.lineage.json`. The default json target writes it alongside
-the bundle because the two are read together; this opts out when you only want the chart.
+Skip a companion. A default run writes all three views because they answer different
+questions about the same program and are normally read together; these opt out when you
+want fewer. `--machine-only` suppresses both.
 
 ### `--target {json,js,reactive,business}`
 

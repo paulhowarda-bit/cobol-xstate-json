@@ -134,3 +134,54 @@ def test_js_target_writes_runtime_next_to_module(tmp_path):
     assert imported and imported.group(1) == "./cobolRuntime.mjs"
     # and it is written as UTF-8 (the platform default cannot encode it)
     assert "→" in runtime.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# the default run: three views of the same program
+# --------------------------------------------------------------------------- #
+
+def _names(d):
+    return {f.name for f in d.iterdir()}
+
+
+def test_default_run_writes_all_three_views(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--outdir", str(tmp_path)]) == 0
+    assert _names(tmp_path) == {"banktran.json",            # the faithful machine
+                                "banktran.business.json",   # the distillation
+                                "banktran.lineage.json"}    # the field table
+
+
+def test_the_three_views_are_each_well_formed(tmp_path):
+    import json
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--outdir", str(tmp_path)]) == 0
+    faithful = json.loads((tmp_path / "banktran.json").read_text(encoding="utf-8"))
+    business = json.loads((tmp_path / "banktran.business.json").read_text(encoding="utf-8"))
+    lineage = json.loads((tmp_path / "banktran.lineage.json").read_text(encoding="utf-8"))
+    assert faithful["format"] == "xstate-v5-config"
+    assert faithful["metadata"].get("view") is None
+    assert business["format"] == "xstate-v5-config"     # both are renderable machines
+    assert business["metadata"]["view"] == "business"
+    assert lineage["format"] == "cobol-xstate-lineage"
+    # the distillation is smaller than what it distils
+    assert len(business["machine"]["states"]) < len(faithful["machine"]["states"])
+
+
+def test_no_business_opts_out_of_just_that_view(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--no-business", "--outdir", str(tmp_path)]) == 0
+    assert _names(tmp_path) == {"banktran.json", "banktran.lineage.json"}
+
+
+def test_both_opt_outs_leave_only_the_bundle(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--no-business", "--no-lineage",
+                "--outdir", str(tmp_path)]) == 0
+    assert _names(tmp_path) == {"banktran.json"}
+
+
+def test_machine_only_suppresses_both_companions(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--machine-only", "--outdir", str(tmp_path)]) == 0
+    assert _names(tmp_path) == {"banktran.json"}
