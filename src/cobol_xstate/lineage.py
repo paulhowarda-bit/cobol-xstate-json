@@ -354,6 +354,10 @@ class _Lineage:
         origins = self._origins_of(fu, cur)
         changed = self._changed_by(fu)
         row = {
+            # `program` is on every row, not just at the top of the file: rows from many
+            # programs get concatenated to answer "what touches this state?", and a
+            # top-level field does not survive that.
+            "program": self.m.program_id,
             "event": _iface._event(hit["direction"], hit["etype"], hit["endpoint"]),
             "direction": direction,
             "endpoint": hit["endpoint"],
@@ -370,6 +374,15 @@ class _Lineage:
                 for (e, m, r) in origins if e != _UNKNOWN
             ],
         }
+        # The cross-program identity keys. `field` alone is a program-LOCAL name: A's
+        # WS-BALANCE and B's CUST-BAL may be the same state, or unrelated. What proves
+        # sameness is a shared declaration - the copybook the field came from, or the
+        # file whose record it belongs to. Emitted only when the code actually proves
+        # it; a field declared inline has neither, and is honestly unresolvable.
+        if item.get("member"):
+            row["member"] = item["member"]
+        if item.get("file"):
+            row["file"] = item["file"]
         if changed:
             row["changedBy"] = changed
         if any(e == _UNKNOWN for e, _m, _r in origins):

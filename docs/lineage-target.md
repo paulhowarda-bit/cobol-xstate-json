@@ -44,6 +44,19 @@ table alone; `--no-lineage` skips it.
 Reading it: *the WRITE to OUT-FILE emits `OUT-FEE`; this program computed it at line 44;
 and its value comes from the caller's parameter combined with a console `ACCEPT`.*
 
+### The cross-program identity keys
+
+Each row also carries `program`, and - **when the code proves it** - `member` (the
+copybook the field was declared in) or `file` (the FD whose record it belongs to). A
+field name is program-*local*: A's `WS-BALANCE` and B's `CUST-BAL` may be the same state
+or unrelated. What proves sameness is a shared declaration. These keys are what let rows
+from many programs be concatenated and joined to answer *"what touches this state?"* -
+see [state-graph-plan.md](state-graph-plan.md).
+
+A field declared inline carries **neither** key. That is deliberate: nothing proves it is
+shared, so it is honestly unresolvable rather than matched on a name that happens to look
+similar.
+
 ### "Did a LINKAGE item change it?"
 
 There is no such column, because it falls out for free: reading a linkage field **is** a
