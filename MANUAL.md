@@ -377,6 +377,18 @@ caller's parameter combined with a console `ACCEPT`.*
 
 See [docs/lineage-target.md](docs/lineage-target.md) for the algorithm and its limits.
 
+### Beyond one program: the state axis
+
+Every target above answers *"what does this program do?"* — the **program axis**. A
+migration needs the transpose: *"what happens to the balance, across every program?"*,
+because a single piece of state is affected by many programs, and **the new system's
+service boundaries will not match the old program boundaries**.
+
+[docs/state-graph-plan.md](docs/state-graph-plan.md) is the build spec for that: emit the
+join keys here (the SQL column↔host-variable mapping; `program`/`member`/`file` on
+lineage rows), then load N bundles into a **Neo4j graph** where "which programs affect
+the balance" is a query and "where are the service boundaries" is community detection.
+
 ---
 
 ## 5. The JSON bundle, section by section
