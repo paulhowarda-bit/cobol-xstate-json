@@ -75,6 +75,7 @@ built on unresolved names will produce a confident, wrong picture of the boundar
 | **MQ** `DEFINE QALIAS(a) TARGET(b)` | alias → real queue | Two programs on one queue via different aliases look unrelated. |
 | **Binder / link control** | `CALL 'X'` → the module actually bound | The `CALLS` edge stays unresolved for statically linked subprograms. |
 | **IDCAMS `DEFINE CLUSTER`** | VSAM dataset, key offset, record size | Which field is the key is unknown. |
+| **HLASM macro library** | macro → what it expands to | An ASM program that looks like it touches no data. See [Macros](#macros). |
 
 ### JCL — the hazards that matter
 
@@ -146,7 +147,7 @@ means the behavior lives in a PDS member you also have to read.
 
 | Artifact | Why it matters | Honest limit |
 |---|---|---|
-| **ASM (HLASM)** | Utility subroutines called from COBOL; `CSECT`/`ENTRY` are the callable names, `DSECT` is its copybook | **Do not attempt a faithful statechart.** No data division, register-addressed, possibly self-modifying. Recover the *interface* — entry points, DSECT layout, what it calls — and treat the body as a black box with a known signature unless it is business-critical enough to hand-model. |
+| **ASM (HLASM)** | Utility subroutines called from COBOL; `CSECT`/`ENTRY` are the callable names, `DSECT` is its copybook. Also Db2 `EDITPROC`/`FIELDPROC` — ASM bolted to a *table* that silently transforms every row | Interface only, never a chart of the body — see [Which of these need a statechart?](#which-of-these-need-a-statechart) |
 | **Db2 triggers / stored procedures** | Business rules that fire on a write, entirely outside the calling program | A program's `UPDATE` may do far more than it says. |
 | **Easytrieve / SAS / DYL-280** | Whole report and extract programs in many shops | Own grammars; same treatment as COBOL, lower priority. |
 | **REXX / CLIST** | Glue that can allocate, call, and branch | Often the dynamic-allocation culprit. |
@@ -197,6 +198,109 @@ target come from.
 
 ---
 
+# Which of these need a statechart?
+
+Almost none of them. A statechart is expensive and only earns it where **all three** hold:
+
+1. the logic is **business-meaningful**;
+2. it is **not recoverable by reading the source** — no tests, no types, decades of drift;
+3. you must **rewrite it and prove the rewrite equivalent**.
+
+COBOL hits all three, which is why this tool exists. Nothing else in the estate does, and
+each fails for a *different* reason — so the right treatment differs too:
+
+| | Business logic? | Unreadable? | Rewriting it? | Verdict |
+|---|---|---|---|---|
+| **ASM** | sometimes | yes | usually **replaced**, not rewritten | Interface only — never chart the body |
+| **Java** | yes | **no** | usually not | In the graph, no chart |
+| **Macros** | *not a program* | — | — | Expand it; charting it is a category error |
+
+## ASM
+
+**Do not attempt a faithful statechart, even for the parts with real logic.** Not because
+it is hard but because the result would violate the tool's own rule. This tool's value is
+that the data semantics are recovered exactly — PICTURE, USAGE, packed decimal, the
+fixed-point arithmetic. ASM has **no data division**: operands are offsets off a base
+register, `USING` is dynamic, and `EX`, branch tables and (legally) self-modifying code
+mean the control flow itself is not always static. A chart from that would be a
+control-flow graph with **no data meaning** — invented logic wearing a contract's clothes.
+
+What *is* recoverable is exactly what the graph needs:
+
+| Recover | Gives |
+|---|---|
+| `CSECT` / `ENTRY` names | resolves `CALL 'X'` to a real module |
+| `DSECT` | the parameter layout — the fields crossing the boundary |
+| what it `CALL`s, which SVCs it issues | its effects, incl. dynamic allocation (a flag source) |
+
+**The tool already models ASM correctly** — it just does not know it. `CALL 'SUBFEE'`
+already produces a `maybe` origin with `resolvedBy: "SUBFEE"`: *this callee may rewrite
+these arguments; SUBFEE would settle it.* That is the honest answer for a black box.
+Parsing the DSECT does not remove the unknown, it **bounds** it: from "may rewrite
+something" to "may rewrite these named fields". An ASM module is an **endpoint**, like a
+Db2 table — not a program to chart.
+
+Chart it by hand only if it is genuinely bucket 3: real business logic, on the critical
+path, and someone will verify the result. In a COBOL shop most ASM is a date routine, a
+string utility, or system-services glue — and those get *replaced* with a library call, not
+rewritten equivalently, so a contract for them buys nothing.
+
+**The ASM that will bite you** is the kind nobody calls: a Db2 **`EDITPROC`**,
+**`FIELDPROC`** or **`VALIDPROC`** is an ASM routine attached to a *table* that transforms
+every row or column value on the way in and out. If one exists, the value the COBOL sees is
+**not** the value stored, and no amount of reading the COBOL will reveal it. Same for CICS
+global user exits and VSAM exits. These belong on the work list as a lineage hazard, not as
+charts.
+
+## Java
+
+Java is usually **not the thing you are recovering** — it is the strangler layer someone
+already built. It lives in a JZOS batch step, in CICS Liberty via JCICS, in a Db2 Java
+stored procedure, or in WebSphere. It is closer to your target architecture than to your
+source material.
+
+But **it must be in the graph**, and this is the part that is easy to get wrong: a Java
+service reading `CUSTOMER.BAL` affects the collected balance exactly as much as a COBOL
+program does. Leave it out and your boundary analysis is confidently wrong — you will
+draw a service boundary straight through a piece of state Java is already writing.
+
+Two things make this cheap:
+
+- **Its identity resolves more easily than COBOL's.** JDBC has the table and column right
+  there in the SQL; JPA/Hibernate entities map field→column *declaratively*; file access
+  uses real paths, not ddnames. The whole Role-1 resolver problem barely applies.
+- **Part 2 reads only the published JSON.** The bundle is a published interface precisely
+  so the corpus tool never parses source. So Java participates via an **adapter that emits
+  the same schema** — it does not need this tool, and this tool should not grow a Java
+  front end.
+
+Do not chart it. It fails test (2) outright: it is readable, testable, and already served
+by mature static-analysis tooling. Spending statechart effort there is spending it where
+the problem is not.
+
+## Macros
+
+A macro is **not a program** — it is expanded into one. Charting a macro is the same
+category error as charting a copybook: you chart the program with the copybook expanded,
+and you analyze ASM **post-expansion**. There is nothing else to decide.
+
+The reason macros appear here at all is that the **macro library is a prerequisite**, in
+exactly the way SYSLIB is for `COPY`. Shops encode standard patterns as macros, and a
+house macro like `GETCUST` can expand into an entire Db2 call. Read the ASM without the
+macro library and the program appears to touch **no data at all** — a silent, total loss
+that looks like a clean result.
+
+It carries the copybook problem's twin, too: the same macro name in two macro libraries
+expands to two different things, and which one applied depends on the assemble step's
+SYSLIB concatenation. Same false-join risk, same resolution.
+
+Two variants worth naming: **CICS macro-level** programs (`DFHxxx` macros, pre-command-
+level) are ASM with CICS embedded — rare now, but if present they are CICS programs your
+COBOL-and-command-level tooling will not see at all. **ISPF edit macros** are developer
+tooling, not runtime, and are out of scope entirely.
+
+---
+
 # Suggested order, and why
 
 Not "everything, comprehensively" — the order is chosen so each step removes a class of
@@ -210,7 +314,9 @@ Not "everything, comprehensively" — the order is chosen so each step removes a
 | **1** | Utility control cards (SORT/IDCAMS/IEBGENER) | Repairs lineage chains that are currently broken silently. |
 | **2** | CICS CSD (+ BMS), MQ definitions | Online identity and the event boundary; MQ doubles as reactive-target input. |
 | **3** | Scheduler dependencies | Completes the batch choreography beyond the job boundary. |
-| **4** | ASM interfaces, Easytrieve, triggers | Coverage of remaining behavior. |
+| **4** | ASM *interfaces* (CSECT/ENTRY/DSECT), Easytrieve, triggers | Coverage of remaining behavior. Bounds the `maybe` origins a `CALL` already reports; does not chart the ASM. |
+| — | **HLASM macro library** | Slot at tier 0 **the moment you read any ASM** — without it an ASM program appears to touch no data. |
+| — | **Java** | Not this tool's job. Needs a bundle-emitting adapter so it joins the same graph — but omit it and the boundaries are wrong wherever Java already writes state. |
 | — | IMS DBD/PSB/PCB | Slot at tier 0–1 **if this is an IMS shop** — then it is a resolver, not optional. |
 
 ## The rule that does not change
