@@ -38,12 +38,12 @@ Pure standard library — **no runtime dependencies**, no build step. Python ≥
 ## Usage
 
 ```bash
-cobol-xstate prog.cbl                              # -> 3 files (see below)
+cobol-xstate prog.cbl                              # -> 4 JSON views (see below)
 cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir created)
 cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
 cobol-xstate prog.cbl -o out/custom.json           # exact path (overrides --outdir/name)
 cobol-xstate prog.cbl -o -                          # write the bundle to stdout instead
-cobol-xstate prog.cbl --no-business --no-lineage   # bundle only, skip the companions
+cobol-xstate prog.cbl --no-business --no-lineage --no-reactive   # bundle only
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
 cobol-xstate prog.cbl --format free                # force free-format source
@@ -53,18 +53,25 @@ cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ 
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
 
-A default run writes **three files** — three views of the same program, each answering a
-different question:
+A default run writes **four JSON files** — four views of the same program, each answering
+a different question:
 
 | File | Answers |
 |---|---|
 | `prog.json` | **What does it do?** The faithful machine: config + data dictionary + semantics + interface + provenance. Complete, verbose. |
-| `prog.business.json` | **Which steps matter?** The business distillation: scaffolding collapsed, only boundary/decision/calculation states. Also a renderable XState config. |
+| `prog.business.json` | **Which steps matter?** The business distillation: scaffolding collapsed, only boundary/decision/calculation states. |
 | `prog.lineage.json` | **Where did each value come from?** One row per (external event, field), with the event each field's value originates from. |
+| `prog.reactive.json` | **What replaces it?** The event-driven machine: its `on` waits and `publish_*` effects are the new system's message contract. |
+
+All four are things you **read or draw** (all are renderable `xstate-v5-config`, bar the
+lineage table). The **runnable** modules stay behind their own flag: `--target js` for the
+decimal-exact reference, `--target reactive` for the deployable module.
 
 Use `--outdir` to choose the directory (created if absent), `-o PATH` for an exact path
 (companions follow it), or `-o -` to stream the bundle to stdout. Opt out with
-`--no-business` / `--no-lineage`; `--machine-only` emits the bare config alone.
+`--no-business` / `--no-lineage` / `--no-reactive`; `--machine-only` emits the bare config
+alone. A program the reactive lowering refuses (CICS handler regions, recursive PERFORM)
+simply gets no `.reactive.json` and a note — the other three still land.
 
 ### Output
 
@@ -311,7 +318,7 @@ explicit work list, never a guess.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 301 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+PYTHONPATH=src python -m pytest -q     # 304 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`

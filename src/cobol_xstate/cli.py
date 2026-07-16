@@ -101,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-business", action="store_true",
                    help="skip the companion <name>.business.json that the default run "
                         "writes alongside the bundle")
+    p.add_argument("--no-reactive", action="store_true",
+                   help="skip the companion <name>.reactive.json that the default run "
+                        "writes alongside the bundle")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
@@ -185,6 +188,23 @@ def run(argv: Optional[List[str]] = None) -> int:
             return
         _companion(beside, ".business.json", build_business_view(machine))
 
+    def _write_reactive_companion(beside: Path) -> None:
+        """The event-driven view: the machine the modernized system is built from.
+
+        The reactive lowering REFUSES some programs (CICS handler regions, recursive
+        PERFORM). On a default run that must not take the other views down with it - the
+        refusal is a fact about this program, not a failure of the run. Say so and carry
+        on; `--target reactive` is where a hard error belongs.
+        """
+        if args.machine_only or args.no_reactive:
+            return
+        try:
+            view = build_reactive_view(machine)
+        except NotImplementedError as exc:
+            print(f"[{source_name}] note: no reactive view - {exc}", file=sys.stderr)
+            return
+        _companion(beside, ".reactive.json", view)
+
     if args.target in ("business", "lineage"):
         obj = (build_lineage(machine) if args.target == "lineage"
                else build_business_view(machine))
@@ -197,8 +217,14 @@ def run(argv: Optional[List[str]] = None) -> int:
             if args.target == "business":
                 _write_lineage_companion(out_path)
     elif args.target in ("js", "reactive"):
-        text = (emit_reactive_module(machine) if args.target == "reactive"
-                else emit_setup_module(machine))
+        try:
+            text = (emit_reactive_module(machine) if args.target == "reactive"
+                    else emit_setup_module(machine))
+        except NotImplementedError as exc:
+            # An explicit --target reactive on a program the lowering refuses: report the
+            # reason, not a traceback. The refusal is a fact about the program.
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
         if out_path is None:
             print(text)
         else:
@@ -225,12 +251,15 @@ def run(argv: Optional[List[str]] = None) -> int:
         else:
             _write(out_path, text + "\n")
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
-            # A plain run yields the three views that answer different questions of the
-            # same program: the faithful machine (what it does), the business
-            # distillation (which steps matter), and the lineage table (where each
-            # field's value came from). Each is opt-out-able.
+            # A plain run yields the four JSON views of one program, each answering a
+            # different question: the faithful machine (what it does), the business
+            # distillation (which steps matter), the lineage table (where each field's
+            # value came from), and the reactive machine (what replaces it). All four are
+            # things you READ or DRAW - the runnable modules stay behind their own
+            # --target. Each is opt-out-able.
             _write_business_companion(out_path)
             _write_lineage_companion(out_path)
+            _write_reactive_companion(out_path)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))
