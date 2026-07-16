@@ -6,6 +6,29 @@ state they share. This document is the inventory of **everything else on the mai
 that the join depends on**, why each one matters, and what each will lie about if parsed
 carelessly.
 
+## How to read this — three kinds of claim, not equally trustworthy
+
+This document was drafted by an AI assistant working in this repository. It contains three
+kinds of statement, and an earlier draft presented all three in the same confident voice.
+That was the document's worst defect, so they are now labelled:
+
+| Tag | Means | How much to trust it |
+|---|---|---|
+| **`[repo]`** | Verified by running this tool and reading its output during drafting | Reproducible — the command is cited. Check it in a minute. |
+| **`[check]`** | Standard mainframe behavior, recalled from training, **not verified against IBM documentation** | Directionally right; **the details are exactly where an AI is wrong most expensively.** Your own people know this better than this document does. |
+| **`[reasoning]`** | An argument, not a fact | Judge it on its merits. It has no authority. |
+
+**The intended reader knows the mainframe better than the author of this document does.**
+So the value here is not the JCL tutorial — it is the *reasoning*: which artifact resolves
+which identity, what breaks without it, and the order that removes wrong answers fastest.
+Read the `[check]` material as *"here is the shape of the problem"*, and take the mechanics
+from IBM's references and your own estate.
+
+Nothing here describes **your** estate. An earlier draft contained sentences like *"most
+ASM in a COBOL shop is a date routine"* — invention, asserted as fact, about systems the
+author has never seen. Those have been removed rather than labelled. Where the right answer
+depends on what you actually have, this document says so instead of guessing.
+
 ## The thesis
 
 > The COBOL tells you what a program **does**. It cannot tell you what it does it **to**.
@@ -16,10 +39,23 @@ information about which dataset was read. That binding — `CUST-FILE` → ddnam
 almost every name a COBOL program uses: they are **program-local**, and the artifact that
 makes them **system-global** is somewhere else.
 
-This is the argument already accepted for Db2 in the main plan: a host variable is
-program-local, the *column* is the database's, so the column is the only thing proving two
-programs read the same state. Every row below is that same argument applied to a different
-artifact. The identity chain is always the same shape:
+`[repo]` This is not a hypothesis about the tool, it is its current output. For
+`SELECT CUST-FILE ASSIGN TO CUSTIN`, the emitted interface endpoint is:
+
+```json
+{ "endpoint": "CUST-FILE", "type": "file", "directions": ["get"],
+  "assign": "CUSTIN", "organization": "SEQUENTIAL" }
+```
+
+The program-local name and the ddname are both there. **The dataset is absent**, and no
+amount of COBOL parsing will produce it.
+
+`[reasoning]` This is the argument already accepted for Db2 in the main plan: a host
+variable is program-local, the *column* is the database's, so the column is the only thing
+proving two programs read the same state. Every row below **generalizes that same argument**
+to a different artifact. The generalization is the author's, not a citation — it holds up
+under the examples given, but it is an argument you should test rather than a finding.
+The identity chain is always the same shape:
 
 ```
 program-local name   →   an intermediate binding   →   the system-global identity
@@ -48,8 +84,9 @@ already follows.
 
 ## The four roles
 
-Sorting the estate by what an artifact *does for the analysis* is more useful than sorting
-it by technology:
+`[reasoning]` This taxonomy is the author's own, invented for this document — it is an
+organizing lens, not a standard anyone else uses. Sorting the estate by what an artifact
+*does for the analysis* is more useful than sorting it by technology:
 
 1. **Resolvers** — turn a local name into a global identity. Highest value: without them
    the graph is *wrong*, not merely incomplete.
@@ -63,6 +100,10 @@ it by technology:
 
 Do these **before** the Neo4j loader. The loader's join keys depend on them, and a loader
 built on unresolved names will produce a confident, wrong picture of the boundaries.
+
+`[check]` Every artifact in this table is recalled from training, not verified. The
+*claim that each one resolves an identity* is the reasoning; the *syntax and semantics* are
+yours to confirm.
 
 | Artifact | Binds | Without it |
 |---|---|---|
@@ -79,12 +120,16 @@ built on unresolved names will produce a confident, wrong picture of the boundar
 
 ### JCL — the hazards that matter
 
-Resolving a DSN needs a real evaluator, not a regex. Each of these silently produces a
-wrong answer if skipped:
+`[check]` Resolving a DSN needs a real evaluator, not a regex. Each of these silently
+produces a wrong answer if skipped. **Treat this as a checklist of things to look up, not
+as the specification** — the point is that each hazard exists, not that the description
+here is precise:
 
-- **Symbolic parameters.** `DSN=&HLQ..CUST.MASTER` with `&HLQ` from a `PROC` default, a
-  `SET`, an `EXEC` override, or the scheduler. Resolution order is PROC default < EXEC
-  parameter < `SET`. Get it wrong and the DSN is fiction.
+- **Symbolic parameters.** `DSN=&HLQ..CUST.MASTER`, with `&HLQ` coming from a `PROC`
+  default, a `SET`, an `EXEC` override, or the scheduler. **Take the precedence rules from
+  the IBM JCL Reference, not from this document** — an earlier draft stated an order here
+  and the author was not confident it was right. Get it wrong and every DSN you resolve is
+  fiction, silently.
 - **PROC overrides.** `//STEP1.CUSTIN DD DSN=...` replaces a DD *inside* the PROC. The
   effective binding is the merge, not either half.
 - **Concatenated DD.** One ddname, several datasets:
@@ -149,7 +194,7 @@ means the behavior lives in a PDS member you also have to read.
 |---|---|---|
 | **ASM (HLASM)** | Utility subroutines called from COBOL; `CSECT`/`ENTRY` are the callable names, `DSECT` is its copybook. Also Db2 `EDITPROC`/`FIELDPROC` — ASM bolted to a *table* that silently transforms every row | Interface only, never a chart of the body — see [Which of these need a statechart?](#which-of-these-need-a-statechart) |
 | **Db2 triggers / stored procedures** | Business rules that fire on a write, entirely outside the calling program | A program's `UPDATE` may do far more than it says. |
-| **Easytrieve / SAS / DYL-280** | Whole report and extract programs in many shops | Own grammars; same treatment as COBOL, lower priority. |
+| **Easytrieve / SAS / DYL-280** | Where present, whole report and extract programs — real logic, not glue | Own grammars; same treatment as COBOL. Priority depends entirely on how much of your estate is in them. |
 | **REXX / CLIST** | Glue that can allocate, call, and branch | Often the dynamic-allocation culprit. |
 
 ---
@@ -200,6 +245,10 @@ target come from.
 
 # Which of these need a statechart?
 
+`[reasoning]` These three tests are the author's, written during this project — not a
+received method. The first version of them got Java wrong (see the note below), which is a
+fair warning about how much authority to grant them.
+
 A statechart is expensive and only earns it where **all three** hold:
 
 1. the logic is **business-meaningful**;
@@ -241,17 +290,27 @@ What *is* recoverable is exactly what the graph needs:
 | `DSECT` | the parameter layout — the fields crossing the boundary |
 | what it `CALL`s, which SVCs it issues | its effects, incl. dynamic allocation (a flag source) |
 
-**The tool already models ASM correctly** — it just does not know it. `CALL 'SUBFEE'`
-already produces a `maybe` origin with `resolvedBy: "SUBFEE"`: *this callee may rewrite
-these arguments; SUBFEE would settle it.* That is the honest answer for a black box.
+`[repo]` **The tool already models ASM correctly** — it just does not know it. A `CALL`
+already produces a `maybe` origin naming the callee that would settle it. Real output, from
+`banktran.lineage.json`:
+
+```json
+"origins": [ { "event": "CREATE.PROGRAM.POSTLOG",
+               "maybe": true, "resolvedBy": "POSTLOG" } ]
+```
+
+*This callee may rewrite these arguments; POSTLOG would settle it.* That is already the
+honest answer for a black box, and an ASM module is a black box.
 Parsing the DSECT does not remove the unknown, it **bounds** it: from "may rewrite
 something" to "may rewrite these named fields". An ASM module is an **endpoint**, like a
 Db2 table — not a program to chart.
 
-Chart it by hand only if it is genuinely bucket 3: real business logic, on the critical
-path, and someone will verify the result. In a COBOL shop most ASM is a date routine, a
-string utility, or system-services glue — and those get *replaced* with a library call, not
-rewritten equivalently, so a contract for them buys nothing.
+Chart it by hand only where it is real business logic, on the critical path, and someone
+will verify the result. The test to apply is **"are we rewriting this, or replacing it?"** —
+an ASM date routine or string utility becomes a library call in the new system, and a
+rewrite contract for something you are not rewriting buys nothing. A posting engine in ASM
+is a different matter entirely. **Only your inventory can say which you have**; this
+document cannot, and any claim here about the usual mix would be invention.
 
 **The ASM that will bite you** is the kind nobody calls: a Db2 **`EDITPROC`**,
 **`FIELDPROC`** or **`VALIDPROC`** is an ASM routine attached to a *table* that transforms
@@ -282,9 +341,10 @@ programs into one account of what happens to a piece of state; a participant wit
 conditions is a hole in that account, not a cheap approximation of it. If Java writes the
 balance, its rules are *part of the balance's rules*.
 
-**Where the machine comes from: not this tool.** The output schema is language-neutral —
-it is JSON, and Part 2 reads only JSON, which is exactly why the bundle is a published
-interface. But the *producer* is not neutral. Measured against this repo: `Machine` carries
+`[repo]` **Where the machine comes from: not this tool.** The output schema is
+language-neutral — it is JSON, and Part 2 reads only JSON, which is exactly why the bundle
+is a published interface. But the *producer* is not neutral, and this was measured rather
+than assumed: `Machine` carries
 `paragraph_order`, `sections`, `PROCEDURE DIVISION USING/RETURNING` and `FILE-CONTROL`
 entries, and every downstream module (`interface`, `business`, `lineage`, `reactive`,
 `emitter`) has 30–61 COBOL-specific references — `_classify` reads COBOL verb text
@@ -321,17 +381,18 @@ category error as charting a copybook: you chart the program with the copybook e
 and you analyze ASM **post-expansion**. There is nothing else to decide.
 
 The reason macros appear here at all is that the **macro library is a prerequisite**, in
-exactly the way SYSLIB is for `COPY`. Shops encode standard patterns as macros, and a
-house macro like `GETCUST` can expand into an entire Db2 call. Read the ASM without the
-macro library and the program appears to touch **no data at all** — a silent, total loss
-that looks like a clean result.
+exactly the way SYSLIB is for `COPY`. Where a house macro wraps a standard pattern — a
+`GETCUST` that expands into an entire Db2 call — reading the ASM without the macro library
+makes the program appear to touch **no data at all**: a silent, total loss that looks like
+a clean result. Whether your macros do that is a question for your assemble JCL's SYSLIB,
+not for this document.
 
 It carries the copybook problem's twin, too: the same macro name in two macro libraries
 expands to two different things, and which one applied depends on the assemble step's
 SYSLIB concatenation. Same false-join risk, same resolution.
 
 Two variants worth naming: **CICS macro-level** programs (`DFHxxx` macros, pre-command-
-level) are ASM with CICS embedded — rare now, but if present they are CICS programs your
+level) are ASM with CICS embedded — if you have any, they are CICS programs that
 COBOL-and-command-level tooling will not see at all. **ISPF edit macros** are developer
 tooling, not runtime, and are out of scope entirely.
 
