@@ -147,12 +147,36 @@ def _names(d):
     return {f.name for f in d.iterdir()}
 
 
-def test_default_run_writes_all_three_views(tmp_path):
+def test_default_run_writes_all_four_views(tmp_path):
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--outdir", str(tmp_path)]) == 0
     assert _names(tmp_path) == {"banktran.json",            # the faithful machine
                                 "banktran.business.json",   # the distillation
-                                "banktran.lineage.json"}    # the field table
+                                "banktran.lineage.json",    # the field table
+                                "banktran.reactive.json"}   # what replaces it
+
+
+def test_a_refused_reactive_view_does_not_take_the_run_down(tmp_path):
+    """The reactive lowering refuses CICS handler regions. On a default run that is a
+    fact about the program, not a failure of the run: the other views must still land."""
+    src = Path(__file__).resolve().parents[1] / "examples" / "cicsinq.cbl"
+    assert run([str(src), "--outdir", str(tmp_path)]) == 0
+    names = _names(tmp_path)
+    assert "cicsinq.json" in names and "cicsinq.business.json" in names
+    assert "cicsinq.reactive.json" not in names       # refused, and said so
+
+
+def test_explicit_reactive_target_on_a_refused_program_errors_cleanly(tmp_path, capsys):
+    src = Path(__file__).resolve().parents[1] / "examples" / "cicsinq.cbl"
+    assert run([str(src), "--target", "reactive", "--outdir", str(tmp_path)]) == 3
+    assert "type:parallel" in capsys.readouterr().err   # the reason, not a traceback
+
+
+def test_no_reactive_opts_out(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--no-reactive", "--outdir", str(tmp_path)]) == 0
+    assert "banktran.reactive.json" not in _names(tmp_path)
+    assert "banktran.json" in _names(tmp_path)
 
 
 def test_the_three_views_are_each_well_formed(tmp_path):
@@ -183,12 +207,13 @@ def test_the_three_views_are_each_well_formed(tmp_path):
 def test_no_business_opts_out_of_just_that_view(tmp_path):
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--no-business", "--outdir", str(tmp_path)]) == 0
-    assert _names(tmp_path) == {"banktran.json", "banktran.lineage.json"}
+    assert _names(tmp_path) == {"banktran.json", "banktran.lineage.json",
+                                "banktran.reactive.json"}
 
 
 def test_both_opt_outs_leave_only_the_bundle(tmp_path):
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
-    assert run([str(src), "--no-business", "--no-lineage",
+    assert run([str(src), "--no-business", "--no-lineage", "--no-reactive",
                 "--outdir", str(tmp_path)]) == 0
     assert _names(tmp_path) == {"banktran.json"}
 
@@ -212,7 +237,7 @@ def test_dotted_source_name_keeps_companions_matched(tmp_path):
     out = tmp_path / "o"
     assert run([str(src), "--outdir", str(out)]) == 0
     assert _names(out) == {"MY.PROG.json", "MY.PROG.business.json",
-                           "MY.PROG.lineage.json"}
+                           "MY.PROG.lineage.json", "MY.PROG.reactive.json"}
 
 
 def test_companion_never_overwrites_the_bundle(tmp_path):
@@ -224,7 +249,7 @@ def test_companion_never_overwrites_the_bundle(tmp_path):
     out = tmp_path / "o"
     assert run([str(src), "--outdir", str(out)]) == 0
     names = _names(out)
-    assert len(names) == 3, f"an artifact was clobbered: {names}"
+    assert len(names) == 4, f"an artifact was clobbered: {names}"
     # the bundle survives and is still the FAITHFUL machine, not the distillation
     bundle = json.loads((out / "ACCT.business.json").read_text(encoding="utf-8"))
     assert bundle["metadata"].get("view") is None
@@ -233,4 +258,4 @@ def test_companion_never_overwrites_the_bundle(tmp_path):
 def test_explicit_output_path_carries_matched_companions(tmp_path):
     assert run([str(EXAMPLES_CBL), "-o", str(tmp_path / "custom.json")]) == 0
     assert _names(tmp_path) == {"custom.json", "custom.business.json",
-                                "custom.lineage.json"}
+                                "custom.lineage.json", "custom.reactive.json"}

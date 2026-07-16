@@ -90,9 +90,10 @@ file-association surprises entirely.
 cobol-xstate examples/custrpt.cbl --summary
 ```
 
-This writes **three files** — `./custrpt.json` (the faithful machine),
-`./custrpt.business.json` (the business distillation) and `./custrpt.lineage.json` (the
-field table) — and prints a summary to stderr:
+This writes **four JSON views** — `./custrpt.json` (the faithful machine),
+`./custrpt.business.json` (the business distillation), `./custrpt.lineage.json` (the
+field table) and `./custrpt.reactive.json` (the event-driven machine) — and prints a
+summary to stderr:
 
 ```
 [custrpt.cbl] detected source format = fixed (97%: column 7 is a valid indicator on all 40 lines, incl. 5 comment/continuation line(s))
@@ -158,11 +159,15 @@ cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
                                                 #  + build/charts/prog.lineage.json
 ```
 
-### `--no-lineage` / `--no-business`
+### `--no-lineage` / `--no-business` / `--no-reactive`
 
-Skip a companion. A default run writes all three views because they answer different
+Skip a companion. A default run writes all four views because they answer different
 questions about the same program and are normally read together; these opt out when you
-want fewer. `--machine-only` suppresses both.
+want fewer. `--machine-only` suppresses all of them.
+
+A program the reactive lowering refuses (CICS handler regions, recursive `PERFORM`) gets
+no `.reactive.json` and a note on stderr — the refusal is a fact about that program, not
+a failure of the run, so the other three views still land.
 
 ### `--target {json,js,reactive,business}`
 
