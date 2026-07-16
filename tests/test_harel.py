@@ -1,4 +1,6 @@
-"""Stage 7: the emitted contract is a true Harel statechart.
+"""Stage 7: the emitted contract is a Harel-derived statechart (a real statechart, in
+XState v5 - which is a restricted subset of Harel, so negated events / activities /
+static reactions stay encoded rather than expressed).
 
 The compiler's IR is a flat FSM with mangled names, PERFORM as a marker action, and
 source-order fall-through between paragraphs. That is convenient to analyse but it is not

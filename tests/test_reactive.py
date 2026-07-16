@@ -77,12 +77,26 @@ def test_response_branch_waits_then_evaluates_existing_guards():
     assert edges[1]["target"] == "0000-MAIN__seq4"
 
 
-def test_recv_ops_assign_event_fields():
+def test_recv_ops_store_arriving_fields_through_their_picture():
+    """A record does not become exempt from COBOL data semantics by arriving as an event:
+    an inbound field is stored through the same PICTURE rules as any internal MOVE."""
     mod = emit_reactive_module(_machine("sqlsel.cbl"))
-    assert ('"recv_GET_DB2_CUSTOMER": (context, event) => '
-            '({ "WS-NAME": event["WS-NAME"], "WS-BALANCE": event["WS-BALANCE"] })') in mod
-    assert ('"recv_GET_RESPONSE_DB2": (context, event) => '
-            '({ "SQLCODE": event["SQLCODE"] })') in mod
+    # alphanumeric -> storeStr with the field's spec (so PIC X(20) pads, as a MOVE would)
+    assert ('"WS-NAME": event["WS-NAME"] !== undefined ? '
+            'storeStr(event["WS-NAME"], FIELDS["WS-NAME"]) : context["WS-NAME"]') in mod
+    # numeric -> decimal store, quantized to digits/scale
+    assert ('"WS-BALANCE": event["WS-BALANCE"] !== undefined ? '
+            'store(D(String(event["WS-BALANCE"])), FIELDS["WS-BALANCE"]) '
+            ': context["WS-BALANCE"]') in mod
+    assert ('"SQLCODE": event["SQLCODE"] !== undefined ? '
+            'store(D(String(event["SQLCODE"])), FIELDS["SQLCODE"])') in mod
+
+
+def test_recv_op_leaves_context_alone_for_a_field_the_event_omits():
+    # D(undefined) would throw; a missing field must simply not be assigned.
+    mod = emit_reactive_module(_machine("sqlsel.cbl"))
+    assert 'event["WS-NAME"] !== undefined ?' in mod
+    assert ': context["WS-NAME"]' in mod
 
 
 def test_manifest_lists_inbound_events_and_no_flags():
@@ -144,7 +158,9 @@ def test_reactive_slice_runs_by_sending_events(repo_tmp):
         "{ console.error('cust-id', s.context['WS-CUST-ID']); process.exit(1); }\n"
         "  a.send({ type: 'GET.DB2.CUSTOMER', 'WS-NAME': 'ACME CORP', 'WS-BALANCE': '250.00' });\n"
         "  s = a.getSnapshot();\n"
-        "  if (s.context['WS-NAME'] !== 'ACME CORP') "
+        # WS-NAME is PIC X(20): the arriving value is stored through its PICTURE, so it
+        # is space-padded exactly as an internal MOVE would leave it.
+        "  if (s.context['WS-NAME'] !== 'ACME CORP'.padEnd(20)) "
         "{ console.error('name', JSON.stringify(s.context['WS-NAME'])); process.exit(1); }\n"
         "  if (s.context['WS-BALANCE'] !== '250.00') "
         "{ console.error('bal', s.context['WS-BALANCE']); process.exit(1); }\n"
@@ -164,3 +180,198 @@ def test_reactive_slice_runs_by_sending_events(repo_tmp):
     r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
                        cwd=str(repo_tmp), timeout=30)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# PERFORM: flattened into ONE machine, so queue events reach every state
+# --------------------------------------------------------------------------- #
+
+def _cfg(name):
+    return _extract(emit_reactive_module(_machine(name)), "machineConfig")
+
+
+def test_perform_becomes_set_return_then_jump():
+    cfg = _cfg("custrpt.cbl")
+    st = cfg["states"]["0000-MAIN"]
+    assert st["entry"] == ["set_ret_1000-INIT_at_0000-MAIN"]      # record where to return
+    assert st["always"][0]["target"] == "1000-INIT__1000-INIT"    # ...then enter the callee
+    assert not any(a.startswith("perform_")                       # no marker survives
+                   for s in cfg["states"].values()
+                   for a in (s.get("entry", []) or []))
+
+
+def test_return_dispatch_is_a_real_guard_not_an_external_stub():
+    mod = emit_reactive_module(_machine("custrpt.cbl"))
+    cfg = _extract(mod, "machineConfig")
+    ret = cfg["states"]["1000-INIT__RET"]
+    edge = ret["always"][0]
+    assert edge["guard"] == "ret_1000-INIT_at_0000-MAIN"
+    assert edge["target"] == "0000-MAIN__k1"                      # the call site's continuation
+    # the guard must be evaluable, never left to the external channel
+    assert '"ret_1000-INIT_at_0000-MAIN": (context) => rel(context["RET-1000-INIT"]' in mod
+    assert "ret_1000-INIT_at_0000-MAIN" not in _extract_list(mod, "externalGuards")
+
+
+def _extract_list(module: str, name: str):
+    import json as _j
+    import re as _re
+    m = _re.search(rf"export const {name} = (\[.*?\]);", module, _re.S)
+    return _j.loads(m.group(1))
+
+
+def test_ret_field_is_typed_and_seeded():
+    mod = emit_reactive_module(_machine("custrpt.cbl"))
+    fields = _extract(mod, "FIELDS")
+    assert fields["RET-1000-INIT"] == {"category": "alphanumeric"}   # no len: must not pad
+    assert _extract(mod, "machineConfig")["context"]["RET-1000-INIT"] == ""
+
+
+def test_open_input_is_not_lowered_to_a_wait():
+    """OPEN INPUT classifies as a get/file but delivers no record. Lowering it would
+    block forever - and swallow the first real record when one arrived."""
+    cfg = _cfg("custrpt.cbl")
+    opener = cfg["states"]["1000-INIT__1000-INIT"]
+    assert opener["entry"] == ["OPEN_INPUT_CUST-FILE"]    # stays a plain effect
+    assert "on" not in opener                             # ...and does not wait
+    assert "GET.FILE.CUST-FILE" in cfg["states"]["1000-INIT__1000-INIT__io5"]["on"]
+
+
+def test_read_wait_also_accepts_end_of_stream():
+    cfg = _cfg("custrpt.cbl")
+    on = cfg["states"]["1000-INIT__1000-INIT__io5"]["on"]
+    assert set(on) == {"GET.FILE.CUST-FILE", "END.FILE.CUST-FILE"}
+    # both land on the same state, where the AT END guard then branches
+    assert on["GET.FILE.CUST-FILE"]["target"] == on["END.FILE.CUST-FILE"]["target"]
+
+
+def test_end_recv_raises_the_at_end_flag_the_guards_read():
+    mod = emit_reactive_module(_machine("custrpt.cbl"))
+    assert '"recv_END_FILE_CUST_FILE"' in mod
+    assert 'ext["CUST-FILE_atEnd"] = true;' in mod
+    assert "CUST-FILE_atEnd" in _extract_list(mod, "externalGuards")
+
+
+def test_negated_external_is_exported_so_not_at_end_is_the_record_path():
+    mod = emit_reactive_module(_machine("notend.cbl"))
+    assert '"IN-FILE_notAtEnd": "IN-FILE_atEnd"' in mod
+
+
+def test_recursive_perform_is_refused_not_flattened_wrong():
+    """One return-address field per paragraph cannot survive re-entrancy."""
+    with pytest.raises(NotImplementedError, match="recursive PERFORM cycle"):
+        emit_reactive_module(_machine("recur.cbl"))
+
+
+def test_two_reads_in_one_state_become_two_waits():
+    cfg = _cfg("twogets.cbl")
+    assert "GET.CONSOLE.SYSIN" in cfg["states"]["0000-MAIN"]["on"]
+    assert "GET.CONSOLE.SYSIN" in cfg["states"]["0000-MAIN__g1"]["on"]
+    mod = emit_reactive_module(_machine("twogets.cbl"))
+    # distinct recv actions: same event name, different fields
+    assert '"recv_GET_CONSOLE_SYSIN": (context, event) => ({ "WS-A"' in mod
+    assert '"recv_GET_CONSOLE_SYSIN_2": (context, event) => ({ "WS-B"' in mod
+
+
+def test_no_perform_flag_once_performs_are_resolved():
+    manifest = _extract(emit_reactive_module(_machine("custrpt.cbl")), "manifest")
+    assert not any("PERFORM" in f for f in manifest["flags"])
+    assert manifest["inbound"] == ["GET.FILE.CUST-FILE", "END.FILE.CUST-FILE"]
+    # the inline map traces a flattened state id back to its paragraph
+    assert manifest["inline"]["1000-INIT"]["states"]["1000-INIT__1000-INIT__io5"] \
+        == "1000-INIT__io5"
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_structured_batch_runs_on_events_alone(repo_tmp):
+    """THE headline: custrpt is PERFORM-structured (its READ lives inside a performed
+    paragraph), so before flattening its logic never ran here at all. Drive it purely by
+    sending record events + end-of-stream, and it must reach the same exact decimal total
+    the synchronous golden master produces (test_golden_master.py: '113.20')."""
+    (repo_tmp / "machine.mjs").write_text(emit_reactive_module(_machine("custrpt.cbl")))
+    (repo_tmp / "cobolRuntime.mjs").write_text(RUNTIME.read_text())
+    (repo_tmp / "drive.mjs").write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "function run(amts) {\n"
+        "  const a = createActor(machine); a.start();\n"
+        "  for (const v of amts) a.send({ type: 'GET.FILE.CUST-FILE', 'CUST-AMT': v });\n"
+        "  a.send({ type: 'END.FILE.CUST-FILE' });\n"
+        "  return a.getSnapshot();\n"
+        "}\n"
+        "const s = run(['0.10','0.20','100.55','12.34','0.01']);\n"
+        "if (s.status !== 'done') { console.error('status', s.status); process.exit(1); }\n"
+        "if (s.context['WS-TOTAL'] !== '113.20') "
+        "{ console.error('total', s.context['WS-TOTAL']); process.exit(1); }\n"
+        "const e = run([]);\n"                      # empty stream: END arrives first
+        "if (e.status !== 'done' || e.context['WS-TOTAL'] !== '0') "
+        "{ console.error('empty', e.status, e.context['WS-TOTAL']); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = subprocess.run([NODE, str(repo_tmp / "drive.mjs")], capture_output=True,
+                       text=True, cwd=str(repo_tmp), timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_not_at_end_body_runs_per_record_on_events(repo_tmp):
+    """notend's NOT AT END path is the per-record path: it must fire for every record
+    delivered and stop at end-of-stream. Matches the synchronous golden master."""
+    (repo_tmp / "machine.mjs").write_text(emit_reactive_module(_machine("notend.cbl")))
+    (repo_tmp / "cobolRuntime.mjs").write_text(RUNTIME.read_text())
+    (repo_tmp / "drive.mjs").write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n"
+        "for (const v of ['1.50','2.25','3.00']) "
+        "a.send({ type: 'GET.FILE.IN-FILE', 'IN-AMT': v });\n"
+        "a.send({ type: 'END.FILE.IN-FILE' });\n"
+        "const s = a.getSnapshot();\n"
+        "const want = { 'WS-CNT': '3', 'WS-SUM': '6.75', 'WS-EOF': 'Y' };\n"
+        "for (const k in want) if (String(s.context[k]) !== want[k]) "
+        "{ console.error(k, s.context[k], 'want', want[k]); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = subprocess.run([NODE, str(repo_tmp / "drive.mjs")], capture_output=True,
+                       text=True, cwd=str(repo_tmp), timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _run_reactive(tmp, name, driver_body):
+    (tmp / "machine.mjs").write_text(emit_reactive_module(_machine(name)))
+    (tmp / "cobolRuntime.mjs").write_text(RUNTIME.read_text())
+    (tmp / "drive.mjs").write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n" + driver_body)
+    return subprocess.run([NODE, str(tmp / "drive.mjs")], capture_output=True,
+                          text=True, cwd=str(tmp), timeout=30)
+
+
+def _expect(want):
+    return ("const s = a.getSnapshot();\n"
+            f"const want = {json.dumps(want)};\n"
+            "if (s.status !== 'done') { console.error('status', s.status); process.exit(1); }\n"
+            "for (const k in want) if (String(s.context[k]) !== want[k]) "
+            "{ console.error(k, s.context[k], 'want', want[k]); process.exit(1); }\n"
+            "process.exit(0);\n")
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_return_dispatch_sends_control_back_to_the_right_call_site(repo_tmp):
+    """retdisp PERFORMs 9000-BUMP from three sites - two in the main flow and one from
+    inside an inlined THRU range. A wrong return address gives a different total, so the
+    arithmetic is the proof that the dispatch guards actually dispatch.
+    0 +1 =1, x10 =10, +1 =11, +100 =111, +1 =112, +2 =114."""
+    r = _run_reactive(repo_tmp, "retdisp.cbl", _expect({"WS-N": "114"}))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_section_and_thru_range_are_inlined(repo_tmp):
+    # no I/O at all: these must run to completion on microsteps alone
+    assert _run_reactive(repo_tmp, "sectperf.cbl",
+                         _expect({"WS-A": "12", "WS-B": "12"})).returncode == 0
+    assert _run_reactive(repo_tmp, "thrurange.cbl",
+                         _expect({"WS-N": "123"})).returncode == 0
+    assert _run_reactive(repo_tmp, "accum.cbl",
+                         _expect({"WS-I": "5", "WS-SUM": "15"})).returncode == 0

@@ -1,4 +1,11 @@
-"""Stage 7 - the emitted contract as a true Harel statechart.
+"""Stage 7 - the emitted contract as a Harel-derived statechart (XState v5).
+
+XState is a *restricted subset* of Harel, not Harel: it has no negated/compound events,
+no durative activities, and no static reactions as primitives. This module does not
+change that - it makes the contract a real *statechart* (hierarchy, resolved call/return,
+no phantom edges) within what the target can express, and the losses stay named rather
+than papered over.
+
 
 The compiler's working representation (``Machine.config``) is deliberately **flat**: one
 state per program point, structure encoded in mangled names (``0000-MAIN__loop3``), and
