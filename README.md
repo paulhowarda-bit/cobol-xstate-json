@@ -294,6 +294,20 @@ deliberately explicit about the gap (the skill's core principle — don't preten
 When in doubt, the tool flags rather than guesses. Treat every `flags` entry as a spot
 that needs a human against the original source.
 
+## What's next: the state axis
+
+Every target above answers *"what does this **program** do?"*. A migration needs the
+transpose — *"what happens to the **balance**, across every program?"* — because one piece
+of state is affected by many programs, so **the new system's service boundaries will not
+match the old program boundaries**.
+
+[**docs/state-graph-plan.md**](docs/state-graph-plan.md) is the build spec: emit the join
+keys here (the SQL column↔host-variable mapping; `program`/`member`/`file` on lineage
+rows), then load N bundles into a **Neo4j graph** — where *"which programs affect the
+balance"* is one hop and *"where are the service boundaries"* is community detection.
+Identity is **provable only** (copybook / file / table.column); anything unproven is an
+explicit work list, never a guess.
+
 ## Development
 
 ```bash
