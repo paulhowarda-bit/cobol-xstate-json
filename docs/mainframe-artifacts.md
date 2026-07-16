@@ -200,20 +200,28 @@ target come from.
 
 # Which of these need a statechart?
 
-Almost none of them. A statechart is expensive and only earns it where **all three** hold:
+A statechart is expensive and only earns it where **all three** hold:
 
 1. the logic is **business-meaningful**;
-2. it is **not recoverable by reading the source** — no tests, no types, decades of drift;
+2. there is **no trustworthy spec** — the behavior is known only by running it;
 3. you must **rewrite it and prove the rewrite equivalent**.
 
-COBOL hits all three, which is why this tool exists. Nothing else in the estate does, and
-each fails for a *different* reason — so the right treatment differs too:
+> **Test 2 is not "is the syntax cryptic."** An earlier draft of this document used
+> *readability*, and got Java wrong as a result. COBOL's individual lines are perfectly
+> readable — `ADD CUST-AMT TO WS-TOTAL` is not cryptic. What forces a chart is control
+> flow across thousands of lines with no spec anyone trusts. **Legible syntax is not
+> recovered behavior**, and any language can fail this test at scale.
 
-| | Business logic? | Unreadable? | Rewriting it? | Verdict |
+| | Business logic? | No trustworthy spec? | Rewriting it? | Verdict |
 |---|---|---|---|---|
-| **ASM** | sometimes | yes | usually **replaced**, not rewritten | Interface only — never chart the body |
-| **Java** | yes | **no** | usually not | In the graph, no chart |
+| **ASM** | sometimes | yes | usually **replaced**, not rewritten | Interface only. A faithful auto-chart is **not constructible** from ASM anyway — see below |
+| **Java** | yes | **yes, at scale** | often | **Needs a machine.** Separate front end, same schema |
 | **Macros** | *not a program* | — | — | Expand it; charting it is a category error |
+
+Note the ASM row fails on a *different axis* from the others: even where all three tests
+pass, this method cannot produce a faithful chart from ASM, because there is no data
+division to recover semantics from. That is a capability limit, not a judgement about
+whether it would be useful.
 
 ## ASM
 
@@ -254,29 +262,57 @@ charts.
 
 ## Java
 
-Java is usually **not the thing you are recovering** — it is the strangler layer someone
-already built. It lives in a JZOS batch step, in CICS Liberty via JCICS, in a Db2 Java
-stored procedure, or in WebSphere. It is closer to your target architecture than to your
-source material.
+**Java needs a machine.** It lives in a JZOS batch step, in CICS Liberty via JCICS, in a
+Db2 Java stored procedure, or in WebSphere — and wherever it is, it is a program that
+changes state under conditions, which is the same thing a COBOL program is.
 
-But **it must be in the graph**, and this is the part that is easy to get wrong: a Java
-service reading `CUSTOMER.BAL` affects the collected balance exactly as much as a COBOL
-program does. Leave it out and your boundary analysis is confidently wrong — you will
-draw a service boundary straight through a piece of state Java is already writing.
+**Why the graph alone is not enough.** The tempting answer is "put Java in the state graph
+and skip the chart". That produces an **asymmetric model of the very state you are trying
+to model**. The graph gives *identity* — Java touches the balance. Only the machine gives
+*behavior and conditions*. Merge them and COBOL contributes
 
-Two things make this cheap:
+> adds to the balance **when** the transaction is a deposit and the account is active
 
-- **Its identity resolves more easily than COBOL's.** JDBC has the table and column right
-  there in the SQL; JPA/Hibernate entities map field→column *declaratively*; file access
-  uses real paths, not ddnames. The whole Role-1 resolver problem barely applies.
-- **Part 2 reads only the published JSON.** The bundle is a published interface precisely
-  so the corpus tool never parses source. So Java participates via an **adapter that emits
-  the same schema** — it does not need this tool, and this tool should not grow a Java
-  front end.
+while Java contributes
 
-Do not chart it. It fails test (2) outright: it is readable, testable, and already served
-by mature static-analysis tooling. Spending statechart effort there is spending it where
-the problem is not.
+> touches the balance
+
+Those do not compose into a requirement. The whole point of the state axis is to combine
+programs into one account of what happens to a piece of state; a participant with no
+conditions is a hole in that account, not a cheap approximation of it. If Java writes the
+balance, its rules are *part of the balance's rules*.
+
+**Where the machine comes from: not this tool.** The output schema is language-neutral —
+it is JSON, and Part 2 reads only JSON, which is exactly why the bundle is a published
+interface. But the *producer* is not neutral. Measured against this repo: `Machine` carries
+`paragraph_order`, `sections`, `PROCEDURE DIVISION USING/RETURNING` and `FILE-CONTROL`
+entries, and every downstream module (`interface`, `business`, `lineage`, `reactive`,
+`emitter`) has 30–61 COBOL-specific references — `_classify` reads COBOL verb text
+directly. There is no clean seam to hang a Java front end on. **A Java front end is a
+separate tool that emits the same four views**, so the machines compose. The contract is
+the schema, not the codebase.
+
+**What is genuinely harder in Java** — and these are the ones where a naive port of this
+tool's analysis would be *silently wrong*, not merely incomplete:
+
+- **Heap aliasing.** COBOL's WORKING-STORAGE is a flat, fixed layout: every field has one
+  name and one place, which is what makes reaching-origins lineage tractable. Java has
+  references — two variables can name one object, and a callee can mutate through an alias.
+  Honest lineage there needs points-to analysis. Skipping it does not produce gaps, it
+  produces confident wrong answers.
+- **Concurrency.** COBOL batch is single-threaded, so a sequential machine is faithful.
+  A thread pool or async pipeline is not sequential, and a sequential chart of it is a lie.
+- **Dynamic dispatch.** `CALL 'LITERAL'` is mostly static. An interface plus dependency
+  injection means the call target is chosen at runtime by configuration — the unresolved-
+  `CALL` problem, but pervasive rather than exceptional.
+- **Decimal semantics.** `BigDecimal` is decimal, which is good news — but its rounding
+  modes are not COBOL's `ROUNDED`. For equivalence-testing a COBOL original against a Java
+  rewrite this is exactly where a golden master earns its keep. And any `double` in
+  financial code is a bug the model should surface, not reproduce.
+
+**What is easier.** Identity resolution barely applies: JDBC has the table and column right
+there in the SQL, JPA/Hibernate map field→column declaratively, and file access uses real
+paths rather than ddnames. Almost the whole of Role 1 evaporates.
 
 ## Macros
 
@@ -316,7 +352,7 @@ Not "everything, comprehensively" — the order is chosen so each step removes a
 | **3** | Scheduler dependencies | Completes the batch choreography beyond the job boundary. |
 | **4** | ASM *interfaces* (CSECT/ENTRY/DSECT), Easytrieve, triggers | Coverage of remaining behavior. Bounds the `maybe` origins a `CALL` already reports; does not chart the ASM. |
 | — | **HLASM macro library** | Slot at tier 0 **the moment you read any ASM** — without it an ASM program appears to touch no data. |
-| — | **Java** | Not this tool's job. Needs a bundle-emitting adapter so it joins the same graph — but omit it and the boundaries are wrong wherever Java already writes state. |
+| — | **Java** | Needs its **own front end emitting the same four views** — a separate tool; this repo's back half is COBOL-shaped. Slot it by how much state Java already owns: if Java writes the balance, its machine is part of the balance's rules and this is not tier 4. |
 | — | IMS DBD/PSB/PCB | Slot at tier 0–1 **if this is an IMS shop** — then it is a resolver, not optional. |
 
 ## The rule that does not change
