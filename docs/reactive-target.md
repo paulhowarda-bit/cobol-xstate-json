@@ -82,6 +82,20 @@ For each perimeter state `S` (driven off `interface.perimeterStates` + `interfac
 is reused verbatim from the faithful emitter, so decimal arithmetic and the data dictionary
 are unchanged.
 
+`--target reactive` writes two files - one lowering, two encodings:
+
+| File | For |
+|---|---|
+| `prog.reactive.json` | **drawing / reviewing** - the XState config plus `interface` and `manifest`. Same shape as the other machine views, so the renderer draws it identically. The waits and publishes on this chart *are* the new system's message contract. |
+| `prog.reactive.mjs` | **running** - the same config plus the decimal ops, guards and `recvOps`, so it executes under stock XState by sending events. |
+
+A test asserts the two carry an identical machine, so the picture cannot drift from the
+thing that runs.
+
+```bash
+cobol-xstate prog.cbl --target reactive
+```
+
 ## PERFORM: flattened into one machine
 
 A queue delivers events to the **root** actor, and XState does not forward them into

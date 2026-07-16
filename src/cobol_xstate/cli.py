@@ -11,7 +11,7 @@ from .business import build_business_view
 from .emitter import emit_setup_module
 from .lineage import build_lineage
 from .normalizer import SourceFormat, detect_source_format
-from .reactive import emit_reactive_module
+from .reactive import build_reactive_view, emit_reactive_module
 from .parser import parse_program
 from .preprocessor import CopybookResolver
 from .runtime_assets import read_runtime_asset
@@ -210,6 +210,14 @@ def run(argv: Optional[List[str]] = None) -> int:
             _write(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
             print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
             print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
+            # The reactive machine is the one you most want to LOOK at - its waits and
+            # publishes are the new system's message contract - so it gets a drawable
+            # JSON beside the runnable module, like every other machine view.
+            if args.target == "reactive":
+                view = out_path.with_name(base + ".reactive.json")
+                _write(view, _json.dumps(build_reactive_view(machine),
+                                         indent=args.indent) + "\n")
+                print(f"[{source_name}] wrote {view}", file=sys.stderr)
     else:
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
         if out_path is None:
