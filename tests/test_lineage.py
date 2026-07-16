@@ -190,3 +190,42 @@ def test_stdout_carries_only_the_bundle(capsys, tmp_path):
     assert run([str(EXAMPLES / "lineage.cbl"), "-o", "-"]) == 0
     out = capsys.readouterr().out
     assert json.loads(out)["format"] == "xstate-v5-config"   # one stream, one document
+
+
+# --------------------------------------------------------------------------- #
+# cross-program join keys: rows from N programs must be concatenable
+# --------------------------------------------------------------------------- #
+
+def test_every_row_names_its_program():
+    """`program` lives on the ROW, not just at the top of the file: rows from many
+    programs get concatenated to answer 'what touches this state?', and a top-level
+    field does not survive that."""
+    d = _lin("custrpt.cbl")
+    assert d["rows"]
+    assert all(r["program"] == "CUSTRPT" for r in d["rows"])
+
+
+def test_copybook_field_carries_its_member_as_the_shared_identity():
+    """A field name is program-LOCAL. What proves two programs touch the same state is a
+    shared declaration - here, the copybook."""
+    from cobol_xstate.parser import CopybookResolver
+    src = (EXAMPLES / "cicsinq.cbl").read_text()
+    m = build_machine(parse_program(src, resolver=CopybookResolver(paths=[str(EXAMPLES)])),
+                      source_name="cicsinq.cbl")
+    rows = {r["field"]: r for r in build_lineage(m)["rows"]}
+    assert rows["CUST-BALANCE"]["member"] == "CUSTREC"
+
+
+def test_file_record_field_carries_its_file():
+    rows = {r["field"]: r for r in _lin("custrpt.cbl")["rows"]}
+    assert rows["CUST-AMT"]["file"] == "CUST-FILE"      # FD children inherit it
+    assert rows["CUST-REC"]["file"] == "CUST-FILE"
+
+
+def test_inline_field_has_no_identity_key_rather_than_a_guessed_one():
+    """WS-TOTAL is declared inline: nothing in the code proves another program's
+    similarly-named field is the same state. It must carry NEITHER key - an honest
+    'unresolvable' beats a plausible match."""
+    rows = {r["field"]: r for r in _lin("custrpt.cbl")["rows"]}
+    ws = rows["WS-TOTAL"]
+    assert "member" not in ws and "file" not in ws
