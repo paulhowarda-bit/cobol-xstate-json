@@ -144,6 +144,14 @@ class ExecStmt(Stmt):
     host_vars: List[str] = field(default_factory=list)   # :WS-FOO references
     conditions: List[str] = field(default_factory=list)  # HANDLE condition names
     into_vars: List[str] = field(default_factory=list)   # SELECT/FETCH ... INTO targets
+    # WHICH COLUMN fills which host variable: [{"column": "BAL", "hostVar": "WS-BAL"}].
+    # A field name is program-local, so this is the only thing that proves two programs
+    # read the same state. Emitted ONLY when the source proves it (see _correlate).
+    columns: List[dict] = field(default_factory=list)
+    # The raw select list (None entries = derived expressions). Set for SELECT and for a
+    # cursor DECLARE, whose columns must be zipped against a later FETCH's host vars.
+    select_list: List[Optional[str]] = field(default_factory=list)
+    column_note: Optional[str] = None     # why the columns could NOT be correlated
 
 
 @dataclass

@@ -49,9 +49,14 @@ _RESPONSE_ITEMS = {"SQLCODE", "SQLSTATE", "SQLERRD", "EIBRESP", "EIBRESP2"}
 # EIB fields the transaction READS as inputs (was I called with a COMMAREA? which PF
 # key? which transaction?) - branching on them consumes CICS-supplied input.
 _EIB_INPUTS = {"EIBCALEN", "EIBAID", "EIBTRNID", "EIBDATE", "EIBTIME", "EIBCPOSN"}
-_SQL_FROM = re.compile(r"\bFROM\s+([A-Z0-9_.$#@-]+)", re.I)
-_SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+([A-Z0-9_.$#@-]+)", re.I)
-_SQL_UPDATE = re.compile(r"\bUPDATE\s+([A-Z0-9_.$#@-]+)", re.I)
+# A table name may be schema-qualified, and the lexer splits `.` into its own token, so
+# the text reads `FROM SCHEMA . ACCOUNT`. Allow the optional qualifier and capture the
+# TABLE - matching only the first word would name the schema as the endpoint, and two
+# programs reading the same table would then look like they read different ones.
+_QUALIFIED = r"(?:[A-Z0-9_$#@-]+\s*\.\s*)?([A-Z0-9_$#@-]+)"
+_SQL_FROM = re.compile(r"\bFROM\s+" + _QUALIFIED, re.I)
+_SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+" + _QUALIFIED, re.I)
+_SQL_UPDATE = re.compile(r"\bUPDATE\s+" + _QUALIFIED, re.I)
 _SQL_HOSTVAR = re.compile(r":\s*([A-Z0-9-]+)", re.I)
 _DECLARE_CURSOR = re.compile(
     r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
@@ -85,11 +90,13 @@ def _event(direction: str, etype: str, endpoint: str) -> str:
     return f"{'GET' if direction == 'get' else 'CREATE'}.{etype.upper()}.{endpoint}"
 
 
-def _hit(direction, etype, endpoint, verb, fields, params=None):
+def _hit(direction, etype, endpoint, verb, fields, params=None, columns=None):
     d = {"direction": direction, "etype": etype, "endpoint": endpoint,
          "verb": verb, "fields": fields}
     if params:
         d["params"] = params
+    if columns:
+        d["columns"] = columns
     return d
 
 
@@ -168,8 +175,33 @@ def _sql_host_vars(text: str) -> List[str]:
     return out
 
 
+def _qualify(columns: Optional[List[dict]], table: str) -> Optional[List[dict]]:
+    """Stamp the table onto each mapping: `BAL` alone is not an identity, `CUST.BAL` is."""
+    if not columns:
+        return None
+    return [{"table": table, **c} for c in columns]
+
+
+def _fetch_columns(up: str, into_fields: List[str],
+                   cursor_cols: Dict[str, List[str]]) -> Optional[List[dict]]:
+    """Correlate a FETCH's host variables against its cursor's select list.
+
+    Same count gate as the parser's: the columns come from one statement and the host
+    variables from another, so only equal lengths prove the correspondence.
+    """
+    m = re.match(r".*?\bFETCH\s+(?:NEXT\s+|PRIOR\s+|FIRST\s+|FROM\s+)*([A-Z0-9_-]+)", up)
+    if not m:
+        return None
+    cols = cursor_cols.get(m.group(1).upper())
+    if not cols or len(cols) != len(into_fields):
+        return None
+    return [{"column": c, "hostVar": h} for c, h in zip(cols, into_fields)
+            if c is not None]
+
+
 def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
-                   cursors: Dict[str, str]) -> List[dict]:
+                   cursors: Dict[str, str],
+                   cursor_cols: Optional[Dict[str, List[str]]] = None) -> List[dict]:
     """Classify an EXEC SQL / CICS / DLI action -> list of boundary hits."""
     up = cobol.upper()
     verb = (spec or {}).get("verb", "")
@@ -187,6 +219,10 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     is_sql = "EXEC SQL" in up or name.startswith("exec_sql")
     is_cics = "EXEC CICS" in up or name.startswith("exec_cics")
 
+    # Which column fills which host variable - the cross-program state identity. The
+    # parser proves it for SELECT/UPDATE; a FETCH's columns live on its cursor's DECLARE.
+    columns = (spec or {}).get("columns") or None
+
     if is_sql:
         if verb in ("SELECT", "FETCH"):
             endpoint = None
@@ -195,17 +231,24 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                               r"([A-Z0-9_-]+)", up)
                 if fm:
                     endpoint = cursors.get(fm.group(1)) or f"<cursor {fm.group(1)}>"
+                if columns is None:
+                    columns = _fetch_columns(up, into_fields, cursor_cols or {})
             if endpoint is None:
                 m = _SQL_FROM.search(up)
                 endpoint = m.group(1) if m else "<cursor>"
             params = [h for h in host_vars if h not in into_fields]
-            return [_hit("get", _DB2, endpoint, verb, into_fields, params)]
+            return [_hit("get", _DB2, endpoint, verb, into_fields, params,
+                         _qualify(columns, endpoint))]
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
-            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
+            ep = m.group(1) if m else "<table>"
+            return [_hit("create", _DB2, ep, verb, host_vars,
+                         columns=_qualify(columns, ep))]
         if verb == "UPDATE":
             m = _SQL_UPDATE.search(up)
-            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
+            ep = m.group(1) if m else "<table>"
+            return [_hit("create", _DB2, ep, verb, host_vars,
+                         columns=_qualify(columns, ep))]
         if verb == "DELETE":
             m = _SQL_FROM.search(up)
             return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
@@ -275,13 +318,19 @@ _OPEN_MODES = re.compile(r"\b(INPUT|OUTPUT|I-O|EXTEND)\b((?:\s+[A-Z0-9-]+)+)", r
 
 
 def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
-              files: Dict[str, dict], cursors: Dict[str, str]) -> List[dict]:
-    """Classify one entry action -> list of boundary hits (empty if internal)."""
+              files: Dict[str, dict], cursors: Dict[str, str],
+              cursor_cols: Optional[Dict[str, List[str]]] = None) -> List[dict]:
+    """Classify one entry action -> list of boundary hits (empty if internal).
+
+    ``cursor_cols`` is optional: only the interface build needs a FETCH correlated to its
+    cursor's columns, so the other callers (lineage, business, reactive) pass nothing and
+    are unaffected.
+    """
     up = (cobol or "").upper().strip()
     verb = up.split()[0] if up else ""
 
     if verb == "EXEC" or name.startswith(("exec_sql", "exec_cics", "exec_dli")):
-        return _classify_exec(name, up, spec, dv, cursors)
+        return _classify_exec(name, up, spec, dv, cursors, cursor_cols)
 
     io = spec if (spec or {}).get("kind") == "io" else {}
 
@@ -492,6 +541,29 @@ def _cursor_tables(provenance: dict) -> Dict[str, str]:
     return out
 
 
+def _cursor_columns(semantics: dict, provenance: dict) -> Dict[str, List[str]]:
+    """cursor-name -> its select list, so a FETCH can be correlated to real columns.
+
+    A cursor splits the information in two: ``DECLARE c CURSOR FOR SELECT ID, BAL FROM t``
+    has the columns, ``FETCH c INTO :WS-ID, :WS-BAL`` has the host variables. Neither
+    statement alone says which column fills which variable. Kept as its OWN map rather
+    than widening ``_cursor_tables`` - three call sites depend on that one's values being
+    plain table names.
+    """
+    out: Dict[str, List[str]] = {}
+    actions = (semantics or {}).get("actions", {})
+    for name, spec in actions.items():
+        if not isinstance(spec, dict) or spec.get("verb") != "DECLARE":
+            continue
+        cols = spec.get("selectList")
+        if not cols:
+            continue
+        m = _DECLARE_CURSOR.search((provenance.get(name) or {}).get("cobol", "") or "")
+        if m:
+            out[m.group(1).upper()] = cols
+    return out
+
+
 def build_interface(config: dict, semantics: dict, provenance: dict,
                     data: Optional[dict] = None, using: Optional[List[str]] = None,
                     returning: Optional[str] = None,
@@ -510,6 +582,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     files = files or {}
     dv = _DataView(data)
     cursors = _cursor_tables(provenance)
+    cursor_cols = _cursor_columns(semantics, provenance)
     linkage_all = {n.upper() for n, it in (data or {}).items()
                    if isinstance(it, dict) and it.get("section") == "LINKAGE"}
     # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and
@@ -529,6 +602,12 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         }
         if hit.get("params"):
             entry["params"] = hit["params"]
+        if hit.get("columns"):
+            # NOTE: this dict is rebuilt key-by-key, so a new key on the hit is dropped
+            # unless it is copied here. lineage/business read the hit directly, so
+            # forgetting this would make the mapping appear to work in two of three
+            # places - the worst kind of bug to chase.
+            entry["columns"] = hit["columns"]
         events.append(entry)
         slot = perimeter.setdefault(
             state, {"region": region, "gets": [], "creates": []})
@@ -550,7 +629,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             cobol = prov.get("cobol", "")
             line = prov.get("line", 0)
             spec = actions.get(aname)
-            hits = _classify(aname, cobol, spec, dv, files, cursors)
+            hits = _classify(aname, cobol, spec, dv, files, cursors, cursor_cols)
             for hit in hits:
                 add(state, region, hit, line, cobol)
             if not hits:

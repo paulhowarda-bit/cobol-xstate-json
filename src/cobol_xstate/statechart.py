@@ -266,6 +266,22 @@ def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
     return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}{args}", st.line)
 
 
+def _with_columns(spec: dict, st: ExecStmt) -> dict:
+    """Carry the SQL column<->host-variable mapping onto the action spec.
+
+    This is the cross-program state identity: a host-variable NAME is program-local, but
+    a column name is the database's, shared by every program that reads it. Emitted only
+    when the source proves the correspondence (see parser._correlate).
+    """
+    if st.columns:
+        spec["columns"] = st.columns
+    if st.select_list:
+        spec["selectList"] = st.select_list      # a cursor DECLARE's columns, for its FETCH
+    if st.column_note:
+        spec["columnNote"] = st.column_note
+    return spec
+
+
 def _io_action(st: IoStmt, reg: NameRegistry) -> str:
     base = f"{st.verb.lower()}_{st.file or 'file'}"
     label = f"{st.verb} {st.file or ''}".strip()
@@ -465,17 +481,23 @@ class _ParaCompiler:
         if st.kind == "input" and st.into_vars:
             # SELECT/FETCH ... INTO: the DB row populates the host variables - a real
             # (external-sourced) assignment to each, not an opaque effect.
-            self.ctx.action_sem[name] = {
+            spec = {
                 "verb": st.verb, "kind": "input",
                 "assignments": [{"target": v, "expr": "<external: SQL row>"}
                                 for v in st.into_vars],
                 "raw": f"EXEC {st.lang} {st.text} END-EXEC",
             }
+            self.ctx.action_sem[name] = _with_columns(spec, st)
         else:
-            self.ctx.action_sem.setdefault(name, {
+            self.ctx.action_sem.setdefault(name, _with_columns({
                 "verb": st.verb, "kind": f"exec-{st.lang.lower()}",
                 "hostVars": st.host_vars, "raw": f"EXEC {st.lang} {st.text} END-EXEC",
-            })
+            }, st))
+        if st.column_note:
+            self.ctx.flag(self.pname, st.line,
+                          f"EXEC {st.lang} {st.verb}: column<->host-variable mapping not "
+                          f"recovered ({st.column_note}); cross-program state identity "
+                          f"for these fields is unresolved")
         if st.kind == "handle":
             self.ctx.flag(self.pname, st.line,
                           f"EXEC {st.lang} {st.verb} registers implicit handler(s) "

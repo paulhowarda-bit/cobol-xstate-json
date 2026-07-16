@@ -975,6 +975,9 @@ class StmtParser:
 
         kind, target, conditions = "effect", None, []
         into_vars: List[str] = []
+        columns: List[dict] = []
+        select_list: List[Optional[str]] = []
+        column_note: Optional[str] = None
         if lang == "CICS":
             if verb in ("RETURN", "ABEND"):
                 kind = "terminate"
@@ -994,9 +997,142 @@ class StmtParser:
                 into_vars = self._exec_into_vars(toks)
                 if into_vars:
                     kind = "input"
+                # ...and WHICH COLUMN fills each one - the only thing that proves two
+                # programs read the same state. A FETCH's columns live on its cursor's
+                # DECLARE, so it is correlated later (see interface._cursor_columns).
+                if verb == "SELECT":
+                    select_list, column_note = self._exec_select_columns(toks)
+                    columns, column_note = self._correlate(select_list, into_vars,
+                                                           column_note)
+            elif verb == "DECLARE":
+                # DECLARE c CURSOR FOR SELECT cols FROM t: the columns are here, but the
+                # host variables are on the FETCH. Carry the list; the FETCH zips it.
+                select_list, column_note = self._exec_select_columns(toks)
+            elif verb == "UPDATE":
+                columns = self._exec_update_sets(toks)
         return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
                         target=target, host_vars=host_vars, conditions=conditions,
-                        into_vars=into_vars)
+                        into_vars=into_vars, columns=columns, select_list=select_list,
+                        column_note=column_note)
+
+    # -- SQL column <-> host-variable correlation ---------------------------
+    #
+    # Which COLUMN a host variable receives is what proves two programs touch the same
+    # state: A's `SELECT BAL INTO :WS-BALANCE` and B's `SELECT BAL INTO :CUST-BAL` are the
+    # same balance, and nothing else in the recovery says so. Parsed HERE, on the token
+    # list, because ExecStmt.text is space-joined tokens - re-parsing that string loses
+    # paren depth, and `SUM(A,B)` / `SUBSTR(X,1,3)` break a naive comma split.
+
+    @staticmethod
+    def _split_top_commas(toks: List[Token]) -> List[List[Token]]:
+        """Split a token run on commas at paren depth 0, so `SUM(A,B)` stays one item."""
+        out: List[List[Token]] = []
+        cur: List[Token] = []
+        depth = 0
+        for t in toks:
+            if t.kind == "punct" and t.text == "(":
+                depth += 1
+            elif t.kind == "punct" and t.text == ")":
+                depth -= 1
+            elif t.kind == "punct" and t.text == "," and depth == 0:
+                out.append(cur)
+                cur = []
+                continue
+            cur.append(t)
+        if cur:
+            out.append(cur)
+        return out
+
+    @staticmethod
+    def _column_of(item: List[Token]) -> Optional[str]:
+        """The column one select-list item names, or None if it is *derived* (an
+        expression such as `SUM(X)` - it occupies a slot but is not a column)."""
+        for i, t in enumerate(item):            # drop a trailing `AS alias`
+            if t.kind == "word" and t.up == "AS":
+                item = item[:i]
+                break
+        item = [t for t in item if not (t.kind == "punct" and t.text in "()")] or item
+        if len(item) == 1 and item[0].kind == "word":
+            return item[0].up                                   # BAL
+        if (len(item) == 3 and item[0].kind == "word"           # T.BAL -> BAL
+                and item[1].kind == "period" and item[2].kind == "word"):
+            return item[2].up
+        return None
+
+    @classmethod
+    def _exec_select_columns(cls, toks: List[Token]) -> Tuple[List[Optional[str]], Optional[str]]:
+        """The select list between SELECT and INTO/FROM, as column names (None = derived).
+        Returns ``(columns, note)``; a note means the list cannot be correlated at all."""
+        start = None
+        for i, t in enumerate(toks):
+            if t.kind == "word" and t.up == "SELECT":
+                start = i + 1
+                break
+        if start is None:
+            return [], None
+        end = len(toks)
+        for i in range(start, len(toks)):
+            if toks[i].kind == "word" and toks[i].up in ("INTO", "FROM"):
+                end = i
+                break
+        sel = toks[start:end]
+        if sel and sel[0].kind == "word" and sel[0].up in ("DISTINCT", "ALL"):
+            sel = sel[1:]
+        if any(t.kind == "punct" and t.text == "*" for t in sel):
+            return [], ("SELECT * : the column list is not in the source; resolving it "
+                        "needs the Db2 catalog")
+        return [cls._column_of(item) for item in cls._split_top_commas(sel)], None
+
+    @classmethod
+    def _exec_update_sets(cls, toks: List[Token]) -> List[dict]:
+        """`UPDATE t SET c = :h, c2 = :h2` -> the pairs. Explicit, not positional: the
+        highest-fidelity shape there is."""
+        start = None
+        for i, t in enumerate(toks):
+            if t.kind == "word" and t.up == "SET":
+                start = i + 1
+                break
+        if start is None:
+            return []
+        end = len(toks)
+        for i in range(start, len(toks)):
+            if toks[i].kind == "word" and toks[i].up == "WHERE":
+                end = i
+                break
+        out: List[dict] = []
+        for item in cls._split_top_commas(toks[start:end]):
+            eq = next((j for j, t in enumerate(item)
+                       if t.kind == "punct" and t.text == "="), None)
+            if eq is None:
+                continue
+            col = cls._column_of(item[:eq])
+            rhs = item[eq + 1:]
+            if (col and len(rhs) == 2 and rhs[0].kind == "punct" and rhs[0].text == ":"
+                    and rhs[1].kind == "word"):
+                out.append({"column": col, "hostVar": rhs[1].up})
+        return out
+
+    @staticmethod
+    def _correlate(columns: List[Optional[str]], into_vars: List[str],
+                   note: Optional[str]) -> Tuple[List[dict], Optional[str]]:
+        """Zip a select list against the INTO host variables - ONLY when the counts prove
+        the correspondence.
+
+        The gate is not defensive programming, it is the whole point. `INTO
+        :WS-NAME:IND-NAME, :WS-BAL` yields THREE host variables for TWO columns (indicator
+        variables), and `INTO :CUST-REC` yields one for N (a host structure). A naive zip
+        would map BAL -> IND-NAME and state it as fact. Wrong lineage is worse than none.
+        """
+        if note:
+            return [], note
+        if not columns or not into_vars:
+            return [], None
+        if len(columns) != len(into_vars):
+            return [], (f"{len(columns)} column(s) vs {len(into_vars)} host variable(s): "
+                        f"not correlatable (indicator variables, or a host structure "
+                        f"expanding to several columns) - verify by hand")
+        return ([{"column": c, "hostVar": h} for c, h in zip(columns, into_vars)
+                 if c is not None], None)
 
     @staticmethod
     def _exec_into_vars(toks: List[Token]) -> List[str]:
