@@ -312,8 +312,16 @@ match the old program boundaries**.
 keys here (the SQL column↔host-variable mapping; `program`/`member`/`file` on lineage
 rows), then load N bundles into a **Neo4j graph** — where *"which programs affect the
 balance"* is one hop and *"where are the service boundaries"* is community detection.
-Identity is **provable only** (copybook / file / table.column); anything unproven is an
-explicit work list, never a guess.
+Identity is **provable only**; anything unproven is an explicit work list, never a guess.
+
+[**docs/mainframe-artifacts.md**](docs/mainframe-artifacts.md) is its prerequisite, and
+the reason: *the COBOL tells you what a program does — it cannot tell you what it does it
+to.* `READ CUST-FILE` never says which dataset that is; only the JCL does. That document
+inventories every artifact the join depends on — JCL/PROCs, copybook libraries, DCLGEN and
+Db2 DDL, CICS/IMS definitions, utility control cards, MQ, ASM, the scheduler — sorted by
+whether it **resolves an identity**, hides **behavior**, carries **orchestration**, or
+defines the **boundary**, with the order to build them in and what each will lie about if
+parsed carelessly.
 
 ## Development
 

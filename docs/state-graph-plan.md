@@ -43,11 +43,20 @@ The hard problem is knowing when two programs' fields are **the same state**. Pr
 calls it `WS-BALANCE`; program B calls it `CUST-BAL`. Three mechanisms prove sameness
 from the code:
 
-| Programs share state via | Provable? | How |
+| Programs share state via | Provable from COBOL alone? | How |
 |---|---|---|
-| **Copybook** — both `COPY CUSTREC` | ✅ | `data[f].member == "CUSTREC"` — already captured |
-| **File** — both read `CUST-FILE` | ✅ | `data[f].file` — already captured (FD children inherit it) |
-| **Db2 column** — both `SELECT BAL FROM CUST` | ❌ **not yet** | the table and the host var are captured; the *mapping* `BAL → CUST-BALANCE` is not. **This is Part 1b.** |
+| **Copybook** — both `COPY CUSTREC` | ⚠️ **partly** | `data[f].member == "CUSTREC"` is captured — but a member name is unique only *within a library*, and `COPY ... REPLACING` renames fields per program. Needs the copybook library + SYSLIB order. See [mainframe-artifacts.md](mainframe-artifacts.md). |
+| **File** — both read `CUST-FILE` | ❌ **no** | `data[f].file` is a *program-local* name, and `assign` is a ddname. The identity is the **dataset**, and it exists only in the JCL. See [mainframe-artifacts.md](mainframe-artifacts.md). |
+| **Db2 column** — both `SELECT BAL FROM CUST` | ✅ **now** | the mapping `BAL → CUST-BALANCE`. **This was Part 1b (done).** DCLGEN, where it exists, states it authoritatively rather than by positional inference. |
+
+**This table was wrong when first written**, and in the dangerous direction: it marked
+File ✅ and Copybook ✅ on the strength of keys that are program-local. A missing join is a
+work item; a **false** join asserts that two programs share state when they do not. A
+generic ddname (`SYSUT1`, `INFILE`) or a member name reused across two teams' libraries
+will produce exactly that. Resolving them needs artifacts outside the COBOL — that
+inventory, and the order to build it in, is
+**[mainframe-artifacts.md](mainframe-artifacts.md)**, which is a prerequisite for Part 2,
+not a follow-on to it.
 
 **Anything not provable is reported as unresolved, never guessed.** No name-similarity
 heuristics, no alias files. A field that reaches no shared node is a work item for a
@@ -183,9 +192,10 @@ repo.
 (:Column   {table, column})            ← Part 1b makes this possible
 (:Event    {name, direction})
 
-(:Field)-[:DECLARED_IN]->(:Copybook)          provable sharing
-(:Field)-[:MAPS_TO]->(:Column)                provable sharing   ← Part 1b
-(:Field)-[:IN_RECORD_OF]->(:Endpoint)         provable sharing (file)
+(:Field)-[:DECLARED_IN]->(:Copybook)          provable ONCE the library resolves the member
+(:Field)-[:MAPS_TO]->(:Column)                provable   ← Part 1b (done)
+(:Field)-[:IN_RECORD_OF]->(:Endpoint)         NOT provable until a Dataset resolves it:
+(:Endpoint)-[:BOUND_TO {job, step}]->(:Dataset {dsn})    ← from JCL; the real file identity
 (:Program)-[:WRITES {action, line}]->(:Field)
 (:Program)-[:READS]->(:Field)
 (:Program)-[:CONSUMES|PUBLISHES]->(:Event)
