@@ -82,20 +82,74 @@ For each perimeter state `S` (driven off `interface.perimeterStates` + `interfac
 is reused verbatim from the faithful emitter, so decimal arithmetic and the data dictionary
 are unchanged.
 
-## Scope of the first vertical slice
+## PERFORM: flattened into one machine
 
-Implemented and tested end-to-end (`examples/sqlsel.cbl`, runs under stock XState by *sending
-events*): a flat, single-region SQL `SELECT` — inbound row get + `SQLCODE` response branch.
+A queue delivers events to the **root** actor, and XState does not forward them into
+invoked children — so the faithful target's `invoke`-an-actor-per-paragraph shape would
+bury every wait where no event could reach it. The reactive target therefore **flattens**:
+
+1. `emitter._invoke_transform` resolves the call structure (reused verbatim — sections,
+   `THRU` ranges and all).
+2. Each callee's body is inlined into the single machine under its own namespace (a
+   paragraph can appear both standalone and inside a `THRU` range; the copies stay
+   disjoint).
+3. Call/return becomes a **return-address context field** — the mechanism already proven
+   for `ALTER` switches: the call site assigns `RET-<para> := '<site>'` and jumps in; the
+   callee's return is a state whose guarded edges dispatch back to the right site.
+
+```
+call site   entry: [set_ret_1000-INIT_at_0000-MAIN]   always -> 1000-INIT__1000-INIT
+1000-INIT__RET   always: [ {guard: ret_1000-INIT_at_0000-MAIN, target: 0000-MAIN__k1} ]
+```
+
+Context is then genuinely shared — *more* faithful to COBOL WORKING-STORAGE than the js
+target's invoke input/output copying. Every dispatch guard is real and evaluable, never an
+external stub, and every edge is guarded: a stall beats jumping somewhere plausible but
+wrong.
+
+**Recursion is refused, not flattened.** With one return-address field per paragraph, a
+re-entrant call overwrites the address and would return to the wrong place, so a call
+cycle raises rather than emitting a broken machine (`--target js` can express it — its
+actors are separate copies).
+
+**`STOP RUN` inside a performed paragraph** ends the flat machine, which is what COBOL
+does; the js target resumes the caller (its documented limitation). The reactive machine is
+the more faithful of the two on that path.
+
+## End of stream
+
+A synchronous `READ` learns the file ended from a return code. Under push there is no
+return code, so end-of-stream arrives as its own event: a file-read wait accepts both
+`GET.FILE.<X>` and **`END.FILE.<X>`**, and the latter's `recv` raises exactly the `atEnd`
+flag the faithful machine's `AT END` guards already read. `NOT AT END` is the negation of
+that flag (`negatedExternal`), so it is the per-record path until END arrives.
+
+## Data on arrival
+
+An inbound field is stored through the **same PICTURE rules as any internal `MOVE`** —
+a record does not become exempt from COBOL data semantics by arriving as an event. A
+`PIC X(20)` field pads; a `COMP-3 S9(7)V99` quantizes. A field the publisher omits leaves
+context untouched.
+
+## Scope
+
+Proven end-to-end under stock XState by *sending events* (`tests/test_reactive.py`):
+
+- **`custrpt`** — PERFORM-structured batch read loop: record events + `END` produce
+  `WS-TOTAL = 113.20`, the same exact decimal the synchronous golden master gives.
+- **`notend`** — `NOT AT END` fires per record; `END` stops it.
+- **`retdisp`** — one paragraph PERFORMed from three sites (including from inside an
+  inlined `THRU` range) returns to the right one each time.
+- **`sectperf` / `thrurange` / `accum`** — sections, `THRU` ranges, `PERFORM UNTIL`.
+- **`sqlsel`** — inbound row + `SQLCODE` response branch.
+- **`twogets`** — two reads folded in one state split into two waits.
+- **`recur`** — refused.
 
 Deliberately deferred (each its own increment, flagged, never faked):
 
-- **Perimeter states inside a performed paragraph.** A `PERFORM`ed paragraph becomes an
-  invoke-actor in the faithful target; delivering external events into a nested actor needs
-  event forwarding/spawning and is the next increment. The slice inlines its SELECT to stay
-  flat.
-- **`type: parallel` machines** (CICS HANDLE handler regions).
-- **Verb classes beyond SQL SELECT**: file `READ` loops (AT-END as an end-of-stream event),
-  `FETCH` cursors, `ACCEPT`, CICS `RECEIVE`, DLI — and every **create** verb. The rules above
-  are written generally; only SELECT is proven so far.
+- **`type: parallel` machines** (CICS HANDLE handler regions) — still refused.
+- **Create verbs beyond the publish shape**, and `FETCH` cursors / CICS `RECEIVE` / DLI:
+  the rules are written generally and the machinery is shared, but only the verbs above
+  are proven.
 - **Collapsing a singleton SELECT's row + SQLCODE into one event.** The general form is two
   events (row, then response); a singleton could carry both. Kept as two for generality.

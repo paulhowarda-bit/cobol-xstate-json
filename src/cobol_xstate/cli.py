@@ -26,7 +26,7 @@ def _format(name: Optional[str]) -> Optional[SourceFormat]:
 
 # Suffix per target. Companions are built from the same base, so every artifact of one
 # run has a distinct name and none can land on another's path.
-_TARGET_EXT = {"js": ".mjs", "reactive": ".mjs",
+_TARGET_EXT = {"js": ".mjs", "reactive": ".reactive.mjs",
                "lineage": ".lineage.json", "business": ".business.json"}
 _COMPANION_EXT = (".business.json", ".lineage.json")
 

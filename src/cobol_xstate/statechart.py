@@ -115,7 +115,11 @@ class Machine:
                 "source": self.source_name,
                 "generator": "cobol-xstate 0.1.0",
                 "disclaimer": (
-                    "A Harel statechart of the program's LOGIC, not a transcript of its "
+                    "A Harel-DERIVED statechart, encoded in XState v5 - which is a "
+                    "restricted subset of Harel: negated events (NOT AT END), durative "
+                    "activities, and static reactions are encoded as guards/flags rather "
+                    "than expressed directly. It models the program's LOGIC, not a "
+                    "transcript of its "
                     "text: paragraphs are compound (OR) states, PERFORM is resolved to a "
                     "real call/return ('invoke' of the callee's chart in 'charts', "
                     "returning on onDone), and source-order fall-through that the program "
