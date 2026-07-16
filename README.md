@@ -60,7 +60,7 @@ a different question:
 |---|---|
 | `prog.json` | **What does it do?** The faithful machine: config + data dictionary + semantics + interface + provenance. Complete, verbose. |
 | `prog.business.json` | **Which steps matter?** The business distillation: scaffolding collapsed, only boundary/decision/calculation states. |
-| `prog.lineage.json` | **Where did each value come from?** One row per (external event, field), with the event each field's value originates from. |
+| `prog.lineage.json` | **Where did each value come from, and under what condition?** One row per (external event, field): the event each value originates from, plus the guards that govern the write. |
 | `prog.reactive.json` | **What replaces it?** The event-driven machine: its `on` waits and `publish_*` effects are the new system's message contract. |
 
 All four are things you **read or draw** (all are renderable `xstate-v5-config`, bar the

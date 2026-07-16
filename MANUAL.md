@@ -343,12 +343,12 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
 
 See [docs/business-view.md](docs/business-view.md).
 
-### `--target lineage` — which event is responsible for each field
+### `--target lineage` — which event is responsible for each field, and when
 
-One row per **(external event, field)**, answering *where did this value come from*. For
-an input event the fields are the ones it **fills**; for an output event, the ones that
-**fill it** — traced back through the program's assignments to the external event(s) the
-data ultimately came from.
+One row per **(external event, field)**, answering *where did this value come from* and
+*under what condition*. For an input event the fields are the ones it **fills**; for an
+output event, the ones that **fill it** — traced back through the program's assignments
+to the external event(s) the data ultimately came from.
 
 **A default run already writes this** as `prog.lineage.json` beside the bundle — the
 table is a companion to the machine, and the two are read together. This target emits it
@@ -364,11 +364,14 @@ cobol-xstate prog.cbl --no-lineage --outdir out       # -> out/prog.json only
 { "event": "CREATE.FILE.OUT-FILE", "direction": "output", "field": "OUT-FEE",
   "changedByProgram": true,
   "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44 }],
+  "conditions": [{ "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
+                   "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 }],
   "origins": [{ "event": "GET.CALLER.CALLER" }, { "event": "GET.CONSOLE.SYSIN" }] }
 ```
 
 *The WRITE emits `OUT-FEE`; this program computed it at line 44; its value came from the
-caller's parameter combined with a console `ACCEPT`.*
+caller's parameter combined with a console `ACCEPT`; and it happens when the transaction
+is a deposit.*
 
 - **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
   `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
@@ -379,6 +382,18 @@ caller's parameter combined with a console `ACCEPT`.*
   real source.
 - **`CALL ... USING`** is by reference and the callee is another program, so its arguments
   get a `maybe` origin with `resolvedBy` naming the program that would settle it.
+- **`conditions`** are the guards that hold on *every* path to the event, so each is true
+  whenever it fires. `kind` separates a real decision (`business`) from loop and
+  end-of-file plumbing (`control`) — filter to `business` and you have the program's
+  rules. Negation is first-class: a `WHEN OTHER` reports `NOT (WS-KIND = 'P')` and
+  `NOT (WS-KIND = 'Q')`, which is the actual rule. The same list appears per write in
+  `changedBy`.
+- **What it won't claim**: a paragraph performed from two guarded sites runs under
+  `A OR B`, which a conjunction cannot state — rather than report half of it, the row
+  reports none and sets `conditionsPartial`. An `ALTER`/`GO TO DEPENDING ON` guard whose
+  test wasn't recovered is marked `unrecoverable` rather than guessed. Origins carry no
+  conditions on purpose: an origin arrives through a chain of assignments, so any single
+  link's condition would look like the answer without being it.
 
 See [docs/lineage-target.md](docs/lineage-target.md) for the algorithm and its limits.
 

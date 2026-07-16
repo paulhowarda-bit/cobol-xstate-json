@@ -9,6 +9,11 @@ them. The result is one row per ``(external event, field)``:
     WRITE  output     OUT-FEE   true              COMPUTE @line 25  [GET.CALLER.CALLER,
                                                                     GET.CONSOLE.SYSIN]
 
+Each row also carries the ``conditions`` under which its event happens at all. Origins are
+only half a business rule - "DAILYPOST changes the balance" is a dependency, "DAILYPOST
+changes the balance WHEN the transaction is a deposit" is the rule - and the when-clause
+is the half a requirements reader actually needs.
+
 "Changed by a LINKAGE item" is not a separate column: reading a linkage field already
 *is* a ``GET.CALLER.CALLER`` event, so it appears in ``origins`` like any other source.
 
@@ -39,6 +44,7 @@ import re
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from . import interface as _iface
+from .business import _is_control_guard
 from .emitter import _para_of, _target_owner
 from .statechart import Machine
 
@@ -48,11 +54,20 @@ OriginSet = FrozenSet[Origin]
 # field -> the origins reaching it at a program point.
 State = Dict[str, OriginSet]
 
+# A condition: (guard name, is it the NEGATED sense?). Negation is first-class because
+# the else / WHEN OTHER branch carries no guard of its own - its condition is precisely
+# the negation of the branches before it, and that negation is usually the business rule
+# worth reading ("when the transaction is none of D/W/I").
+Cond = Tuple[str, bool]
+CondSet = FrozenSet[Cond]
+
 _WORD = re.compile(r"[A-Z][A-Z0-9-]*")
 # Verbs whose data effect is opaque (the value semantics are not modeled) but whose
 # *dependency* is plain from the operands - which is all lineage needs.
 _DEP_ONLY = {"STRING", "UNSTRING", "INSPECT"}
 _UNKNOWN = "<unknown>"
+# `IN-FILE_atEnd` / `IN-FILE_notAtEnd`: the READ lowering's synthetic end-of-stream guards.
+_ATEND = re.compile(r"^(.*?)_(not)?[Aa]t[Ee]nd$")
 
 
 # --------------------------------------------------------------------------- #
@@ -102,6 +117,41 @@ def _dep_only_flow(verb: str, text: str, known: Set[str]) -> Tuple[List[str], Li
 
 
 # --------------------------------------------------------------------------- #
+# condition rendering
+# --------------------------------------------------------------------------- #
+
+def _cond_text(name: str, tree: Optional[dict], negated: bool) -> Optional[str]:
+    """A guard as COBOL-ish source text, or None if its test is not recoverable.
+
+    The negated sense is rendered as ``NOT (...)`` rather than by flipping the operator.
+    Inverting ``=`` to ``NOT =`` is safe, but inverting an ordering test is not always
+    the identity a reader assumes once COBOL's figurative constants and class tests are
+    in play - and this table exists to be trusted, not to look tidy. The same reasoning
+    leaves ``NOT (F NOT AT END)`` un-simplified: clumsy to read, impossible to misread.
+    """
+    body: Optional[str] = None
+    if isinstance(tree, dict):
+        op = tree.get("op")
+        if op == "rel":
+            left, rel, right = tree.get("left"), tree.get("rel"), tree.get("right")
+            if left is not None and rel is not None and right is not None:
+                body = f"{left} {rel} {right}"
+        elif op == "cond-name":
+            body = tree.get("name") or None
+        # {op:'raw'} and anything new fall through: say nothing rather than guess.
+    elif tree is None:
+        # A file's end-of-stream guard is synthesized by the READ lowering, so it has no
+        # expression tree - but its meaning is not in doubt and it is not a mystery to be
+        # flagged. `_atEnd` is the AT END arm, `_notAtEnd` the NOT AT END one.
+        m = _ATEND.match(name)
+        if m:
+            body = f"{m.group(1)} {'NOT AT END' if m.group(2) else 'AT END'}"
+    if not body:
+        return None
+    return f"NOT ({body})" if negated else body
+
+
+# --------------------------------------------------------------------------- #
 # the analysis
 # --------------------------------------------------------------------------- #
 
@@ -125,7 +175,22 @@ class _Lineage:
         for name, _region, st in _iface._iter_states(self.config):
             raw[name] = st
         self.states, self.origin_state = self._split(raw)
+        # (owner-exit node -> the edges that leaving/replaced it), filled by _successors
+        # and read by _edge_conditions so a return edge keeps the condition of the branch
+        # it stands in for.
+        self.fold_src: Dict[str, List[str]] = {}
+        self.fold_dst: Dict[str, List[str]] = {}
         self.succs = self._successors()
+        self.guards = machine.semantics.get("guards", {}) or {}
+        self.guard_line: Dict[str, int] = {}
+        self.edge_cond = self._edge_conditions()
+        self.entries = self._entries()
+        # Two passes over the same graph. MUST (meet = intersection) is what we report:
+        # a condition that holds on EVERY path to the event, so stating it is always
+        # true. MAY (meet = union) is only used to decide whether an empty MUST is
+        # honest - see `_conditions_of`.
+        self.must = self._cond_flow(lambda a, b: a & b)
+        self.may = self._cond_flow(lambda a, b: a | b)
 
     # -- split states at PERFORM boundaries ---------------------------------
     #
@@ -179,6 +244,171 @@ class _Lineage:
         if msg not in self.flags:
             self.flags.append(msg)
 
+    # -- path conditions ----------------------------------------------------
+    #
+    # "Where did this value come from?" is only half a business rule. The other half is
+    # "under what condition?" - DAILYPOST changes the balance *when the transaction is a
+    # deposit*, and the when-clause IS the rule. These two passes recover it.
+
+    def _entries(self) -> List[str]:
+        initial = self.config.get("initial")
+        entries = [initial] if initial else []
+        if self.config.get("type") == "parallel":
+            entries = [r.get("initial") for r in self.config["states"].values()
+                       if r.get("initial")]
+        return [e for e in entries if e in self.states]
+
+    def _branches(self, st: dict) -> List[list]:
+        """The state's transition lists. Each list is one first-match-wins group: the
+        `always` list is one, and each event key under `on` is its own."""
+        out: List[list] = []
+        al = st.get("always")
+        if al:
+            out.append(al if isinstance(al, list) else [al])
+        for v in (st.get("on") or {}).values():
+            out.append(v if isinstance(v, list) else [v])
+        return out
+
+    def _edge_conditions(self) -> Dict[Tuple[str, str], CondSet]:
+        """``(src, target)`` -> the conditions under which that edge is taken.
+
+        A transition list is FIRST-MATCH-WINS, which is exactly how COBOL's IF/ELSE and
+        EVALUATE/WHEN lower here: branch *i* is taken when its own guard holds AND every
+        guard before it failed. So the condition of an unguarded trailing branch (the
+        ELSE, the WHEN OTHER, the loop body) is the conjunction of those negations -
+        recovered exactly, not guessed.
+
+        Two edges from one state to one target mean the target is reached under a
+        DISJUNCTION, which this conjunctive lattice cannot express; they meet, dropping
+        to what both agree on. Anything not recorded here defaults to no condition, which
+        under-claims - the safe direction for a table that gets read as fact.
+        """
+        raw: Dict[Tuple[str, str], CondSet] = {}
+        for name, st in self.states.items():
+            for group in self._branches(st):
+                seen: List[str] = []
+                for item in group:
+                    if isinstance(item, str):
+                        tgt, guard, meta = item, None, {}
+                    elif isinstance(item, dict):
+                        tgt = item.get("target")
+                        guard = item.get("guard")
+                        meta = item.get("meta") or {}
+                    else:
+                        continue
+                    cond: CondSet = frozenset((g, True) for g in seen)
+                    if isinstance(guard, str) and guard:
+                        cond = cond | {(guard, False)}
+                        if guard not in self.guard_line and meta.get("cobolLine"):
+                            self.guard_line[guard] = meta["cobolLine"]
+                        seen.append(guard)
+                    if not tgt:
+                        continue
+                    key = (name, tgt)
+                    raw[key] = cond if key not in raw else (raw[key] & cond)
+        out = {k: v for k, v in raw.items() if k[1] in self.states}
+        # A PERFORM's return edge is a synthetic edge standing in for the real ones that
+        # ran off the end of the paragraph - so it inherits their condition. Without
+        # this, `IF X ... END-IF` at a paragraph's tail loses the `NOT X` on the way out,
+        # the negation never cancels its positive downstream, and the merge below the
+        # call looks conditional when it is not.
+        for s2, leaving in self.fold_src.items():
+            acc: Optional[CondSet] = None
+            for lt in leaving:
+                c = raw.get((s2, lt), frozenset())
+                acc = c if acc is None else (acc & c)
+            for cont in self.fold_dst.get(s2, []):
+                out[(s2, cont)] = acc if acc is not None else frozenset()
+        return out
+
+    def _cond_flow(self, join) -> Dict[str, CondSet]:
+        """Forward fixpoint of path conditions, meeting at merge points with ``join``.
+
+        Both directions terminate: with intersection the sets only shrink, with union
+        they only grow, and (guard x polarity) is finite either way.
+        """
+        IN: Dict[str, Optional[CondSet]] = {s: None for s in self.states}
+        for e in self.entries:
+            IN[e] = frozenset()
+        work = list(self.entries)
+        steps = 0
+        limit = max(50_000, len(self.states) * 500)
+        while work:
+            steps += 1
+            if steps > limit:
+                self._flag("condition fixpoint hit its iteration bound; 'conditions' "
+                           "may be incomplete - please report this program")
+                break
+            s = work.pop()
+            base = IN[s]
+            if base is None:
+                continue
+            for t in self.succs.get(s, []):
+                if t not in self.states:
+                    continue
+                out = base | self.edge_cond.get((s, t), frozenset())
+                cur = IN[t]
+                new = out if cur is None else join(cur, out)
+                if new != cur:
+                    IN[t] = new
+                    work.append(t)
+        return dict(IN)          # None = never reached from any entry, NOT "no condition"
+
+    def _reached(self, state: str) -> bool:
+        return self.must.get(state) is not None
+
+    def _conditions_of(self, state: str) -> Tuple[List[dict], bool]:
+        """``(conditions, partial)`` for a program point.
+
+        The conditions are the MUST set, which is always sound: every one of them holds
+        whenever this point is reached. ``partial`` warns that they are not the WHOLE
+        condition - that something else also governs this point which a conjunction
+        cannot express.
+
+        The test is which guards appear in MAY but not MUST, and in what polarity:
+
+        * both polarities => it says nothing about this point. Either the branches
+          reconverged (after ``IF A ... ELSE ...`` every later state has both `A` and
+          `NOT A` behind it, and the event really is unconditional), or it is a guard
+          inside a loop whose earlier iterations went the other way - which is history,
+          not a condition on this arrival.
+        * one polarity only => something really does constrain this point that MUST could
+          not keep. ``IF A: PERFORM W`` plus ``IF B: PERFORM W`` reaches W under ``A OR B``:
+          no single guard is necessary, yet W plainly does not always happen. `B` shows
+          up positive-only, and that is the tell.
+
+        Known limit, and the reason ``partial``'s ABSENCE is not a guarantee: the same
+        loop-history effect that correctly cancels a reconverged branch will also cancel
+        a genuine disjunction *inside* a loop, so a two-IF disjunction in a loop body
+        reports its loop guard and stays silent about the rest. The conditions listed
+        stay true; the claim "these are all of them" is best-effort. Stated in the
+        output's own note rather than left for a reader to discover.
+        """
+        must = self.must.get(state) or frozenset()
+        may = self.may.get(state) or frozenset()
+        partial = any(not ((g, True) in may and (g, False) in may)
+                      for g, _ in (may - must))
+        return self._conds_json(must), partial
+
+    def _conds_json(self, conds: CondSet) -> List[dict]:
+        out = []
+        for name, negated in sorted(conds):
+            tree = self.guards.get(name)
+            d: dict = {"guard": name, "negated": negated}
+            text = _cond_text(name, tree, negated)
+            if text is None:
+                # ALTER switches, GO TO DEPENDING ON and friends: the branch is real and
+                # its existence is a fact, but no expression was recovered for it. Name
+                # it and say so - never invent the test.
+                d["unrecoverable"] = True
+            else:
+                d["expr"] = text
+                d["kind"] = "control" if _is_control_guard(name, tree) else "business"
+            if name in self.guard_line:
+                d["line"] = self.guard_line[name]
+            out.append(d)
+        return out
+
     # -- control-flow graph (PERFORM followed as call + return) --------------
     def _perform_of(self, st: dict) -> Optional[str]:
         for a in st.get("entry", []) or []:
@@ -231,14 +461,25 @@ class _Lineage:
                 if not self._owns(s2, owner) or self._perform_of(st2):
                     continue
                 edges = self._edges(st2)
+                # Only the edges that LEAVE the performed range are returns. The ones
+                # that stay are ordinary control flow inside the paragraph and must
+                # survive: a node can do both at once - `IF X ... END-IF` as a
+                # paragraph's last statement branches inward on X and falls out of the
+                # range otherwise. Replacing the whole list (as this once did) deleted
+                # the inward branch, and with it every event inside the IF.
+                stay = [t for t in edges
+                        if t in self.states and self._owns(t, owner)]
                 leaves = [t for t in edges
                           if t not in self.states or not self._owns(t, owner)]
                 if leaves or not edges:              # falls out of the range, or ends
-                    returns.setdefault(s2, [])
+                    if s2 not in returns:
+                        returns[s2] = list(stay)
+                        self.fold_src[s2] = list(leaves)
                     if cont not in returns[s2]:
                         returns[s2].append(cont)
+                        self.fold_dst.setdefault(s2, []).append(cont)
         for s, conts in returns.items():
-            succ[s] = list(conts)                    # the return replaces fall-through
+            succ[s] = list(conts)                    # in-range edges + the return
         for target, n in multi.items():
             if n > 1:
                 self._flag(f"{target} is PERFORMed from {n} sites; it is analyzed with "
@@ -383,6 +624,19 @@ class _Lineage:
             row["member"] = item["member"]
         if item.get("file"):
             row["file"] = item["file"]
+        # Under what condition does this event happen at all? For an output row that is
+        # "when is this field written out", for an input row "when is it read" - and
+        # that when-clause is the business rule the row is otherwise missing.
+        conds, partial = self._conditions_of(state)
+        if conds:
+            row["conditions"] = conds
+        if partial:
+            row["conditionsPartial"] = True
+            row["conditionsNote"] = (
+                "reached under differing conditions on different paths; no single "
+                "condition holds on all of them, so the full condition is a disjunction "
+                "this table does not state - read the machine for the exact branches"
+            )
         if changed:
             row["changedBy"] = changed
         if any(e == _UNKNOWN for e, _m, _r in origins):
@@ -414,9 +668,14 @@ class _Lineage:
 
         An input event's own fill (ACCEPT / SELECT INTO) is NOT a change by this
         program - the value came from outside; the program only received it.
+
+        Each write carries the conditions it happens under, which is what turns "this
+        program writes the balance" into "this program writes the balance WHEN the
+        transaction is a deposit" - the difference between a dependency and a rule.
         """
         out: Dict[str, List[dict]] = {}
         for name, st in self.states.items():
+            entry = self._write_entry(name)
             for aname in st.get("entry", []) or []:
                 spec = self.actions.get(aname)
                 prov = self.provenance.get(aname, {})
@@ -427,7 +686,7 @@ class _Lineage:
                         t = (a.get("target") or "").upper().split("(")[0]
                         if not t:
                             continue
-                        e = {"action": aname, "line": prov.get("line", 0)}
+                        e = {"action": aname, "line": prov.get("line", 0), **entry}
                         if e not in out.setdefault(t, []):
                             out[t].append(e)
                 if spec and spec.get("kind") == "effect":
@@ -435,19 +694,28 @@ class _Lineage:
                     if verb in _DEP_ONLY:
                         recv, _ = _dep_only_flow(verb, prov.get("cobol", ""), self.known)
                         for t in recv:
-                            e = {"action": aname, "line": prov.get("line", 0)}
+                            e = {"action": aname, "line": prov.get("line", 0), **entry}
                             if e not in out.setdefault(t, []):
                                 out[t].append(e)
         return out
 
+    def _write_entry(self, state: str) -> dict:
+        """The condition keys for a write site. A site that no path reaches is marked
+        rather than annotated: it has no path condition BECAUSE it has no path, and an
+        empty `conditions` there would read as "this always happens"."""
+        if not self._reached(state):
+            return {"unreachable": True}
+        conds, partial = self._conditions_of(state)
+        e: dict = {}
+        if conds:
+            e["conditions"] = conds
+        if partial:
+            e["conditionsPartial"] = True
+        return e
+
     def run(self) -> dict:
         self.changers = self._changers()
-        initial = self.config.get("initial")
-        entries = [initial] if initial else []
-        if self.config.get("type") == "parallel":
-            entries = [r.get("initial") for r in self.config["states"].values()
-                       if r.get("initial")]
-        entries = [e for e in entries if e in self.states]
+        entries = self.entries
 
         preds: Dict[str, List[str]] = {s: [] for s in self.states}
         for s, ts in self.succs.items():
@@ -503,7 +771,16 @@ class _Lineage:
                 "'origins' are the external events whose data reaches it here "
                 "(flow-sensitive). A linkage-sourced value shows GET.CALLER.CALLER as "
                 "an origin. 'maybe' origins name the program that would resolve them. "
-                "Nothing is invented - see 'flags'."
+                "'conditions' are the guards that hold on EVERY path to this event - a "
+                "conjunction, always true when it fires; each also appears on the write "
+                "sites in 'changedBy'. They are necessary, not necessarily sufficient: "
+                "'conditionsPartial' marks a point known to be governed by more than the "
+                "conjunction listed, but its absence is best-effort, not a guarantee "
+                "(a disjunction inside a loop body can evade it). 'conditions' "
+                "are NOT attached to 'origins': an origin can reach a field through a "
+                "chain of assignments, so its real condition is the conjunction along "
+                "that whole chain, and reporting any one link's condition would look "
+                "like the answer while not being it. Nothing is invented - see 'flags'."
             ),
             "rows": rows,
             "flags": self.flags,

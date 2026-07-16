@@ -36,8 +36,14 @@ from .statechart import Machine
 
 def _is_control_guard(name: str, tree: Optional[dict]) -> bool:
     """A guard that rides on control-flow mechanics, not a business condition: a loop's
-    ``UNTIL_...`` test, a file ``..._atEnd`` end-of-stream, or an unmodeled ``{op:'raw'}``."""
-    if name.startswith("UNTIL_") or name.endswith("_atEnd") or name.endswith("_atend"):
+    ``UNTIL_...`` test, a file ``..._atEnd`` end-of-stream, or an unmodeled ``{op:'raw'}``.
+
+    The end-of-stream test matches the ``notAtEnd`` sense too. Anchoring on ``_atEnd``
+    missed it - ``IN-FILE_notAtEnd`` does not end in ``_atEnd`` - so the NOT AT END arm of
+    a READ was reported as a *business* decision, which is exactly backwards: it is the
+    most mechanical branch in the language.
+    """
+    if name.startswith("UNTIL_") or name.lower().endswith("atend"):
         return True
     if isinstance(tree, dict) and tree.get("op") == "raw":
         return True

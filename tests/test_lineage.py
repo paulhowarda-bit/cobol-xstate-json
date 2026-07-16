@@ -229,3 +229,171 @@ def test_inline_field_has_no_identity_key_rather_than_a_guessed_one():
     rows = {r["field"]: r for r in _lin("custrpt.cbl")["rows"]}
     ws = rows["WS-TOTAL"]
     assert "member" not in ws and "file" not in ws
+
+
+# --------------------------------------------------------------------------- #
+# guard conditions: the other half of a business rule
+# --------------------------------------------------------------------------- #
+#
+# "Where did this value come from" names the writer; the CONDITION is the rule. For a
+# requirements reader, "DAILYPOST changes the balance" and "DAILYPOST changes the balance
+# WHEN the transaction is a deposit" are different statements, and only the second is
+# worth anything. examples/condlin.cbl is written so every row has one right answer.
+
+def _cond_row(d: dict, state: str) -> dict:
+    rows = [r for r in d["rows"]
+            if r["state"] == state and r["field"] == "OUT-CODE"
+            and r["direction"] == "output"]
+    assert len(rows) == 1, f"{state}: expected one OUT-CODE row, got {len(rows)}"
+    return rows[0]
+
+
+def _exprs(row: dict):
+    return {c["expr"] for c in row.get("conditions", [])}
+
+
+def test_a_guarded_write_reports_the_guard():
+    row = _cond_row(_lin("condlin.cbl"), "1000-GUARDED__seq2")
+    assert _exprs(row) == {"CUST-ACTIVE"}
+    assert not row.get("conditionsPartial")
+
+
+def test_the_write_inside_a_tail_if_is_reported_at_all():
+    """The regression that motivated the _successors fix: a paragraph whose last
+    statement is `IF X ... END-IF` branches INWARD on X and falls out of the performed
+    range otherwise. Wiring the return used to replace the whole successor list, deleting
+    the inward branch - so this WRITE, and every event inside any tail IF, silently
+    produced no row at all. Absence of a row reads as "this program never does that"."""
+    d = _lin("condlin.cbl")
+    assert any(r["state"] == "1000-GUARDED__seq2" for r in d["rows"])
+
+
+def test_an_if_else_that_rejoins_is_not_conditional():
+    """Both branches reach the WRITE, so nothing guards it. `A` and `NOT A` must cancel
+    rather than pile up - and it must not be flagged partial either, or every join in
+    every program would carry a warning that means nothing."""
+    row = _cond_row(_lin("condlin.cbl"), "2000-REJOIN__seq3")
+    assert "conditions" not in row
+    assert not row.get("conditionsPartial")
+
+
+def test_when_other_reports_the_negation_of_the_branches_before_it():
+    """WHEN OTHER carries no guard of its own. Its condition is exactly the negation of
+    every WHEN above it - which is the business rule ("none of the known kinds")."""
+    row = _cond_row(_lin("condlin.cbl"), "3000-OTHER__seq8")
+    assert _exprs(row) == {"NOT (WS-KIND = 'P')", "NOT (WS-KIND = 'Q')"}
+    assert all(c["negated"] for c in row["conditions"])
+
+
+def test_a_disjunction_is_refused_rather_than_half_reported():
+    """THE hazard. 4900-EMIT is performed from two guarded sites, so it runs under
+    `A OR B` - which a conjunction cannot state. Reporting either guard alone would be a
+    plain lie (it would say the write needs A when B alone also does it), and reporting
+    nothing silently would read as unconditional. It must report neither and say so."""
+    row = _cond_row(_lin("condlin.cbl"), "4900-EMIT")
+    assert "conditions" not in row
+    assert row["conditionsPartial"] is True
+    assert "disjunction" in row["conditionsNote"]
+
+
+def test_conditions_are_sound_on_the_real_evaluate_program():
+    """banktran dispatches on WS-TRAN-TYPE inside a read loop, so the CALL to POSTLOG is
+    governed by both the loop test and the branch - and by nothing else."""
+    row = next(r for r in _lin("banktran.cbl")["rows"]
+               if r["event"] == "CREATE.PROGRAM.POSTLOG")
+    assert _exprs(row) == {"NOT (WS-EOF = 'Y')", "WS-TRAN-TYPE = 'D'"}
+    assert not row.get("conditionsPartial")
+
+
+def test_loop_history_does_not_fake_a_partial():
+    """The MAY set is contaminated by earlier loop iterations: reaching the deposit
+    branch on pass 2 means pass 1 went somewhere else, so `NOT (TRAN-TYPE = D)` is in MAY
+    even though the deposit branch plainly requires it to be true. Both polarities of a
+    guard must cancel, or every event inside every loop gets a bogus warning."""
+    row = next(r for r in _lin("banktran.cbl")["rows"]
+               if r["event"] == "CREATE.PROGRAM.POSTLOG")
+    assert "WS-TRAN-TYPE = 'D'" in _exprs(row)
+    assert not row.get("conditionsPartial")
+
+
+def test_control_and_business_guards_are_told_apart():
+    """A loop's UNTIL test and an EOF check are plumbing; the EVALUATE branch is the
+    rule. A reader gathering requirements needs to filter one from the other."""
+    row = next(r for r in _lin("banktran.cbl")["rows"]
+               if r["event"] == "CREATE.PROGRAM.POSTLOG")
+    kinds = {c["expr"]: c["kind"] for c in row["conditions"]}
+    assert kinds["NOT (WS-EOF = 'Y')"] == "control"
+    assert kinds["WS-TRAN-TYPE = 'D'"] == "business"
+
+
+def test_each_condition_carries_its_source_line():
+    row = _cond_row(_lin("condlin.cbl"), "3000-OTHER__seq8")
+    assert all(isinstance(c.get("line"), int) and c["line"] > 0
+               for c in row["conditions"])
+
+
+def test_a_write_site_carries_the_condition_it_happens_under():
+    """changedBy names the assignment; without its condition it says a program touches a
+    field but not when, which is the half that matters for merging programs by state."""
+    d = _lin("custrpt.cbl")
+    row = next(r for r in d["rows"] if r.get("changedBy"))
+    entry = row["changedBy"][0]
+    assert entry["conditions"], "a write inside a read loop is not unconditional"
+    assert entry["conditions"][0]["expr"] == "NOT (WS-EOF = 'Y')"
+
+
+def test_origins_deliberately_carry_no_conditions():
+    """An origin reaches a field through a CHAIN of assignments, so its true condition is
+    the conjunction along the whole chain. Tagging it with any single link's condition
+    would look like the answer without being it - so it carries none, and the note says
+    why rather than leaving a reader to assume."""
+    d = _lin("lineage.cbl")
+    for r in d["rows"]:
+        for o in r["origins"]:
+            assert "conditions" not in o
+    assert "NOT attached to 'origins'" in d["note"]
+
+
+def test_a_guard_whose_test_was_not_recovered_is_marked_not_invented():
+    """ALTER switches and computed GO TO produce a branch whose EXISTENCE is a fact but
+    whose test is not recoverable - the machine records it as {op:'raw'}. No example
+    program produces one, so this exercises the renderer directly rather than asserting
+    it vacuously over a corpus that cannot reach the branch."""
+    from cobol_xstate.lineage import _cond_text
+    assert _cond_text("SWITCH_1", {"op": "raw", "text": "ALTERed"}, False) is None
+    assert _cond_text("MYSTERY", None, False) is None
+    assert _cond_text("X", {"op": "rel", "left": "A", "rel": "=", "right": "1"},
+                      False) == "A = 1"
+    assert _cond_text("X", {"op": "rel", "left": "A", "rel": "=", "right": "1"},
+                      True) == "NOT (A = 1)"
+
+
+def test_end_of_stream_guards_are_rendered_not_called_unrecoverable():
+    """A file's AT END guard is synthesized by the READ lowering and has no expression
+    tree - but its meaning is not in doubt. Marking it 'unrecoverable' would cry wolf on
+    the most ordinary branch in COBOL and devalue the marker where it matters."""
+    from cobol_xstate.lineage import _cond_text
+    assert _cond_text("IN-FILE_atEnd", None, False) == "IN-FILE AT END"
+    assert _cond_text("IN-FILE_atEnd", None, True) == "NOT (IN-FILE AT END)"
+    assert _cond_text("IN-FILE_notAtEnd", None, False) == "IN-FILE NOT AT END"
+    for name in ("sqlload.cbl", "custrpt.cbl", "banktran.cbl"):
+        for r in _lin(name)["rows"]:
+            for c in r.get("conditions", []):
+                assert ("expr" in c) ^ bool(c.get("unrecoverable"))
+                assert not (c["guard"].lower().endswith("atend")
+                            and c.get("unrecoverable"))
+
+
+def test_the_not_at_end_arm_is_control_not_a_business_decision():
+    """`IN-FILE_notAtEnd` does not end in `_atEnd`, so the classifier missed it and
+    called the NOT AT END arm of a READ a *business* rule - exactly backwards, and it
+    misled `--target business` the same way."""
+    from cobol_xstate.business import _is_control_guard
+    assert _is_control_guard("IN-FILE_atEnd", None)
+    assert _is_control_guard("IN-FILE_notAtEnd", None)
+    assert _is_control_guard("UNTIL_WS-EOF_eq_Y", {"op": "rel"})
+    assert not _is_control_guard("WS-TRAN-TYPE_eq_D", {"op": "rel"})
+    for r in _lin("sqlload.cbl")["rows"]:
+        for c in r.get("conditions", []):
+            if c["guard"].lower().endswith("atend"):
+                assert c["kind"] == "control"
