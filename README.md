@@ -311,7 +311,7 @@ explicit work list, never a guess.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 289 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+PYTHONPATH=src python -m pytest -q     # 301 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
