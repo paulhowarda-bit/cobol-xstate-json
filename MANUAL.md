@@ -409,6 +409,15 @@ join keys here (the SQL column↔host-variable mapping; `program`/`member`/`file
 lineage rows), then load N bundles into a **Neo4j graph** where "which programs affect
 the balance" is a query and "where are the service boundaries" is community detection.
 
+[docs/mainframe-artifacts.md](docs/mainframe-artifacts.md) is its **prerequisite**. The
+COBOL tells you what a program does; it cannot tell you what it does it *to* —
+`READ CUST-FILE` never names the dataset, and only the JCL does. That document inventories
+the rest of the estate (JCL/PROCs, copybook libraries, DCLGEN, Db2 DDL, CICS/IMS
+definitions, utility control cards, MQ, ASM, the scheduler), sorted by whether it resolves
+an identity, hides behavior, carries orchestration, or defines the boundary — and corrects
+a **false claim** in the original plan: file identity is *not* provable from COBOL alone,
+so a corpus joined on it can assert that two programs share state when they do not.
+
 ---
 
 ## 5. The JSON bundle, section by section
