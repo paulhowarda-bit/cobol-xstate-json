@@ -491,12 +491,30 @@ class _Rewriter:
         return ready
 
 
-def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) -> str:
-    """Emit the reactive XState v5 ES module for ``machine``.
+class _Lowered:
+    """One reactive lowering, from which both artifacts are serialized.
 
-    Returns a runnable module: ``setup({actions,guards}).createMachine(...)`` whose boundary
-    states wait on / publish the overlay's events. ``recvOps`` (event -> context assignments)
-    and a ``manifest`` of inbound/outbound events are exported for the deployment to wire."""
+    The drawable JSON and the runnable module are two encodings of the SAME machine, so
+    they are computed once here - never derived from each other, and never twice.
+    """
+
+    def __init__(self, config, fields, iface, rw, flat, ops, guard_fns,
+                 external_guards, effect_actions, manifest):
+        self.config = config
+        self.fields = fields
+        self.iface = iface
+        self.rw = rw
+        self.flat = flat
+        self.ops = ops
+        self.guard_fns = guard_fns
+        self.external_guards = external_guards
+        self.effect_actions = effect_actions
+        self.manifest = manifest
+
+
+def _lower(machine: Machine) -> _Lowered:
+    """Apply the reactive lowering to ``machine``: flatten PERFORM, split multi-reads,
+    rewrite the boundary, and build every table the artifacts need."""
     fields = _field_table(machine)
     config = _strip_meta(copy.deepcopy(machine.config))
 
@@ -556,6 +574,69 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
     # Effects: referenced actions that are neither a data op nor a generated recv/publish.
     generated = set(rw.recv) | set(rw.recv_end) | set(rw.publish)
     effect_actions = sorted((ref_actions | set(sem_effects)) - set(ops) - generated)
+
+    # The deployment contract: which events to feed in, which to expect out, the caveats.
+    manifest = {
+        "inbound": rw.inbound,
+        "outbound": rw.outbound,
+        "endpoints": iface["endpoints"],
+        "ordering": ("push model: the event source must deliver records in order; "
+                     "the machine processes one event at a time but does not reorder"),
+        # Where each inlined paragraph's states came from, so a state id in this flat
+        # machine can be traced back to the paragraph (and thence to the COBOL).
+        "inline": flat.inline,
+        "flags": rw.flags,
+    }
+    return _Lowered(config, fields, iface, rw, flat, ops, guard_fns,
+                    external_guards, effect_actions, manifest)
+
+
+def build_reactive_view(machine: Machine) -> dict:
+    """The reactive machine as drawable JSON.
+
+    Same shape as the other machine views (``format: xstate-v5-config``), so the renderer
+    draws the event-driven machine exactly as it draws the faithful one - this is the
+    chart that shows the message contract of the new system: which states wait on which
+    inbound event, and where each outbound event is published.
+    """
+    lo = _lower(machine)
+    return {
+        "format": "xstate-v5-config",
+        "metadata": {
+            "program": machine.program_id,
+            "source": machine.source_name,
+            "generator": "cobol-xstate 0.1.0 (--target reactive)",
+            "view": "reactive",
+            "disclaimer": (
+                "The EVENT-DRIVEN machine: inbound records arrive as events the state "
+                "waits `on` (see manifest.inbound), outbound writes are fire-and-forget "
+                "`publish_*` effects (manifest.outbound), and response codes "
+                "(SQLCODE/EIBRESP) come back as their own events. PERFORM is flattened "
+                "into this one machine - a queue delivers to the root, so a wait must "
+                "not be buried in a child actor; call/return is modeled with a "
+                "RET-<paragraph> return-address field. This is a VIEW of the machine: "
+                "run the .reactive.mjs, which carries the same config plus the decimal "
+                "ops and guards. ORDERING is a deployment contract (manifest.ordering), "
+                "not something the machine enforces."
+            ),
+        },
+        "machine": lo.config,
+        "interface": lo.iface,
+        "manifest": lo.manifest,
+        "flags": lo.rw.flags,
+    }
+
+
+def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) -> str:
+    """Emit the reactive XState v5 ES module for ``machine``.
+
+    Returns a runnable module: ``setup({actions,guards}).createMachine(...)`` whose boundary
+    states wait on / publish the overlay's events. ``recvOps`` (event -> context assignments)
+    and a ``manifest`` of inbound/outbound events are exported for the deployment to wire."""
+    lo = _lower(machine)
+    config, fields, iface, rw, flat = lo.config, lo.fields, lo.iface, lo.rw, lo.flat
+    ops, guard_fns = lo.ops, lo.guard_fns
+    external_guards, effect_actions = lo.external_guards, lo.effect_actions
 
     out: List[str] = []
     out.append(f"// Generated by cobol-xstate (REACTIVE target) from {machine.source_name} "
@@ -636,19 +717,8 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
     out.append("export const publishEffects = " + json.dumps(rw.publish) + ";")
     out.append("")
 
-    # The deployment contract: which events to feed in, which to expect out, the flags/caveats.
-    manifest = {
-        "inbound": rw.inbound,
-        "outbound": rw.outbound,
-        "endpoints": iface["endpoints"],
-        "ordering": ("push model: the event source must deliver records in order; "
-                     "the machine processes one event at a time but does not reorder"),
-        # Where each inlined paragraph's states came from, so a state id in this flat
-        # machine can be traced back to the paragraph (and thence to the COBOL).
-        "inline": flat.inline,
-        "flags": rw.flags,
-    }
-    out.append("export const manifest = " + json.dumps(manifest, indent=2) + ";")
+    # The deployment contract: which events to feed in, which to expect out, the caveats.
+    out.append("export const manifest = " + json.dumps(lo.manifest, indent=2) + ";")
     out.append("")
 
     out.append("const actions = {};")

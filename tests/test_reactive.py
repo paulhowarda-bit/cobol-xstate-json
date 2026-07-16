@@ -375,3 +375,59 @@ def test_perform_section_and_thru_range_are_inlined(repo_tmp):
                          _expect({"WS-N": "123"})).returncode == 0
     assert _run_reactive(repo_tmp, "accum.cbl",
                          _expect({"WS-I": "5", "WS-SUM": "15"})).returncode == 0
+
+
+# --------------------------------------------------------------------------- #
+# the drawable reactive JSON (the module's config, without needing to run JS)
+# --------------------------------------------------------------------------- #
+
+def test_reactive_view_is_a_drawable_machine_view():
+    from cobol_xstate.reactive import build_reactive_view
+    v = build_reactive_view(_machine("custrpt.cbl"))
+    assert v["format"] == "xstate-v5-config"        # same shape as the other views
+    assert v["metadata"]["view"] == "reactive"
+    assert v["machine"]["initial"] in v["machine"]["states"]
+
+
+def test_reactive_view_has_no_dangling_targets():
+    from cobol_xstate.reactive import build_reactive_view
+    st = build_reactive_view(_machine("custrpt.cbl"))["machine"]["states"]
+    for name, s in st.items():
+        for e in s.get("always", []) or []:
+            if e.get("target"):
+                assert e["target"] in st, f"{name} -> {e['target']}"
+        for ev, h in (s.get("on") or {}).items():
+            if isinstance(h, dict) and h.get("target"):
+                assert h["target"] in st, f"{name} -{ev}-> {h['target']}"
+
+
+def test_reactive_view_shows_the_message_contract():
+    """The waits and publishes ARE the new system's message contract - a reader must be
+    able to see them on the chart without running any JS."""
+    from cobol_xstate.reactive import build_reactive_view
+    v = build_reactive_view(_machine("custrpt.cbl"))
+    waits = {ev for s in v["machine"]["states"].values() for ev in (s.get("on") or {})}
+    assert waits == {"GET.FILE.CUST-FILE", "END.FILE.CUST-FILE"}
+    publishes = {a for s in v["machine"]["states"].values()
+                 for a in (s.get("entry") or []) if a.startswith("publish_")}
+    assert publishes == {"publish_CREATE_CONSOLE_SYSOUT"}
+    assert v["manifest"]["inbound"] == ["GET.FILE.CUST-FILE", "END.FILE.CUST-FILE"]
+    assert v["manifest"]["outbound"] == ["CREATE.CONSOLE.SYSOUT"]
+
+
+def test_reactive_view_and_module_are_the_same_machine():
+    """Two encodings of one lowering - if they could drift, the drawing would stop
+    describing the thing that runs."""
+    from cobol_xstate.reactive import build_reactive_view
+    m = _machine("custrpt.cbl")
+    assert build_reactive_view(m)["machine"] == _extract(
+        emit_reactive_module(m), "machineConfig")
+
+
+def test_cli_reactive_writes_both_the_module_and_the_drawable_json(tmp_path):
+    from cobol_xstate.cli import run
+    src = EXAMPLES / "custrpt.cbl"
+    assert run([str(src), "--target", "reactive", "--outdir", str(tmp_path)]) == 0
+    assert (tmp_path / "custrpt.reactive.mjs").exists()    # runnable
+    assert (tmp_path / "custrpt.reactive.json").exists()   # drawable
+    assert (tmp_path / "cobolRuntime.mjs").exists()
