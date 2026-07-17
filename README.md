@@ -75,6 +75,30 @@ Use `--outdir` to choose the directory (created if absent), `-o PATH` for an exa
 emits the bare config alone. A program the reactive lowering refuses (CICS handler regions,
 recursive PERFORM) simply gets no `.reactive.json` and a note — the other four still land.
 
+### JCL / PROC
+
+The COBOL tells you what a program does, not the dataset it does it *to* — that binding lives
+in the JCL. Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.proc`, or force
+with `--jcl`) and it emits two views:
+
+```bash
+cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl.lineage.json
+```
+
+- **`.jcl.lineage.json`** — the **dataflow across steps** (step 1 writes a dataset step 2
+  reads is a real edge no single-program view sees), the **byte-field lineage** from utility
+  control cards (`SORT OUTREC BUILD`, `INCLUDE COND`, `IDCAMS REPRO`), and **`ddBindings`** —
+  the `ddname → dataset` join that resolves what the COBOL side was missing (`OUTDD →
+  PROD.ACCT.UNLOAD`).
+- **`.jcl.artifacts.json`** — the related-artifact manifest in the **same shape** as the
+  COBOL one: datasets, programs, PROCs, INCLUDE and control-card members, each with
+  `dependency` (runtime / compile-time) and its resolution chain. GDG generations key on the
+  base; `SYSOUT`/`DUMMY` are excluded with a reason.
+
+Cataloged PROCs, `INCLUDE` members, and control-card datasets are fetched through a function
+**you** supply to the Python API (`parse_jcl(text, resolver=…)`); anything it can't return is
+flagged, never guessed. See [docs/jcl-target.md](docs/jcl-target.md).
+
 ### Output
 
 The default output is a JSON **bundle**:

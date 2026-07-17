@@ -457,6 +457,29 @@ cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no m
 
 See [docs/artifacts-target.md](docs/artifacts-target.md).
 
+### JCL / PROC — the dataset identity the COBOL was missing
+
+Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.proc`, or force with
+`--jcl`) and it emits `<name>.jcl.artifacts.json` + `<name>.jcl.lineage.json`:
+
+```bash
+cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl.lineage.json
+cobol-xstate acctunld.jcl -o -   # both views as one bundle on stdout
+```
+
+The **lineage** view gives the dataflow across steps (`dataflow` producer→consumer edges),
+byte-field lineage from utility control cards (`fieldLineage`: `SORT OUTREC BUILD`,
+`INCLUDE COND`, `IDCAMS REPRO`), and **`ddBindings`** — the `ddname → dataset` join that
+supplies the DSN a COBOL program's `file` artifact was missing. The **artifacts** view is the
+related-artifact manifest in the same shape as the COBOL one (datasets / programs / PROCs /
+INCLUDE / control-card members; `dependency` runtime vs compile-time; GDGs keyed on the base).
+
+Symbolics (SET / PROC default / EXEC override) are resolved; PROCs, `INCLUDE`, and
+control-card datasets are fetched through a function **you** supply to the Python API
+(`parse_jcl(text, resolver=…)`), and anything unresolved is flagged, never guessed. From the
+CLI no resolver is wired, so external members are listed and flagged. See
+[docs/jcl-target.md](docs/jcl-target.md).
+
 ### Beyond one program: the state axis
 
 Every target above answers *"what does this program do?"* — the **program axis**. A
