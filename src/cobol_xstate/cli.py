@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -10,6 +11,8 @@ from typing import List, Optional
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
+from .jcl import parse_jcl
+from .jcl_views import build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage
 from .normalizer import SourceFormat, detect_source_format
 from .reactive import build_reactive_view, emit_reactive_module
@@ -94,6 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "files/datasets, called programs, queues - with the resolution "
                         "chain each program-local name still needs "
                         "(see docs/artifacts-target.md)")
+    p.add_argument("--jcl", action="store_true",
+                   help="treat the input as JCL / a PROC (auto-detected for .jcl/.prc/"
+                        ".proc or a source beginning with a // JOB/PROC statement). Emits "
+                        "<name>.jcl.artifacts.json + <name>.jcl.lineage.json - the job's "
+                        "dataset dataflow, control-card field lineage, and the related-"
+                        "artifact manifest (see docs/jcl-target.md). External PROCs / "
+                        "INCLUDE / control-card members are flagged unresolved from the "
+                        "CLI; pass a retrieval function to the Python API to resolve them.")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
     p.add_argument("-I", "--copybook-path", action="append", default=[],
@@ -120,6 +131,59 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _looks_like_jcl(source_name: str, source: str) -> bool:
+    """JCL by extension, or by a leading ``//NAME JOB/PROC`` statement (a COBOL source
+    never begins that way, so this does not misfire on COBOL)."""
+    if source_name.lower().rsplit(".", 1)[-1] in ("jcl", "prc", "proc"):
+        return True
+    for line in source.splitlines():
+        s = line.strip()
+        if not s or s.startswith("//*"):
+            continue
+        return bool(re.match(r"^//\S*\s+(JOB|PROC)\b", s, re.I))
+    return False
+
+
+def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str]) -> int:
+    """Parse a JCL job / PROC and emit its lineage + artifact manifest. The CLI supplies no
+    member resolver, so external PROCs / INCLUDE / control-card datasets are flagged; the
+    Python API (parse_jcl(text, resolver=...)) is where a retrieval function is wired in."""
+    import json as _json
+
+    job = parse_jcl(source, resolver=None, source_name=source_name)
+    lineage = build_jcl_lineage(job)
+    artifacts = build_jcl_artifacts(job)
+    base = _artifact_base(args, default_stem, job.name or "job")
+
+    if args.output == "-":
+        # one stream, one document: the two views as a single bundle
+        print(_json.dumps({"format": "cobol-xstate-jcl", "job": job.name,
+                           "source": source_name, "artifacts": artifacts,
+                           "lineage": lineage}, indent=args.indent))
+        return 0
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    art_path = Path(args.output) if args.output else outdir / f"{base}.jcl.artifacts.json"
+    lin_path = (art_path.with_name(base + ".jcl.lineage.json") if args.output
+                else outdir / f"{base}.jcl.lineage.json")
+    art_path.parent.mkdir(parents=True, exist_ok=True)
+    art_path.write_text(_json.dumps(artifacts, indent=args.indent) + "\n", encoding="utf-8")
+    lin_path.write_text(_json.dumps(lineage, indent=args.indent) + "\n", encoding="utf-8")
+    print(f"[{source_name}] wrote {art_path}", file=sys.stderr)
+    print(f"[{source_name}] wrote {lin_path}", file=sys.stderr)
+
+    if args.summary:
+        print(f"[{job.name or 'JOB'}] {len(job.steps)} step(s), "
+              f"{len(lineage['datasets'])} dataset(s), "
+              f"{len(lineage['dataflow'])} dataflow edge(s), "
+              f"{len(lineage['fieldLineage'])} field-lineage step(s), "
+              f"{len(job.flags)} flag(s)", file=sys.stderr)
+        for f in job.flags:
+            print(f"  FLAG {f}", file=sys.stderr)
+    return 0
+
+
 def run(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -137,6 +201,9 @@ def run(argv: Optional[List[str]] = None) -> int:
         source_name = path.name
         default_stem = path.stem  # <stem>.cbl -> <stem>.json by default
         search_paths.append(str(path.parent))  # look beside the source by default
+
+    if args.jcl or _looks_like_jcl(source_name, source):
+        return _run_jcl(args, source, source_name, default_stem)
 
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     resolver = CopybookResolver(
