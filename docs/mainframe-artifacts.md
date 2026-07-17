@@ -50,6 +50,13 @@ makes them **system-global** is somewhere else.
 The program-local name and the ddname are both there. **The dataset is absent**, and no
 amount of COBOL parsing will produce it.
 
+`[repo]` The `--target artifacts` view ([artifacts-target.md](artifacts-target.md)) is this
+argument made into a per-program checklist: it lists each such endpoint as a related
+artifact, marks the file `program-local`, and records `resolvedBy: "JCL DD statement"` with
+a `needs` line for the DSN. It does not resolve the identity — it *names what would*, which
+is exactly as far as a single program's source can honestly go. The estate-wide resolution
+this document plans is the next step, not that view's job.
+
 `[reasoning]` This is the argument already accepted for Db2 in the main plan: a host
 variable is program-local, the *column* is the database's, so the column is the only thing
 proving two programs read the same state. Every row below **generalizes that same argument**

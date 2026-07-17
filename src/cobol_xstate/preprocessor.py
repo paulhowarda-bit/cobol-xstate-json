@@ -53,6 +53,11 @@ class PreprocessResult:
     expanded: List[str] = field(default_factory=list)  # members successfully copied
     missing: List[str] = field(default_factory=list)   # members not found
     notes: List[str] = field(default_factory=list)
+    # Structured record of every COPY / EXEC SQL INCLUDE seen, in source order:
+    # {member, status: expanded|missing|skipped-cyclic, via: COPY|EXEC SQL INCLUDE,
+    #  replacing: bool}. The lists above stay for the notes they already feed; this
+    # carries the copybook dependency out as data (the related-artifact manifest reads it).
+    copybooks: List[dict] = field(default_factory=list)
 
 
 _COPY_RE = re.compile(
@@ -133,7 +138,8 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
                 continue
         if "COPY" in up or re.search(r"\bEXEC\s+SQL\s+INCLUDE\b", up):
             stmt, nxt = _gather_statement(lines, i)
-            m = _COPY_RE.search(stmt) or _SQL_INCLUDE_RE.search(stmt)
+            copy_m = _COPY_RE.search(stmt)
+            m = copy_m or _SQL_INCLUDE_RE.search(stmt)
             if m:
                 # Code preceding the COPY in the same gathered sentence (e.g.
                 # ``MOVE 1 TO WS-IDX. COPY FOO.``) is real code - keep it.
@@ -142,8 +148,11 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
                     emit(CodeLine(text=prefix, line=line.line,
                                   area_a=line.area_a, origin=line.origin))
                 member = m.group(1)
-                pairs = _parse_replacing(m.groupdict().get("rep") or "") if hasattr(m, "groupdict") else []
-                _expand_member(member, pairs + active_replace, resolver, res, _seen, fmt)
+                rep = m.groupdict().get("rep") if copy_m else None
+                pairs = _parse_replacing(rep or "")
+                _expand_member(member, pairs + active_replace, resolver, res, _seen, fmt,
+                               via="COPY" if copy_m else "EXEC SQL INCLUDE",
+                               replacing=bool(rep))
                 i = nxt
                 continue
         emit(line)
@@ -152,18 +161,27 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
 
 
 def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
-                   fmt: Optional[SourceFormat] = None) -> None:
+                   fmt: Optional[SourceFormat] = None, via: str = "COPY",
+                   replacing: bool = False) -> None:
     key = member.strip().strip("'\"").upper()
+
+    def record(status: str) -> None:
+        res.copybooks.append({"member": key, "status": status, "via": via,
+                              "replacing": replacing})
+
     if key in seen:
+        record("skipped-cyclic")
         res.notes.append(f"COPY {key}: recursive/cyclic include skipped")
         return
     found = resolver.resolve(member)
     if found is None:
+        record("missing")
         res.missing.append(key)
         res.notes.append(f"COPY {key}: copybook not found on search path - "
                          f"members/logic it defines are NOT in the model")
         return
     text, path = found
+    record("expanded")
     res.expanded.append(key)
     # A copybook inherits the including program's source format - it is a fragment,
     # far too small to auto-detect reliably on its own.
@@ -174,6 +192,7 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
     res.expanded.extend(x for x in inner.expanded if x not in res.expanded)
     res.missing.extend(inner.missing)
     res.notes.extend(inner.notes)
+    res.copybooks.extend(inner.copybooks)   # nested COPY inside this member
     for cl in inner.lines:
         new_text = _apply_replacing(cl.text, pairs) if pairs else cl.text
         res.lines.append(CodeLine(text=new_text, line=cl.line,

@@ -97,6 +97,9 @@ class Machine:
     returning: Optional[str] = None                      # PROCEDURE DIVISION RETURNING
     # FILE-CONTROL SELECT entries (file -> assign/organization/statusField/...).
     files: Dict[str, dict] = field(default_factory=dict)
+    # COPY / EXEC SQL INCLUDE dependencies (member/status/via/replacing) - a compile-time
+    # source dependency the related-artifact manifest lists.
+    copybooks: List[dict] = field(default_factory=list)
 
     def bundle(self) -> dict:
         from .harel import to_harel
@@ -1230,4 +1233,5 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         using=program.using,
         returning=program.returning,
         files=program.files,
+        copybooks=program.copybooks,
     )

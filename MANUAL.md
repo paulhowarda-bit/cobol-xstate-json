@@ -61,6 +61,7 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 | An event-driven (queue/async) machine | `--target reactive` |
 | The business-level story, scaffolding removed | `--target business` |
 | Which event is responsible for each field | `--target lineage` |
+| What other artifacts (tables, files, programs) it touches | `--target artifacts` |
 
 ---
 
@@ -90,9 +91,10 @@ file-association surprises entirely.
 cobol-xstate examples/custrpt.cbl --summary
 ```
 
-This writes **four JSON views** — `./custrpt.json` (the faithful machine),
+This writes **five JSON views** — `./custrpt.json` (the faithful machine),
 `./custrpt.business.json` (the business distillation), `./custrpt.lineage.json` (the
-field table) and `./custrpt.reactive.json` (the event-driven machine) — and prints a
+field table), `./custrpt.reactive.json` (the event-driven machine) and
+`./custrpt.artifacts.json` (the related-artifact manifest) — and prints a
 summary to stderr:
 
 ```
@@ -120,7 +122,7 @@ Everything on stdout is the artifact; everything on stderr is commentary. So
 
 ```
 cobol-xstate [-h] [-o OUTPUT] [--outdir DIR]
-             [--target {json,js,reactive,business}]
+             [--target {json,js,reactive,business,lineage,artifacts}]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
              [--machine-only] [--indent N] [--summary]
              source
@@ -157,22 +159,25 @@ Files are named after the source stem, or after the PROGRAM-ID when reading stdi
 cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
                                                 #  + build/charts/prog.business.json
                                                 #  + build/charts/prog.lineage.json
+                                                #  + build/charts/prog.reactive.json
+                                                #  + build/charts/prog.artifacts.json
 ```
 
-### `--no-lineage` / `--no-business` / `--no-reactive`
+### `--no-lineage` / `--no-business` / `--no-reactive` / `--no-artifacts`
 
-Skip a companion. A default run writes all four views because they answer different
+Skip a companion. A default run writes all five views because they answer different
 questions about the same program and are normally read together; these opt out when you
 want fewer. `--machine-only` suppresses all of them.
 
 A program the reactive lowering refuses (CICS handler regions, recursive `PERFORM`) gets
 no `.reactive.json` and a note on stderr — the refusal is a fact about that program, not
-a failure of the run, so the other three views still land.
+a failure of the run, so the other four views still land.
 
-### `--target {json,js,reactive,business}`
+### `--target {json,js,reactive,business,lineage,artifacts}`
 
 Which artifact to emit. Default `json`. See [section 4](#4-the-output-targets).
-Extension follows the target: `.json` for `json`/`business`, `.mjs` for `js`/`reactive`.
+Extension follows the target: `.json` for `json`/`business`/`lineage`/`artifacts`, `.mjs`
+for `js`/`reactive`.
 
 ### `--format {fixed,free}`
 
@@ -248,7 +253,8 @@ COBOL ──► faithful IR (validated, golden-master tested)
              ├──► --target js        runnable, decimal-exact
              ├──► --target reactive  event-driven lowering
              ├──► --target business  business-level distillation
-             └──► --target lineage   which event fills each field
+             ├──► --target lineage   which event fills each field
+             └──► --target artifacts which tables/files/programs it touches
 ```
 
 ### `--target json` — the contract (default)
@@ -396,6 +402,60 @@ is a deposit.*
   link's condition would look like the answer without being it.
 
 See [docs/lineage-target.md](docs/lineage-target.md) for the algorithm and its limits.
+
+### `--target artifacts` — the related-artifact manifest
+
+One row per **artifact this program is related to** — the Db2 tables, files/datasets, called
+programs, queues, maps and IMS segments it touches at run time, **plus the copybooks
+(`COPY` / `EXEC SQL INCLUDE`) it is built from** — with, for each, the identity-resolution
+chain its program-local name still needs. It is a logistics view of the same boundary the
+interface recovers: *for this program, what else on the estate is in play, and what do I
+have to read next to pin each one down?*
+
+**A default run already writes this** as `prog.artifacts.json` beside the bundle. This
+target emits it *alone*:
+
+```bash
+cobol-xstate prog.cbl --target artifacts --outdir out   # -> out/prog.artifacts.json only
+cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no manifest)
+```
+
+```jsonc
+{ "artifact": "OUT-FILE", "kind": "file", "io": "write",
+  "verbs": ["WRITE", "OPEN OUTPUT"], "identity": "program-local", "ddname": "OUTDD",
+  "organization": "SEQUENTIAL", "resolvedBy": "JCL DD statement",
+  "needs": "the JCL //<ddname> DD DSN=... to resolve the dataset name (DSN); the ddname
+            alone is a program-to-JCL binding, not the identity" }
+```
+
+- **`kind`** is the artifact category: `db2-table`, `file`, `program`, `queue`,
+  `cics-transaction`, `terminal-map`, `ims-segment`, `caller`, `spool`, `copybook`.
+- **`dependency`** is `runtime` (an endpoint it touches when it runs) or `compile-time` (a
+  copybook it is assembled from) — the two natures share one list without being confused.
+- **`io`** (runtime rows) is `read` / `write` / `read-write`, from the directions crossed.
+- **copybook rows** carry `via` (`COPY` / `EXEC SQL INCLUDE`), `status`
+  (`expanded` / `missing` / `skipped-cyclic`), `replacing`, and `contributes` (data items /
+  paragraphs it brought in). A **missing** copybook — `COPY`d but not on the search path —
+  is listed `status: "missing"` and `flags`ged: the layout it defines is absent from *every*
+  view of the program, so it is the highest-value row here.
+- **`identity`** is `global` when the name is already an estate-wide identity (a Db2 table,
+  a load-module name) and `program-local` when it is not — a ddname, a CICS file name, a
+  queue alias. For a program-local artifact, **`resolvedBy`/`needs`** name the *other*
+  artifact (JCL, the CSD, a DDL, the binder) that turns the local name into a joinable one.
+  This is the [docs/mainframe-artifacts.md](docs/mainframe-artifacts.md) thesis made
+  per-row: a file's ddname is a binding in JCL, and the dataset name (DSN) — the real
+  identity — is there, not in the COBOL.
+- **`patterns`** states a structural fact the manifest can prove: a Db2 read paired with a
+  file write *is* an `unload`; a file read paired with a Db2 write *is* a `load`.
+- **`excluded`** lists what deliberately did **not** make the artifact list, with the
+  reason — response registers (`SQLCODE`, `EIB`, FILE STATUS), handled conditions
+  (`NOTFND`, end-of-file), and system intrinsics (DATE/TIME) are the program *reacting* to
+  a subsystem, not a second thing it touches.
+- **What it won't claim**: a file used with no `SELECT ... ASSIGN` (or a CICS file with no
+  local definition) has no known ddname, so the row says the dataset is unresolvable from
+  this program alone and the manifest `flags` it — never an invented binding.
+
+See [docs/artifacts-target.md](docs/artifacts-target.md).
 
 ### Beyond one program: the state axis
 
