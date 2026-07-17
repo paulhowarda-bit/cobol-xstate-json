@@ -241,6 +241,10 @@ class Program:
     # FILE-CONTROL SELECT entries: file -> {assign, organization, access, recordKey,
     # statusField} (the file's external binding and its status-response field).
     files: Dict[str, dict] = field(default_factory=dict)
+    # COPY / EXEC SQL INCLUDE dependencies (from the preprocessor): each
+    # {member, status, via, replacing}. A compile-time source dependency, not a runtime
+    # endpoint - carried so the related-artifact manifest can list copybooks.
+    copybooks: List[dict] = field(default_factory=list)
 
 
 def walk_statements(stmts: List[Stmt]):

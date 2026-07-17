@@ -249,6 +249,7 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     pre = preprocess(lines, resolver, fmt=fmt)
     lines = pre.lines
     prog = Program(program_id=_find_program_id(lines))
+    prog.copybooks = pre.copybooks
     if pre.expanded:
         prog.notes.append("Expanded copybooks: " + ", ".join(sorted(set(pre.expanded))))
     for member in sorted(set(pre.missing)):

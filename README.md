@@ -43,17 +43,18 @@ cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir cr
 cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
 cobol-xstate prog.cbl -o out/custom.json           # exact path (overrides --outdir/name)
 cobol-xstate prog.cbl -o -                          # write the bundle to stdout instead
-cobol-xstate prog.cbl --no-business --no-lineage --no-reactive   # bundle only
+cobol-xstate prog.cbl --no-business --no-lineage --no-reactive --no-artifacts  # bundle only
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
 cobol-xstate prog.cbl --format free                # force free-format source
 cobol-xstate prog.cbl --target js                  # -> ./prog.mjs (+ cobolRuntime.mjs)
 cobol-xstate prog.cbl --target lineage             # the lineage table on its own
 cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ lineage)
+cobol-xstate prog.cbl --target artifacts           # the related-artifact manifest on its own
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 ```
 
-A default run writes **four JSON files** — four views of the same program, each answering
+A default run writes **five JSON files** — five views of the same program, each answering
 a different question:
 
 | File | Answers |
@@ -62,16 +63,17 @@ a different question:
 | `prog.business.json` | **Which steps matter?** The business distillation: scaffolding collapsed, only boundary/decision/calculation states. |
 | `prog.lineage.json` | **Where did each value come from, and under what condition?** One row per (external event, field): the event each value originates from, plus the guards that govern the write. |
 | `prog.reactive.json` | **What replaces it?** The event-driven machine: its `on` waits and `publish_*` effects are the new system's message contract. |
+| `prog.artifacts.json` | **What else does it touch?** The related-artifact manifest: the Db2 tables, files/datasets, called programs and queues it touches at run time, plus the copybooks (`COPY` / `EXEC SQL INCLUDE`) it is built from — each with the resolution chain (JCL, CSD, DDL, binder, SYSLIB) its program-local name still needs. See [docs/artifacts-target.md](docs/artifacts-target.md). |
 
-All four are things you **read or draw** (all are renderable `xstate-v5-config`, bar the
-lineage table). The **runnable** modules stay behind their own flag: `--target js` for the
-decimal-exact reference, `--target reactive` for the deployable module.
+Four of the five are things you **read or draw** (all are renderable `xstate-v5-config`, bar
+the lineage and artifact tables). The **runnable** modules stay behind their own flag:
+`--target js` for the decimal-exact reference, `--target reactive` for the deployable module.
 
 Use `--outdir` to choose the directory (created if absent), `-o PATH` for an exact path
 (companions follow it), or `-o -` to stream the bundle to stdout. Opt out with
-`--no-business` / `--no-lineage` / `--no-reactive`; `--machine-only` emits the bare config
-alone. A program the reactive lowering refuses (CICS handler regions, recursive PERFORM)
-simply gets no `.reactive.json` and a note — the other three still land.
+`--no-business` / `--no-lineage` / `--no-reactive` / `--no-artifacts`; `--machine-only`
+emits the bare config alone. A program the reactive lowering refuses (CICS handler regions,
+recursive PERFORM) simply gets no `.reactive.json` and a note — the other four still land.
 
 ### Output
 

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
 from .lineage import build_lineage
@@ -27,8 +28,9 @@ def _format(name: Optional[str]) -> Optional[SourceFormat]:
 # Suffix per target. Companions are built from the same base, so every artifact of one
 # run has a distinct name and none can land on another's path.
 _TARGET_EXT = {"js": ".mjs", "reactive": ".reactive.mjs",
-               "lineage": ".lineage.json", "business": ".business.json"}
-_COMPANION_EXT = (".business.json", ".lineage.json")
+               "lineage": ".lineage.json", "business": ".business.json",
+               "artifacts": ".artifacts.json"}
+_COMPANION_EXT = (".business.json", ".lineage.json", ".artifacts.json")
 
 
 def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
@@ -77,7 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "directory; created (with parents) if it does not exist. The "
                         "file is named after the source (or the PROGRAM-ID for stdin).")
     p.add_argument("--target",
-                   choices=["json", "js", "reactive", "business", "lineage"],
+                   choices=["json", "js", "reactive", "business", "lineage",
+                            "artifacts"],
                    default="json",
                    help="json = the XState config bundle (default); js = a runnable "
                         "XState v5 setup() ES module backed by the decimal runtime; "
@@ -86,7 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "read-only distillation that collapses technical scaffolding and "
                         "keeps only boundary/decision states (names left as fill-in); "
                         "lineage = one row per (external event, field) with the events "
-                        "whose data reaches it (see docs/lineage-target.md)")
+                        "whose data reaches it (see docs/lineage-target.md); artifacts = "
+                        "one row per related artifact this program touches - Db2 tables, "
+                        "files/datasets, called programs, queues - with the resolution "
+                        "chain each program-local name still needs "
+                        "(see docs/artifacts-target.md)")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
     p.add_argument("-I", "--copybook-path", action="append", default=[],
@@ -103,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "writes alongside the bundle")
     p.add_argument("--no-reactive", action="store_true",
                    help="skip the companion <name>.reactive.json that the default run "
+                        "writes alongside the bundle")
+    p.add_argument("--no-artifacts", action="store_true",
+                   help="skip the companion <name>.artifacts.json that the default run "
                         "writes alongside the bundle")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
@@ -188,6 +198,14 @@ def run(argv: Optional[List[str]] = None) -> int:
             return
         _companion(beside, ".business.json", build_business_view(machine))
 
+    def _write_artifacts_companion(beside: Path) -> None:
+        """The related-artifact manifest: the Db2 tables, files, called programs and
+        queues this program touches, each with the resolution chain its program-local
+        name still needs. A logistics view of the same boundary the interface recovers."""
+        if args.machine_only or args.no_artifacts:
+            return
+        _companion(beside, ".artifacts.json", build_artifacts(machine))
+
     def _write_reactive_companion(beside: Path) -> None:
         """The event-driven view: the machine the modernized system is built from.
 
@@ -205,8 +223,9 @@ def run(argv: Optional[List[str]] = None) -> int:
             return
         _companion(beside, ".reactive.json", view)
 
-    if args.target in ("business", "lineage"):
+    if args.target in ("business", "lineage", "artifacts"):
         obj = (build_lineage(machine) if args.target == "lineage"
+               else build_artifacts(machine) if args.target == "artifacts"
                else build_business_view(machine))
         text = _json.dumps(obj, indent=args.indent)
         if out_path is None:
@@ -260,6 +279,7 @@ def run(argv: Optional[List[str]] = None) -> int:
             _write_business_companion(out_path)
             _write_lineage_companion(out_path)
             _write_reactive_companion(out_path)
+            _write_artifacts_companion(out_path)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))
