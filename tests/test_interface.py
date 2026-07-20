@@ -223,6 +223,76 @@ def test_dynamic_batch_call_resolved_records_the_via_item():
     assert endpoints["POSTLOG"]["via"] == "WS-PGM"
 
 
+def test_dynamic_transid_queue_file_map_operands_resolve():
+    # The same resolution PROGRAM gets applies to EVERY resource-name operand.
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC CICS START TRANSID(WS-TRAN) END-EXEC\n"
+        "           EXEC CICS WRITEQ TD QUEUE(WS-Q) FROM(WS-MSG) END-EXEC\n"
+        "           EXEC CICS READ FILE(WS-F) INTO(WS-REC) END-EXEC\n"
+        "           EXEC CICS SEND MAP(WS-MAP) MAPSET('MSETX') END-EXEC.\n",
+        data_body="       01 WS-TRAN PIC X(4) VALUE 'AB12'.\n"
+                  "       01 WS-Q PIC X(8) VALUE 'ERRQ'.\n"
+                  "       01 WS-F PIC X(8) VALUE 'ACCTFILE'.\n"
+                  "       01 WS-MAP PIC X(7) VALUE 'MENUMAP'.\n"
+                  "       01 WS-MSG PIC X(80).\n"
+                  "       01 WS-REC PIC X(80).\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert endpoints["AB12"]["type"] == "transaction"
+    assert endpoints["AB12"]["via"] == "WS-TRAN"
+    assert endpoints["ERRQ"]["type"] == "queue"
+    assert endpoints["ERRQ"]["via"] == "WS-Q"
+    assert endpoints["ACCTFILE"]["type"] == "file"
+    assert endpoints["ACCTFILE"]["via"] == "WS-F"
+    assert endpoints["MENUMAP"]["type"] == "terminal"
+    assert endpoints["MENUMAP"]["via"] == "WS-MAP"
+    for ws in ("WS-TRAN", "WS-Q", "WS-F", "WS-MAP"):
+        assert ws not in endpoints
+
+
+def test_unresolved_transid_and_queue_operands_marked_dynamic():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-TRAN\n"
+        "           MOVE WS-OTHER TO WS-Q\n"
+        "           EXEC CICS START TRANSID(WS-TRAN) END-EXEC\n"
+        "           EXEC CICS READQ TS QUEUE(WS-Q) INTO(WS-REC) END-EXEC.\n",
+        data_body="       01 WS-TRAN PIC X(4).\n"
+                  "       01 WS-Q PIC X(8).\n"
+                  "       01 WS-OTHER PIC X(8).\n"
+                  "       01 WS-REC PIC X(80).\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert endpoints["WS-TRAN"]["dynamic"] is True
+    assert endpoints["WS-Q"]["dynamic"] is True
+
+
+def test_return_transid_data_name_resolves_in_the_verb():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC CICS RETURN TRANSID(WS-NEXT) END-EXEC.\n",
+        data_body="       01 WS-NEXT PIC X(4) VALUE 'AB12'.\n",
+    )
+    ev = next(e for e in iface["events"] if e["endpointType"] == "caller")
+    assert "TRANSID(AB12)" in ev["verb"]
+
+
+def test_dynamic_sql_is_one_db2_endpoint_marked_dynamic():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL EXECUTE IMMEDIATE :WS-SQL END-EXEC.\n",
+        data_body="       01 WS-SQL PIC X(200).\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    ep = endpoints["<dynamic-sql>"]
+    assert ep["type"] == "db2"
+    assert ep["dynamic"] is True
+    assert sorted(ep["directions"]) == ["create", "get"]
+    ev = next(e for e in iface["events"] if e["endpoint"] == "<dynamic-sql>")
+    assert ev["fields"] == ["WS-SQL"]
+
+
 def test_perimeter_states_are_tagged_on_the_machine_nodes():
     prog = parse_program(
         "       IDENTIFICATION DIVISION.\n"

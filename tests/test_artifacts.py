@@ -129,6 +129,59 @@ def test_unresolved_dynamic_program_target_is_not_presented_as_global():
     assert any("dynamic target" in f for f in man["flags"])
 
 
+def test_dynamic_transid_and_queue_operands_resolve_to_real_names():
+    """START TRANSID(data-name) / WRITEQ QUEUE(data-name) resolve exactly like
+    PROGRAM(data-name): the row is the resource name, `via` the data item."""
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           EXEC CICS START TRANSID(WS-TRAN) END-EXEC\n"
+        "           EXEC CICS WRITEQ TD QUEUE(WS-Q) FROM(WS-MSG) END-EXEC.\n",
+        data_body="       01 WS-TRAN PIC X(4) VALUE 'AB12'.\n"
+                  "       01 WS-Q PIC X(8) VALUE 'ERRQ'.\n"
+                  "       01 WS-MSG PIC X(80).\n",
+    )
+    by = _by_name(man)
+    assert "WS-TRAN" not in by and "WS-Q" not in by
+    assert by["AB12"]["kind"] == "cics-transaction"
+    assert by["AB12"]["via"] == "WS-TRAN"
+    assert by["AB12"]["identity"] == "global"
+    assert by["ERRQ"]["kind"] == "queue"
+    assert by["ERRQ"]["via"] == "WS-Q"
+
+
+def test_unresolved_dynamic_transid_is_not_presented_as_global():
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-TRAN\n"
+        "           EXEC CICS START TRANSID(WS-TRAN) END-EXEC.\n",
+        data_body="       01 WS-TRAN PIC X(4).\n"
+                  "       01 WS-OTHER PIC X(8).\n",
+    )
+    tr = _by_name(man)["WS-TRAN"]
+    assert tr["kind"] == "cics-transaction"
+    assert tr["identity"] == "program-local"
+    assert tr["dynamic"] is True
+    assert tr["resolvedBy"] is None
+    assert "data item" in tr["needs"]
+    assert any("dynamic target" in f for f in man["flags"])
+
+
+def test_dynamic_sql_row_is_honest_about_unknown_tables():
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           EXEC SQL EXECUTE IMMEDIATE :WS-SQL END-EXEC.\n",
+        data_body="       01 WS-SQL PIC X(200).\n",
+    )
+    row = _by_name(man)["<dynamic-sql>"]
+    assert row["kind"] == "db2-table"
+    assert row["identity"] == "program-local"
+    assert row["dynamic"] is True
+    assert row["io"] == "read-write"          # could be either - direction unknowable
+    assert row["resolvedBy"] is None
+    assert "assembled at run time" in row["needs"]
+    assert any("<dynamic-sql>" in f for f in man["flags"])
+
+
 def test_ambiguous_dynamic_program_target_lists_its_candidates():
     man = _artifacts_src(
         "       0000-MAIN.\n"

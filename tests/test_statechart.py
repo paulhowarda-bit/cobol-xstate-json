@@ -208,6 +208,82 @@ def test_literal_cics_link_program_unchanged():
     assert machine.flags == []
 
 
+def test_dynamic_transid_queue_file_operands_resolve_silently():
+    # Every CICS resource-name operand gets the same treatment as PROGRAM: a data-name
+    # operand whose only reaching value is a literal resolves with no flag.
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RSRC.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-TRAN PIC X(4) VALUE 'AB12'.\n"
+        "       01 WS-Q PIC X(8) VALUE 'ERRQ'.\n"
+        "       01 WS-F PIC X(8) VALUE 'ACCTFILE'.\n"
+        "       01 WS-MSG PIC X(80).\n"
+        "       01 WS-REC PIC X(80).\n"
+        "       01 WS-KEY PIC X(8).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC CICS START TRANSID(WS-TRAN) END-EXEC\n"
+        "           EXEC CICS WRITEQ TD QUEUE(WS-Q) FROM(WS-MSG) END-EXEC\n"
+        "           EXEC CICS READ FILE(WS-F) INTO(WS-REC) RIDFLD(WS-KEY) END-EXEC\n"
+        "           GOBACK.\n"
+    )
+    machine = _machine(src)
+    assert machine.flags == []
+
+
+def test_dynamic_transid_and_file_operands_flagged_when_unresolved():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RSRC.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-TRAN PIC X(4).\n"
+        "       01 WS-F PIC X(8).\n"
+        "       01 WS-OTHER PIC X(8).\n"
+        "       01 WS-REC PIC X(80).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-TRAN\n"
+        "           MOVE WS-OTHER TO WS-F\n"
+        "           EXEC CICS START TRANSID(WS-TRAN) END-EXEC\n"
+        "           EXEC CICS READ FILE(WS-F) INTO(WS-REC) END-EXEC\n"
+        "           GOBACK.\n"
+    )
+    msgs = " ".join(f["message"] for f in _machine(src).flags)
+    assert "dynamic CICS START TRANSID(WS-TRAN)" in msgs
+    assert "dynamic CICS READ FILE(WS-F)" in msgs
+
+
+def test_return_transid_eib_field_flagged_as_cics_supplied():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. PSEUDO.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC CICS RETURN TRANSID(EIBTRNID) END-EXEC.\n"
+    )
+    msgs = " ".join(f["message"] for f in _machine(src).flags)
+    assert "TRANSID(EIBTRNID)" in msgs and "EIB" in msgs
+
+
+def test_dynamic_sql_execute_immediate_flagged():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. DYNSQL.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-SQL PIC X(200).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC SQL EXECUTE IMMEDIATE :WS-SQL END-EXEC\n"
+        "           GOBACK.\n"
+    )
+    msgs = " ".join(f["message"] for f in _machine(src).flags)
+    assert "dynamic SQL" in msgs and "assembled at run time" in msgs
+
+
 def test_alter_modeled_as_context_driven_guard_switch():
     machine = _machine((EXAMPLES / "altswitch.cbl").read_text())
     # The altered paragraph's exit is a guard set over its candidate targets...
