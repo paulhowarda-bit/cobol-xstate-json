@@ -477,10 +477,32 @@ class _ParaCompiler:
                 "action", f"perform_{st.target}__THRU__{st.thru}", cobol, st.line)
         return self.reg.action_named(f"perform_{st.target}", cobol, st.line)
 
+    def _exec_program_target(self, st: ExecStmt):
+        """The module name for a CICS LINK/XCTL target, plus spec extras for the
+        external interface and a provenance note. ``PROGRAM('X')`` IS the module name;
+        a ``PROGRAM(data-name)`` operand resolves by the same constant propagation as
+        a dynamic batch CALL - resolve where provable, flag (don't guess) otherwise."""
+        if not (st.target and st.kind in ("call", "transfer")):
+            return st.target, {}, ""
+        if not st.dynamic:
+            return st.target, {"program": st.target}, ""
+        res = self.ctx.calls.resolve(st.target)
+        if res.confident and res.resolved:
+            return res.resolved, {"program": res.resolved, "programVia": st.target}, \
+                f" [PROGRAM({st.target}) -> resolved '{res.resolved}': {res.reason}]"
+        self.ctx.flag(self.pname, st.line,
+                      f"dynamic CICS {st.verb} PROGRAM({st.target}) - {res.reason}")
+        extras = {"dynamicProgram": True, "programVia": st.target}
+        if res.candidates:
+            extras["programCandidates"] = res.candidates
+        return st.target, extras, ""
+
     def _exec_action(self, st: ExecStmt) -> str:
-        base = f"link_{st.target}" if st.kind == "call" and st.target else \
+        target, extras, note = self._exec_program_target(st)
+        base = f"link_{target}" if st.kind == "call" and target else \
             f"exec_{st.lang.lower()}_{st.verb.lower()}"
-        name = self.reg.action_named(base, f"EXEC {st.lang} {st.text} END-EXEC", st.line)
+        name = self.reg.action_named(base, f"EXEC {st.lang} {st.text} END-EXEC{note}",
+                                     st.line)
         if st.kind == "input" and st.into_vars:
             # SELECT/FETCH ... INTO: the DB row populates the host variables - a real
             # (external-sourced) assignment to each, not an opaque effect.
@@ -492,10 +514,11 @@ class _ParaCompiler:
             }
             self.ctx.action_sem[name] = _with_columns(spec, st)
         else:
-            self.ctx.action_sem.setdefault(name, _with_columns({
-                "verb": st.verb, "kind": f"exec-{st.lang.lower()}",
-                "hostVars": st.host_vars, "raw": f"EXEC {st.lang} {st.text} END-EXEC",
-            }, st))
+            spec = {"verb": st.verb, "kind": f"exec-{st.lang.lower()}",
+                    "hostVars": st.host_vars,
+                    "raw": f"EXEC {st.lang} {st.text} END-EXEC"}
+            spec.update(extras)
+            self.ctx.action_sem.setdefault(name, _with_columns(spec, st))
         if st.column_note:
             self.ctx.flag(self.pname, st.line,
                           f"EXEC {st.lang} {st.verb}: column<->host-variable mapping not "
@@ -537,18 +560,25 @@ class _ParaCompiler:
         if isinstance(st, ExecStmt):       # terminate (RETURN/ABEND) or transfer (XCTL)
             name = root or self._fresh("exec")
             self.reg.state(name, f"EXEC {st.lang} {st.verb} ({st.kind})", st.line)
-            if st.kind == "transfer":
-                self.ctx.flag(self.pname, st.line,
-                              f"EXEC {st.lang} XCTL to {st.target or '?'} - control "
-                              f"transfers out with no return")
-            meta = {"kind": f"cics-{st.verb.lower()}", "cobolLine": st.line}
-            if st.target:
-                meta["target"] = st.target
             # The terminating command itself is a boundary crossing (CICS RETURN sends
             # the COMMAREA/TRANSID back to the caller; XCTL passes it on; ABEND raises
             # a condition) - carry it as the final state's entry action so the external
-            # interface sees it. It was invisible here before.
+            # interface sees it. It was invisible here before. Built first so the
+            # resolved target (a dynamic PROGRAM(data-name) operand) is available here.
             eff = self._exec_action(st)
+            sp = self.ctx.action_sem.get(eff, {})
+            resolved = sp.get("program")
+            if st.kind == "transfer":
+                self.ctx.flag(self.pname, st.line,
+                              f"EXEC {st.lang} XCTL to {resolved or st.target or '?'} - "
+                              f"control transfers out with no return")
+            meta = {"kind": f"cics-{st.verb.lower()}", "cobolLine": st.line}
+            if st.target:
+                meta["target"] = resolved or st.target
+                if resolved and resolved != st.target:
+                    meta["targetVia"] = st.target
+                if sp.get("dynamicProgram"):
+                    meta["dynamic"] = True
             return self._emit(name, {"type": "final", "entry": [eff], "meta": meta})
         if isinstance(st, ContinueStmt):  # NEXT SENTENCE (plain CONTINUE is straight-line)
             self.ctx.flag(self.pname, st.line, "NEXT SENTENCE - differs from CONTINUE; verify control flow")

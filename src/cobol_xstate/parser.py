@@ -975,6 +975,7 @@ class StmtParser:
                 host_vars.append(":" + toks[idx + 1].text.upper())
 
         kind, target, conditions = "effect", None, []
+        dynamic = False
         into_vars: List[str] = []
         columns: List[dict] = []
         select_list: List[Optional[str]] = []
@@ -983,9 +984,11 @@ class StmtParser:
             if verb in ("RETURN", "ABEND"):
                 kind = "terminate"
             elif verb == "XCTL":
-                kind, target = "transfer", self._exec_program(toks)
+                kind = "transfer"
+                target, dynamic = self._exec_program(toks)
             elif verb == "LINK":
-                kind, target = "call", self._exec_program(toks)
+                kind = "call"
+                target, dynamic = self._exec_program(toks)
             elif verb == "HANDLE":
                 kind = "handle"
                 conditions = self._exec_handle_conditions(toks)
@@ -1012,7 +1015,8 @@ class StmtParser:
             elif verb == "UPDATE":
                 columns = self._exec_update_sets(toks)
         return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
-                        target=target, host_vars=host_vars, conditions=conditions,
+                        target=target, dynamic=dynamic,
+                        host_vars=host_vars, conditions=conditions,
                         into_vars=into_vars, columns=columns, select_list=select_list,
                         column_note=column_note)
 
@@ -1160,16 +1164,19 @@ class StmtParser:
         return out
 
     @staticmethod
-    def _exec_program(toks: List[Token]) -> Optional[str]:
-        """Pull PROGRAM('NAME') or PROGRAM(NAME) from a CICS command."""
+    def _exec_program(toks: List[Token]) -> Tuple[Optional[str], bool]:
+        """Pull PROGRAM('NAME') or PROGRAM(name) from a CICS command.
+
+        Returns ``(name, dynamic)``: a quoted operand IS the load-module name; a bare
+        word is a data item holding it, so the target is runtime-determined."""
         for idx, t in enumerate(toks):
             if t.kind == "word" and t.up == "PROGRAM":
                 for k in range(idx + 1, min(idx + 4, len(toks))):
                     if toks[k].kind == "string":
-                        return toks[k].text.strip("'\"").strip()
+                        return toks[k].text.strip("'\"").strip(), False
                     if toks[k].kind == "word":
-                        return toks[k].up
-        return None
+                        return toks[k].up, True
+        return None, False
 
     @staticmethod
     def _exec_handle_conditions(toks: List[Token]) -> List[str]:

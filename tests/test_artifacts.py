@@ -94,6 +94,56 @@ def test_cics_link_and_xctl_resolve_via_the_csd_not_the_binder():
         assert any(v.startswith("CICS") for v in by[prog]["verbs"])
 
 
+def test_cics_link_program_data_name_resolves_to_the_module_name():
+    """LINK PROGRAM(WS-PGM) with WS-PGM VALUE 'FBSPREST': the manifest row is the
+    module name FBSPREST (with the data item it came via), never WS-PGM."""
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           EXEC CICS LINK PROGRAM(WS-PGM) END-EXEC.\n",
+        data_body="       01 WS-PGM PIC X(8) VALUE 'FBSPREST'.\n",
+    )
+    by = _by_name(man)
+    assert "WS-PGM" not in by
+    pg = by["FBSPREST"]
+    assert pg["kind"] == "program"
+    assert pg["identity"] == "global"
+    assert pg["via"] == "WS-PGM"
+    assert pg["resolvedBy"] == "CICS CSD (DEFINE PROGRAM)"
+
+
+def test_unresolved_dynamic_program_target_is_not_presented_as_global():
+    """When the target data item is set only from another variable, the row must say
+    the name is a data item - not claim a working-storage name is a load module."""
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-PGM\n"
+        "           EXEC CICS LINK PROGRAM(WS-PGM) END-EXEC.\n",
+        data_body="       01 WS-PGM PIC X(8).\n"
+                  "       01 WS-OTHER PIC X(8).\n",
+    )
+    pg = _by_name(man)["WS-PGM"]
+    assert pg["identity"] == "program-local"
+    assert pg["dynamic"] is True
+    assert pg["resolvedBy"] is None
+    assert "data item" in pg["needs"]
+    assert any("dynamic target" in f for f in man["flags"])
+
+
+def test_ambiguous_dynamic_program_target_lists_its_candidates():
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           MOVE 'PGMA' TO WS-PGM\n"
+        "           EXEC CICS LINK PROGRAM(WS-PGM) END-EXEC\n"
+        "           MOVE 'PGMB' TO WS-PGM\n"
+        "           EXEC CICS LINK PROGRAM(WS-PGM) END-EXEC.\n",
+        data_body="       01 WS-PGM PIC X(8).\n",
+    )
+    pg = _by_name(man)["WS-PGM"]
+    assert pg["dynamic"] is True
+    assert pg["candidates"] == ["PGMA", "PGMB"]
+    assert "PGMA" in pg["needs"] and "PGMB" in pg["needs"]
+
+
 # --------------------------------------------------------------------------- #
 # the two structural patterns the example corpus is named for
 # --------------------------------------------------------------------------- #

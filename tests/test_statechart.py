@@ -142,6 +142,72 @@ def test_dynamic_call_from_variable_stays_flagged():
     assert "runtime-determined" in msgs
 
 
+_CICS_LINK_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. LNKT.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 WS-PGM PIC X(8) VALUE 'FBSPREST'.\n"
+    "       01 WS-AREA PIC X(100).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           EXEC CICS LINK PROGRAM(WS-PGM) COMMAREA(WS-AREA) END-EXEC\n"
+    "           GOBACK.\n"
+)
+
+
+def test_dynamic_cics_link_resolved_by_constant_propagation():
+    # PROGRAM(WS-PGM) where WS-PGM has VALUE 'FBSPREST' and is never reassigned:
+    # the module name resolves statically, exactly like a dynamic batch CALL.
+    machine = _machine(_CICS_LINK_SRC)
+    assert machine.flags == []
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "link_FBSPREST" in actions
+    assert not any("WS-PGM" in a for a in actions)
+    prov = machine.provenance["link_FBSPREST"]["cobol"]
+    assert "resolved 'FBSPREST'" in prov and "WS-PGM" in prov
+
+
+def test_dynamic_cics_link_unresolved_stays_flagged():
+    src = _CICS_LINK_SRC.replace(
+        "       01 WS-PGM PIC X(8) VALUE 'FBSPREST'.\n",
+        "       01 WS-PGM PIC X(8).\n"
+        "       01 WS-OTHER PIC X(8).\n",
+    ).replace(
+        "           EXEC CICS LINK",
+        "           MOVE WS-OTHER TO WS-PGM\n"
+        "           EXEC CICS LINK",
+    )
+    machine = _machine(src)
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "dynamic CICS LINK PROGRAM(WS-PGM)" in msgs
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "link_WS-PGM" in actions
+
+
+def test_dynamic_cics_xctl_resolves_target_in_final_state_meta():
+    src = _CICS_LINK_SRC.replace("VALUE 'FBSPREST'", "VALUE 'NEXTPGM'").replace(
+        "           EXEC CICS LINK PROGRAM(WS-PGM) COMMAREA(WS-AREA) END-EXEC\n"
+        "           GOBACK.\n",
+        "           EXEC CICS XCTL PROGRAM(WS-PGM) COMMAREA(WS-AREA) END-EXEC.\n",
+    )
+    machine = _machine(src)
+    finals = [s for s in machine.config["states"].values()
+              if s.get("type") == "final" and s.get("meta", {}).get("target")]
+    assert finals and finals[0]["meta"]["target"] == "NEXTPGM"
+    assert finals[0]["meta"]["targetVia"] == "WS-PGM"
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "XCTL to NEXTPGM" in msgs
+
+
+def test_literal_cics_link_program_unchanged():
+    src = _CICS_LINK_SRC.replace("PROGRAM(WS-PGM)", "PROGRAM('POSTLOG')")
+    machine = _machine(src)
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "link_POSTLOG" in actions
+    assert machine.flags == []
+
+
 def test_alter_modeled_as_context_driven_guard_switch():
     machine = _machine((EXAMPLES / "altswitch.cbl").read_text())
     # The altered paragraph's exit is a guard set over its candidate targets...
