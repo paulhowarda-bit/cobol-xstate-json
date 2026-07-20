@@ -132,11 +132,44 @@ are the specification. This first version handles the common cases and flags the
   parsed; an unrecognized control deck is recorded as `utility: "unknown"` with a card
   count, never invented.
 
-## Where it fits
+## Closing the loop: `bind_cobol_artifacts` / `--bind-jcl`
 
 This is the resolver the COBOL side has been pointing at all along. The COBOL `artifacts`
 manifest names, for each file, the `ddname` and says *"the DSN is in the JCL"*; this view
-**is** that JCL, and `ddBindings` is the edge that connects them. Loaded together, a file's
-program-local name (`OUT-FILE`), its ddname (`OUTDD`), and its dataset (`PROD.ACCT.UNLOAD`)
-become one identity - which is exactly what [state-graph-plan.md](state-graph-plan.md) needs
-to stop two programs reading one dataset under different local names from looking unrelated.
+**is** that JCL, and `ddBindings` is the edge that connects them. The join is built in:
+
+```python
+from cobol_xstate.jcl_views import bind_cobol_artifacts
+resolved = bind_cobol_artifacts(cobol_manifest, [job1, job2, ...])
+```
+
+```bash
+cobol-xstate sqlunld.cbl --bind-jcl acctunld.jcl     # repeatable for several jobs
+```
+
+Matching on `(program, ddname)`, each file row the JCL resolves gains:
+
+```jsonc
+{ "artifact": "OUT-FILE", "ddname": "OUTDD",
+  "dataset": "PROD.ACCT.UNLOAD",                          // the DSN it was missing
+  "resolvedBy": "JCL DD statement: ACCTUNLD.STEP01",      // the ACTUAL statement, not a category
+  "boundBy": [ { "job": "ACCTUNLD", "step": "STEP01",
+                 "dataset": "PROD.ACCT.UNLOAD", "io": "output",
+                 "generation": "+1" } ] }                  // + the step's run conditions, if any
+```
+
+and its `needs` is dropped - the identity chain `OUT-FILE -> OUTDD -> PROD.ACCT.UNLOAD` is
+closed, which is exactly what [state-graph-plan.md](state-graph-plan.md) needs to stop two
+programs reading one dataset under different local names from looking unrelated.
+
+The join's honesty rules:
+
+- The same program bound to **different datasets** across the supplied jobs is a fact (it
+  runs against different data in different jobs), not an error: the row lists
+  `datasetCandidates` instead of picking one, `boundBy` says which job uses which, and a
+  flag calls it out. Never collapsed.
+- A binding made by a **conditional step** (inside an `IF` branch, or carrying a `COND=`)
+  keeps the step's run conditions in its `boundBy` entry - the binding only holds when the
+  step runs.
+- An **unmatched ddname** - or the same ddname in a step running a *different* program - is
+  left exactly as it was: still honestly needing its JCL.

@@ -87,9 +87,10 @@ cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl
 
 - **`.jcl.lineage.json`** — the **dataflow across steps** (step 1 writes a dataset step 2
   reads is a real edge no single-program view sees), the **byte-field lineage** from utility
-  control cards (`SORT OUTREC BUILD`, `INCLUDE COND`, `IDCAMS REPRO`), and **`ddBindings`** —
-  the `ddname → dataset` join that resolves what the COBOL side was missing (`OUTDD →
-  PROD.ACCT.UNLOAD`).
+  control cards (`SORT OUTREC BUILD`, `INCLUDE COND`, `IDCAMS REPRO`), per-step **run
+  conditions** (`IF/THEN/ELSE` recovered; `COND=` parsed with its back-to-front sense spelt
+  out), and **`ddBindings`** — the `ddname → dataset` join that resolves what the COBOL side
+  was missing (`OUTDD → PROD.ACCT.UNLOAD`).
 - **`.jcl.artifacts.json`** — the related-artifact manifest in the **same shape** as the
   COBOL one: datasets, programs, PROCs, INCLUDE and control-card members, each with
   `dependency` (runtime / compile-time) and its resolution chain. GDG generations key on the
@@ -97,7 +98,10 @@ cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl
 
 Cataloged PROCs, `INCLUDE` members, and control-card datasets are fetched through a function
 **you** supply to the Python API (`parse_jcl(text, resolver=…)`); anything it can't return is
-flagged, never guessed. See [docs/jcl-target.md](docs/jcl-target.md).
+flagged, never guessed. And the loop closes: `cobol-xstate prog.cbl --bind-jcl job.jcl`
+resolves the COBOL program's file ddnames against the JCL, so each bound file row carries its
+actual `dataset` (`OUT-FILE → OUTDD → PROD.ACCT.UNLOAD`, one identity). See
+[docs/jcl-target.md](docs/jcl-target.md).
 
 ### Output
 

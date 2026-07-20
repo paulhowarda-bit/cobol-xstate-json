@@ -469,10 +469,18 @@ cobol-xstate acctunld.jcl -o -   # both views as one bundle on stdout
 
 The **lineage** view gives the dataflow across steps (`dataflow` producer→consumer edges),
 byte-field lineage from utility control cards (`fieldLineage`: `SORT OUTREC BUILD`,
-`INCLUDE COND`, `IDCAMS REPRO`), and **`ddBindings`** — the `ddname → dataset` join that
-supplies the DSN a COBOL program's `file` artifact was missing. The **artifacts** view is the
-related-artifact manifest in the same shape as the COBOL one (datasets / programs / PROCs /
-INCLUDE / control-card members; `dependency` runtime vs compile-time; GDGs keyed on the base).
+`INCLUDE COND`, `IDCAMS REPRO`), per-step **run conditions** (`IF/THEN/ELSE` nesting
+recovered; `COND=` parsed with its back-to-front bypass sense spelt out as `runsWhen`), and
+**`ddBindings`** — the `ddname → dataset` join that supplies the DSN a COBOL program's
+`file` artifact was missing. The **artifacts** view is the related-artifact manifest in the
+same shape as the COBOL one (datasets / programs / PROCs / INCLUDE / control-card members;
+`dependency` runtime vs compile-time; GDGs keyed on the base).
+
+**Closing the loop**: pass the JCL to a COBOL run with `--bind-jcl job.jcl` (repeatable) and
+the program's artifacts view resolves each file's ddname to its dataset — the row gains
+`dataset` and `boundBy` (job/step, with the step's run conditions), and its `needs` is
+satisfied. Conflicting bindings across jobs are listed as `datasetCandidates` and flagged,
+never collapsed. Python: `bind_cobol_artifacts(manifest, jobs)` in `jcl_views`.
 
 Symbolics (SET / PROC default / EXEC override) are resolved; PROCs, `INCLUDE`, and
 control-card datasets are fetched through a function **you** supply to the Python API

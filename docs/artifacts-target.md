@@ -66,6 +66,11 @@ The `resolvedBy` column is deliberately the same set of resolvers as the tier ta
 [mainframe-artifacts.md](mainframe-artifacts.md#role-1-resolvers) — the manifest is how a
 single program *feeds* that estate-wide resolution work.
 
+For **files**, the first of those resolutions is now built in: pass the JCL with
+`--bind-jcl job.jcl` (or `bind_cobol_artifacts` in Python) and each file row the JCL
+resolves gains `dataset` and `boundBy` — the ddname → DSN chain closed by the actual DD
+statement. See [jcl-target.md](jcl-target.md#closing-the-loop-bind_cobol_artifacts---bind-jcl).
+
 ## Copybooks — the compile-time dependency
 
 `COPY` and `EXEC SQL INCLUDE` members are listed too, sourced from the preprocessor's own
