@@ -70,6 +70,18 @@ def _dd_rows(job: Job):
             yield step, dd, _dd_dataset(dd), _dd_io(dd)
 
 
+def _step_conditions(step: Step) -> Optional[dict]:
+    """The conditions under which this step runs, or None for an unconditional step.
+    ``if`` is the IF/THEN/ELSE nesting (every test must hold, in its stated polarity);
+    ``cond`` is the parsed COND= with its bypass sense spelt out."""
+    c: dict = {}
+    if step.conditions:
+        c["if"] = [{"test": x["expr"], "negated": x["negated"]} for x in step.conditions]
+    if step.cond:
+        c["cond"] = step.cond_parsed or {"raw": step.cond}
+    return c or None
+
+
 # --------------------------------------------------------------------------- #
 # lineage
 # --------------------------------------------------------------------------- #
@@ -175,6 +187,11 @@ def build_jcl_lineage(job: Job) -> dict:
             rec["consumedBy"].append({**entry, "note": "direction ambiguous (OLD/I-O)"})
 
     field_rows: List[dict] = []
+    conds: Dict[str, dict] = {}
+    for step in job.steps:
+        c = _step_conditions(step)
+        if c:
+            conds[step.name] = c
     for step in job.steps:
         inputs, outputs = [], []
         for dd in step.dds:
@@ -196,8 +213,8 @@ def build_jcl_lineage(job: Job) -> dict:
         if step.proc and step.proc_resolved is False:
             srow["proc"] = step.proc
             srow["procResolved"] = False
-        if step.cond:
-            srow["condition"] = step.cond
+        if conds.get(step.name):
+            srow["conditions"] = conds[step.name]
         srow["inputs"] = inputs
         srow["outputs"] = outputs
         steps_out.append(srow)
@@ -222,16 +239,28 @@ def build_jcl_lineage(job: Job) -> dict:
                 b["generation"] = seg.gdg
             if seg.member:
                 b["member"] = seg.member
+            if conds.get(step.name):
+                b["conditions"] = conds[step.name]
             bindings.append(b)
 
     # dataflow edges: a dataset produced by one step and consumed by another is an edge.
+    # An edge holds only when BOTH its steps actually run, so a conditional endpoint's
+    # conditions ride on the edge.
     dataflow: List[dict] = []
     for key, rec in datasets.items():
         for p in rec["producedBy"]:
             for c in rec["consumedBy"]:
                 if p["step"] != c["step"]:
-                    dataflow.append({"from": p["step"], "to": c["step"], "dataset": key,
-                                     "outDD": p["ddname"], "inDD": c["ddname"]})
+                    edge = {"from": p["step"], "to": c["step"], "dataset": key,
+                            "outDD": p["ddname"], "inDD": c["ddname"]}
+                    ec = {}
+                    if conds.get(p["step"]):
+                        ec["producer"] = conds[p["step"]]
+                    if conds.get(c["step"]):
+                        ec["consumer"] = conds[c["step"]]
+                    if ec:
+                        edge["conditions"] = ec
+                    dataflow.append(edge)
         rec["intermediate"] = bool(rec["producedBy"] and rec["consumedBy"])
 
     return {
@@ -246,10 +275,15 @@ def build_jcl_lineage(job: Job) -> dict:
             "record field traced to the input bytes it copies (SORT BUILD/OUTREC), plus "
             "the filter (INCLUDE/OMIT COND) that decides which records survive. A DSN with "
             "a GDG relative generation is keyed on its base (the stable identity) with the "
-            "generation recorded. Nothing is invented - unresolved symbolics/PROCs and "
-            "ambiguous OLD/I-O directions are in 'flags'. Where a step runs a COBOL program "
-            "this tool analyses, the DD ddname is the join to that program's own interface/"
-            "lineage: this view supplies the dataset its ddname was missing."
+            "generation recorded. 'conditions' on a step (and on the dataflow edges and "
+            "ddBindings it contributes) say when it actually runs: 'if' is the IF/THEN/"
+            "ELSE nesting (every test must hold, negated=true for an ELSE branch), 'cond' "
+            "is the parsed COND= with its BYPASS sense spelt out ('runsWhen' is the "
+            "negation a reader wants - COND is the back-to-front one). Nothing is invented "
+            "- unresolved symbolics/PROCs and ambiguous OLD/I-O directions are in 'flags'. "
+            "Where a step runs a COBOL program this tool analyses, the DD ddname is the "
+            "join to that program's own interface/lineage: this view supplies the dataset "
+            "its ddname was missing."
         ),
         "steps": steps_out,
         "datasets": sorted(datasets.values(), key=lambda r: r["dsn"]),
@@ -296,8 +330,11 @@ def build_jcl_artifacts(job: Job) -> dict:
             "temporary": seg.dsn.startswith("&&"),
             "generations": set()})
         rec["_dirs"].add(io or "unknown")
-        rec["touchedBy"].append({"step": step.name, "ddname": dd.ddname,
-                                 "disp": seg.disp[0] if seg.disp else None})
+        touched = {"step": step.name, "ddname": dd.ddname,
+                   "disp": seg.disp[0] if seg.disp else None}
+        if _step_conditions(step):
+            touched["conditional"] = True     # the touch happens only if the step runs
+        rec["touchedBy"].append(touched)
         if seg.gdg:
             rec["generations"].add(seg.gdg)
 

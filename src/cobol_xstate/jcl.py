@@ -80,6 +80,11 @@ class Step:
     from_proc: Optional[str] = None      # the PROC this step was expanded from
     proc_step: Optional[str] = None      # the PROC's own step name
     cond: Optional[str] = None           # COND= text (verbatim; notoriously back-to-front)
+    cond_parsed: Optional[dict] = None   # structured COND= with its run-sense spelt out
+    # IF/THEN/ELSE conditions governing this step, outermost first. Each is
+    # {expr, negated}: the step runs when every expr holds in its stated polarity
+    # (a step in an ELSE branch carries the IF's expr with negated=True).
+    conditions: List[dict] = field(default_factory=list)
     parm: Optional[str] = None
     dds: List[DD] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
@@ -310,6 +315,66 @@ def _dd_direction(seg: DDSegment) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
+# step conditions: COND= and IF/THEN/ELSE
+# --------------------------------------------------------------------------- #
+
+def _parse_cond(text: str) -> dict:
+    """Parse a ``COND=`` value into a structure whose RUN sense is spelt out.
+
+    COND is the notorious back-to-front one (docs/mainframe-artifacts.md): each test says
+    when to *skip* the step - ``COND=(4,LT)`` bypasses the step if 4 is less than any
+    preceding step's return code. Presenting only the raw text invites the classic
+    misreading, so the structure states both directions: ``bypassedWhen`` (the literal
+    semantics) and ``runsWhen`` (the negation a reader actually wants). EVEN/ONLY are the
+    abend modifiers. An unrecognized form is kept raw and marked, never guessed."""
+    out: dict = {"raw": text, "sense": "bypass-when-true", "tests": []}
+    items = _paren_list(text.strip())
+
+    def add_test(parts: List[str]) -> None:
+        test: dict = {"code": int(parts[0])}
+        if len(parts) > 1:
+            test["op"] = parts[1].strip().upper()
+        if len(parts) > 2:
+            test["step"] = parts[2].strip().upper()
+        out["tests"].append(test)
+
+    if items and items[0].strip().isdigit():
+        add_test(items)                              # COND=(code,op[,step])
+    else:
+        for it in items:
+            u = it.strip().upper()
+            if u == "EVEN":
+                out["even"] = True
+            elif u == "ONLY":
+                out["only"] = True
+            elif it.strip().startswith("("):
+                sub = _paren_list(it)
+                if sub and sub[0].strip().isdigit():
+                    add_test(sub)
+                else:
+                    out.setdefault("unparsed", []).append(it)
+            elif u:
+                out.setdefault("unparsed", []).append(it)
+
+    bypass = [f"{t['code']} {t.get('op', '?')} "
+              f"{('RC of ' + t['step']) if t.get('step') else 'the RC of any preceding step'}"
+              for t in out["tests"]]
+    if bypass:
+        out["bypassedWhen"] = " OR ".join(bypass)
+        run = f"runs unless {out['bypassedWhen']}"
+    else:
+        run = "runs"
+    if out.get("only"):
+        run += "; ONLY after a preceding step abended"
+    elif out.get("even"):
+        run += "; even after a preceding step abended"
+    out["runsWhen"] = run
+    if out.get("unparsed"):
+        out["note"] = "unrecognized COND form kept raw - verify against the JCL Reference"
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # control-card parsing (utility programs)
 # --------------------------------------------------------------------------- #
 
@@ -470,6 +535,9 @@ class _Parser:
         self.job = Job(name="", source_name=source_name)
         # Shared across nested PROC expansions so a cycle A->B->A is caught, not looped.
         self._expanding: set = expanding if expanding is not None else set()
+        # The open IF/THEN/ELSE nesting at the current point of the member; every step
+        # created gets a snapshot (a step inside ELSE carries the expr negated).
+        self._ifstack: List[dict] = []
 
     # -- resolver plumbing --------------------------------------------------
     def _resolve(self, name: str, what: str) -> Optional[str]:
@@ -656,9 +724,22 @@ class _Parser:
                     self._expand_include(member, cur_step)
                 idx += 1
                 continue
+            if op == "IF":
+                self._if_push(log.operands)
+                idx += 1
+                continue
+            if op == "ELSE":
+                self._if_else()
+                idx += 1
+                continue
+            if op == "ENDIF":
+                self._if_pop()
+                idx += 1
+                continue
             if op == "EXEC":
                 cur_step, cur_dd = None, None
                 new_steps = self._make_steps(log)
+                self._attach_step_context(new_steps)
                 self.job.steps.extend(new_steps)
                 cur_step = new_steps[-1] if new_steps else None
                 cur_dd = None
@@ -670,6 +751,38 @@ class _Parser:
                 idx += 1
                 continue
             idx += 1
+        if self._ifstack:
+            self.job.flags.append(
+                f"{len(self._ifstack)} IF without ENDIF at end of member - conditions on "
+                f"later steps may be wrong")
+
+    # -- IF/THEN/ELSE nesting ------------------------------------------------
+    def _if_push(self, operands: str) -> None:
+        expr = re.sub(r"\bTHEN\s*$", "", operands or "", flags=re.I).strip()
+        self._ifstack.append({"expr": expr, "negated": False})
+
+    def _if_else(self) -> None:
+        if self._ifstack:
+            top = self._ifstack[-1]
+            self._ifstack[-1] = {"expr": top["expr"], "negated": True}
+        else:
+            self.job.flags.append("ELSE without a matching IF - conditions may be wrong")
+
+    def _if_pop(self) -> None:
+        if self._ifstack:
+            self._ifstack.pop()
+        else:
+            self.job.flags.append("ENDIF without a matching IF - conditions may be wrong")
+
+    def _attach_step_context(self, steps: List[Step]) -> None:
+        """Stamp the current IF nesting onto newly created steps (outer conditions first,
+        before any the step already carries from inside a PROC body), and parse COND=."""
+        snapshot = [dict(c) for c in self._ifstack]
+        for st in steps:
+            if snapshot:
+                st.conditions = snapshot + st.conditions
+            if st.cond and st.cond_parsed is None:
+                st.cond_parsed = _parse_cond(st.cond)
 
     # -- helpers ------------------------------------------------------------
     def _looks_like_exec_proc(self, log: _LogLine) -> bool:
@@ -768,8 +881,15 @@ class _Parser:
             elif op == "JCLLIB":
                 kw, _ = _operand_map(log.operands)
                 self.job.jcllib.extend(_paren_list(kw.get("ORDER", "")))
+            elif op == "IF":
+                self._if_push(log.operands)
+            elif op == "ELSE":
+                self._if_else()
+            elif op == "ENDIF":
+                self._if_pop()
             elif op == "EXEC":
                 steps = self._make_steps(log)
+                self._attach_step_context(steps)
                 self.job.steps.extend(steps)
                 step = steps[-1] if steps else step
             elif op == "DD":

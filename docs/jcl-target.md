@@ -62,6 +62,27 @@ For each step, its **inputs** and **outputs** - the DDs, resolved to datasets - 
     { "outField": 3, "from": "input", "inBytes": "28-35", "outBytes": "26-33" } ] }
 ```
 
+- **`conditions`** - when each step actually runs. A JCL job genuinely is a state machine
+  (steps are states, conditions are guards - [mainframe-artifacts.md](mainframe-artifacts.md#role-3-orchestration)),
+  and this recovers the guards. `if` is the `IF/THEN/ELSE/ENDIF` nesting: every test must
+  hold, in its stated polarity - a step in an `ELSE` branch carries the IF's expression with
+  `negated: true`, and nested IFs conjoin. `cond` is the parsed `COND=` with its notorious
+  back-to-front sense **spelt out**: `COND=(4,LT)` *bypasses* the step when 4 < a preceding
+  RC, so the structure states both `bypassedWhen` (the literal semantics) and `runsWhen`
+  (the negation a reader actually wants), plus `EVEN`/`ONLY` abend modifiers. The same
+  conditions ride on the dataflow edges a conditional step contributes (an edge holds only
+  when both its steps run), on its `ddBindings`, and as `conditional: true` on the artifact
+  manifest's `touchedBy` entries.
+
+```jsonc
+{ "step": "FALLBACK", "program": "DAYREPAIR",
+  "conditions": { "if": [ { "test": "(EXTRACT.RC = 0)", "negated": true } ] } }
+{ "step": "REPORT", "program": "DAYRPT",
+  "conditions": { "cond": { "raw": "(4,LT)", "sense": "bypass-when-true",
+    "bypassedWhen": "4 LT the RC of any preceding step",
+    "runsWhen": "runs unless 4 LT the RC of any preceding step" } } }
+```
+
 - **`ddBindings`** - the join that closes the loop with the COBOL side. For each step
   running a program, the `ddname -> dataset` binding. A COBOL program's interface knows only
   `SELECT OUT-FILE ASSIGN OUTDD`; its artifact manifest could only say *"OUTDD, DSN in the
@@ -101,6 +122,10 @@ are the specification. This first version handles the common cases and flags the
   `resolver`; unresolved ones are flagged with their name.
 - **`OLD` / I-O DISP** is direction-ambiguous; such a DD is recorded on both sides of the
   dataflow and marked `directionAmbiguous` rather than asserted.
+- **`IF` expressions are captured verbatim**, not evaluated - `(EXTRACT.RC = 0)` is the
+  recovered guard, and whether it held on a given night is a run-time fact. An unbalanced
+  `ELSE`/`ENDIF` (or an `IF` left open at end-of-member) is flagged because every condition
+  after it may be wrong. An unrecognized `COND=` form is kept raw and marked, never guessed.
 - **Not statically knowable** - dynamic allocation (SVC 99, `BPXWDYN`), scheduler-set
   symbolics, `DDNAME=` referbacks - is out of scope by nature; flagged where seen.
 - **Utility grammars** beyond `SORT`/`IDCAMS` `REPRO`/`IEBGENER` are summarized, not fully

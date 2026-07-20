@@ -136,6 +136,70 @@ def test_dd_bindings_resolve_a_cobol_programs_ddname_to_a_dataset():
 
 
 # --------------------------------------------------------------------------- #
+# step conditions: IF/THEN/ELSE and COND=
+# --------------------------------------------------------------------------- #
+
+def _steps_by_name(lin):
+    return {s["step"]: s for s in lin["steps"]}
+
+
+def test_if_then_else_gives_each_branch_its_polarity():
+    lin = build_jcl_lineage(_job("condflow.jcl"))
+    steps = _steps_by_name(lin)
+    ok = steps["LOADOK"]["conditions"]["if"]
+    fb = steps["FALLBACK"]["conditions"]["if"]
+    assert ok == [{"test": "(EXTRACT.RC = 0)", "negated": False}]
+    assert fb == [{"test": "(EXTRACT.RC = 0)", "negated": True}]
+    # ENDIF closes the scope: CLEANUP carries no IF condition
+    assert "if" not in (steps["CLEANUP"].get("conditions") or {})
+
+
+def test_nested_ifs_conjoin():
+    job = parse_jcl(
+        "//J JOB\n"
+        "// IF (RC = 0) THEN\n"
+        "// IF (STEP1.RC = 0) THEN\n"
+        "//S2 EXEC PGM=P\n"
+        "// ENDIF\n"
+        "// ENDIF\n")
+    assert [c["expr"] for c in job.steps[0].conditions] == ["(RC = 0)", "(STEP1.RC = 0)"]
+
+
+def test_cond_back_to_front_sense_is_spelt_out():
+    """COND=(4,LT) BYPASSES the step when 4 < a preceding RC - the classic misreading.
+    The parsed structure states both directions so a reader cannot take it forwards."""
+    lin = build_jcl_lineage(_job("condflow.jcl"))
+    cond = _steps_by_name(lin)["REPORT"]["conditions"]["cond"]
+    assert cond["sense"] == "bypass-when-true"
+    assert cond["tests"] == [{"code": 4, "op": "LT"}]
+    assert "unless" in cond["runsWhen"]
+
+
+def test_cond_even_and_step_scoped_tests():
+    lin = build_jcl_lineage(_job("condflow.jcl"))
+    assert _steps_by_name(lin)["CLEANUP"]["conditions"]["cond"]["even"] is True
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=A\n"
+                    "//S2 EXEC PGM=B,COND=((4,LT),(8,EQ,S1),ONLY)\n")
+    cond = job.steps[1].cond_parsed
+    assert cond["only"] is True
+    assert {"code": 8, "op": "EQ", "step": "S1"} in cond["tests"]
+
+
+def test_dataflow_edges_carry_the_consumer_condition():
+    lin = build_jcl_lineage(_job("condflow.jcl"))
+    edge = next(e for e in lin["dataflow"] if e["to"] == "FALLBACK")
+    assert edge["conditions"]["consumer"]["if"][0]["negated"] is True
+
+
+def test_unbalanced_else_and_endif_are_flagged():
+    job = parse_jcl("//J JOB\n// ELSE\n//S EXEC PGM=P\n// ENDIF\n")
+    assert any("ELSE without" in f for f in job.flags)
+    assert any("ENDIF without" in f for f in job.flags)
+    job2 = parse_jcl("//J JOB\n// IF (RC = 0) THEN\n//S EXEC PGM=P\n")
+    assert any("IF without ENDIF" in f for f in job2.flags)
+
+
+# --------------------------------------------------------------------------- #
 # artifacts manifest (same shape as the COBOL one)
 # --------------------------------------------------------------------------- #
 
