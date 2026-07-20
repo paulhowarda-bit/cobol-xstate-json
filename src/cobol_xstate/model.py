@@ -141,6 +141,10 @@ class ExecStmt(Stmt):
     text: str                   # raw inner command text
     kind: str = "effect"
     target: Optional[str] = None            # program name for LINK/XCTL
+    # PROGRAM(data-name) rather than PROGRAM('literal'): the operand is a data item
+    # holding the module name, so the target is runtime-determined - same situation
+    # as `CALL identifier`, resolved by the same constant propagation where provable.
+    dynamic: bool = False
     host_vars: List[str] = field(default_factory=list)   # :WS-FOO references
     conditions: List[str] = field(default_factory=list)  # HANDLE condition names
     into_vars: List[str] = field(default_factory=list)   # SELECT/FETCH ... INTO targets

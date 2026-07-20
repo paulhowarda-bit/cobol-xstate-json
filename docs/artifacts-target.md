@@ -55,6 +55,7 @@ identity — names the artifact you must read to make it joinable across program
 | `file` (no `SELECT`) | `program-local` | *nothing here* — even the ddname is unknown; **flagged** |
 | `program` (batch `CALL`) | `global` | **binder / link-edit control** |
 | `program` (CICS `LINK`/`XCTL`) | `global` | **CICS CSD** — `DEFINE PROGRAM` |
+| `program` (dynamic, unresolved) | `program-local` | *nothing here* — the "name" is a **data item** holding the target; **flagged**, `candidates` listed when known |
 | `queue` | `program-local` | **CICS CSD** (TDQUEUE/TSMODEL) or **MQ** `QALIAS` |
 | `cics-transaction` | `global` | **CICS CSD** — TRANSACTION → PROGRAM |
 | `terminal-map` | `program-local` | **BMS mapset** |
@@ -65,6 +66,14 @@ identity — names the artifact you must read to make it joinable across program
 The `resolvedBy` column is deliberately the same set of resolvers as the tier table in
 [mainframe-artifacts.md](mainframe-artifacts.md#role-1-resolvers) — the manifest is how a
 single program *feeds* that estate-wide resolution work.
+
+A **dynamic program target** — batch `CALL identifier` or CICS `LINK`/`XCTL
+PROGRAM(data-name)` — is resolved by constant propagation when the program proves it
+constant (a `VALUE` clause or `MOVE` of a literal as the only reaching value): the row is
+then the **module name**, with `via` recording the data item it came through. When it
+cannot be proven, the row keeps the identifier but is downgraded to `program-local`,
+marked `dynamic: true` (with `candidates` when several literals reach it), and flagged —
+a working-storage name must never masquerade as a load-module identity.
 
 For **files**, the first of those resolutions is now built in: pass the JCL with
 `--bind-jcl job.jcl` (or `bind_cobol_artifacts` in Python) and each file row the JCL

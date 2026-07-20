@@ -62,6 +62,10 @@ _DECLARE_CURSOR = re.compile(
     r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
 _CALL_USING = re.compile(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", re.I | re.S)
 _CALL_RETURNING = re.compile(r"\bRETURNING\s+([A-Z0-9-]+)", re.I)
+# The two dynamic-CALL provenance spellings statechart._call_action produces:
+# unresolved keeps the identifier and says so; resolved names the identifier it came via.
+_CALL_DYNAMIC = re.compile(r"CALL\s+\(DYNAMIC\)\s", re.I)
+_CALL_RESOLVED = re.compile(r"CALL\s+([A-Z0-9-]+)\s+->\s+RESOLVED\b", re.I)
 _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
 _WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -264,8 +268,21 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         from_ = [opts["FROM"]] if "FROM" in opts else []
         ridfld = [opts["RIDFLD"]] if "RIDFLD" in opts else []
         if verb in ("LINK", "XCTL"):
-            return [_hit("create", _PROGRAM, endpoint or "<program>", "CICS " + verb,
-                         commarea)]
+            # Prefer the statechart's resolved target: a PROGRAM(data-name) operand is
+            # resolved by constant propagation where provable (spec["program"]), and the
+            # raw text would name the data item, not the module. Unresolved stays the
+            # identifier, marked dynamic so downstream views don't present a
+            # working-storage name as a load-module identity.
+            sp = spec or {}
+            hit = _hit("create", _PROGRAM, sp.get("program") or endpoint or "<program>",
+                       "CICS " + verb, commarea)
+            if sp.get("dynamicProgram"):
+                hit["dynamic"] = True
+                if sp.get("programCandidates"):
+                    hit["candidates"] = sp["programCandidates"]
+            elif sp.get("programVia"):
+                hit["via"] = sp["programVia"]
+            return [hit]
         if verb == "RETURN":
             v = "CICS RETURN"
             if "TRANSID" in opts:
@@ -398,8 +415,19 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         rm = _CALL_RETURNING.search(up)
         if rm:
             params = [rm.group(1).upper()]
-        return [_hit("create", _PROGRAM, _name_suffix(name), "CALL",
-                     _parse_call_args(cobol), params)]
+        hit = _hit("create", _PROGRAM, _name_suffix(name), "CALL",
+                   _parse_call_args(cobol), params)
+        # The statechart's provenance label spells out the dynamic-target status
+        # (see statechart._call_action): carry it so downstream views don't present
+        # an unresolved identifier as a load-module name.
+        dm = _CALL_DYNAMIC.match(up)
+        if dm:
+            hit["dynamic"] = True
+        else:
+            vm = _CALL_RESOLVED.match(up)
+            if vm:
+                hit["via"] = vm.group(1)
+        return [hit]
     return []  # CLOSE / internal MOVE/COMPUTE/etc. - not an external crossing
 
 
@@ -608,6 +636,12 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             # forgetting this would make the mapping appear to work in two of three
             # places - the worst kind of bug to chase.
             entry["columns"] = hit["columns"]
+        # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
+        # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
+        # one came through, `candidates` the literals an ambiguous one may be.
+        for k in ("dynamic", "via", "candidates"):
+            if hit.get(k):
+                entry[k] = hit[k]
         events.append(entry)
         slot = perimeter.setdefault(
             state, {"region": region, "gets": [], "creates": []})
@@ -617,6 +651,9 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         ep = endpoints.setdefault(hit["endpoint"], {"type": hit["etype"], "directions": []})
         if hit["direction"] not in ep["directions"]:
             ep["directions"].append(hit["direction"])
+        for k in ("dynamic", "via", "candidates"):
+            if hit.get(k):
+                ep.setdefault(k, hit[k])
         fc = files.get(hit["endpoint"])
         if isinstance(fc, dict):
             for k in ("assign", "organization", "access", "recordKey", "statusField"):

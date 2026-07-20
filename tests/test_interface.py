@@ -174,6 +174,55 @@ def test_cics_link_commarea_is_a_field():
     assert ev["fields"] == ["WS-AREA"]
 
 
+def test_cics_link_program_data_name_resolves_via_value_clause():
+    # LINK PROGRAM(WS-PGM) where WS-PGM has VALUE 'POSTLOG': the endpoint is the
+    # MODULE name, not the working-storage identifier that held it.
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC CICS LINK PROGRAM(WS-PGM) COMMAREA(WS-AREA) END-EXEC.\n",
+        data_body="       01 WS-PGM PIC X(8) VALUE 'POSTLOG'.\n"
+                  "       01 WS-AREA PIC X(100).\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert "POSTLOG" in endpoints and "WS-PGM" not in endpoints
+    assert endpoints["POSTLOG"]["via"] == "WS-PGM"
+
+
+def test_cics_link_unresolved_dynamic_target_is_marked_dynamic():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-PGM\n"
+        "           EXEC CICS LINK PROGRAM(WS-PGM) END-EXEC.\n",
+        data_body="       01 WS-PGM PIC X(8).\n"
+                  "       01 WS-OTHER PIC X(8).\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert endpoints["WS-PGM"]["dynamic"] is True
+
+
+def test_dynamic_batch_call_unresolved_is_marked_dynamic():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-PGM\n"
+        "           CALL WS-PGM.\n",
+        data_body="       01 WS-PGM PIC X(8).\n"
+                  "       01 WS-OTHER PIC X(8).\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert endpoints["WS-PGM"]["dynamic"] is True
+
+
+def test_dynamic_batch_call_resolved_records_the_via_item():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           CALL WS-PGM.\n",
+        data_body="       01 WS-PGM PIC X(8) VALUE 'POSTLOG'.\n",
+    )
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert "POSTLOG" in endpoints and "WS-PGM" not in endpoints
+    assert endpoints["POSTLOG"]["via"] == "WS-PGM"
+
+
 def test_perimeter_states_are_tagged_on_the_machine_nodes():
     prog = parse_program(
         "       IDENTIFICATION DIVISION.\n"

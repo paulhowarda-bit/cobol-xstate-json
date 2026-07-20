@@ -888,6 +888,7 @@ unrecovered spot is visible.
 | `SEARCH … index iteration is an opaque effect` | WHEN/AT END are real; the advance-until-match loop is not |
 | `SORT … opaque effect` | record ordering (ASCENDING/DESCENDING KEY) is not modeled |
 | `dynamic CALL … ` | the target could not be proven constant — genuinely runtime |
+| `dynamic CICS LINK/XCTL PROGRAM(…)` | same for a `PROGRAM(data-name)` operand — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
 | `NEXT SENTENCE` | differs from CONTINUE; verify the intended skip |
 | `arithmetic writes non-numeric X` | **S0C7 risk** — verify the type |
