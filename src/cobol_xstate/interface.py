@@ -104,6 +104,33 @@ def _hit(direction, etype, endpoint, verb, fields, params=None, columns=None):
     return d
 
 
+def _resource(rs: dict, opt: str, fallback: str) -> str:
+    """The endpoint name for a CICS resource operand, preferring the statechart's
+    resolved name (spec["resources"], see statechart._exec_resources) over the raw
+    text: a PROGRAM/TRANSID/QUEUE/FILE/MAP(data-name) operand resolved by constant
+    propagation names the RESOURCE, where the raw text names the data item."""
+    r = rs.get(opt)
+    return (r.get("name") or fallback) if r else fallback
+
+
+def _mark_dynamic(hit: dict, rs: dict, *opts: str) -> dict:
+    """Attach the dynamic-target status of the first present resource operand to the
+    hit: `dynamic` marks an unresolved runtime name (with `candidates` when several
+    literals reach it), `via` the data item a resolved one came through."""
+    for o in opts:
+        r = rs.get(o)
+        if not r:
+            continue
+        if r.get("dynamic"):
+            hit["dynamic"] = True
+            if r.get("candidates"):
+                hit["candidates"] = r["candidates"]
+        elif r.get("via"):
+            hit["via"] = r["via"]
+        break
+    return hit
+
+
 # --------------------------------------------------------------------------- #
 # data-dictionary helpers (record <-> file, group -> elementary fields)
 # --------------------------------------------------------------------------- #
@@ -256,6 +283,17 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         if verb == "DELETE":
             m = _SQL_FROM.search(up)
             return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
+        if verb in ("PREPARE", "EXECUTE"):
+            # Dynamic SQL: the statement text is a run-time value, so the operation and
+            # table(s) are not statically knowable. One endpoint, both directions (the
+            # statement could read or write), marked dynamic; the fields are the host
+            # variables that carry/parameterize the statement.
+            v = verb + (" IMMEDIATE" if "IMMEDIATE" in up else "")
+            hits = [_hit("get", _DB2, "<dynamic-sql>", v, host_vars),
+                    _hit("create", _DB2, "<dynamic-sql>", v, host_vars)]
+            for h in hits:
+                h["dynamic"] = True
+            return hits
         return []  # OPEN/CLOSE cursor, DECLARE, COMMIT, WHENEVER - not a data crossing
 
     if is_cics:
@@ -267,55 +305,63 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         into = [opts["INTO"]] if "INTO" in opts else []
         from_ = [opts["FROM"]] if "FROM" in opts else []
         ridfld = [opts["RIDFLD"]] if "RIDFLD" in opts else []
+        # Resolved resource-name operands (statechart._exec_resources): a
+        # PROGRAM/TRANSID/QUEUE/FILE/MAP(data-name) operand resolved by constant
+        # propagation names the RESOURCE where the raw text names the data item.
+        # Unresolved ones stay the identifier, marked dynamic, so downstream views
+        # never present a working-storage name as a real resource identity.
+        rs = (spec or {}).get("resources") or {}
         if verb in ("LINK", "XCTL"):
-            # Prefer the statechart's resolved target: a PROGRAM(data-name) operand is
-            # resolved by constant propagation where provable (spec["program"]), and the
-            # raw text would name the data item, not the module. Unresolved stays the
-            # identifier, marked dynamic so downstream views don't present a
-            # working-storage name as a load-module identity.
-            sp = spec or {}
-            hit = _hit("create", _PROGRAM, sp.get("program") or endpoint or "<program>",
-                       "CICS " + verb, commarea)
-            if sp.get("dynamicProgram"):
-                hit["dynamic"] = True
-                if sp.get("programCandidates"):
-                    hit["candidates"] = sp["programCandidates"]
-            elif sp.get("programVia"):
-                hit["via"] = sp["programVia"]
-            return [hit]
+            return [_mark_dynamic(
+                _hit("create", _PROGRAM, _resource(rs, "PROGRAM", endpoint or "<program>"),
+                     "CICS " + verb, commarea), rs, "PROGRAM")]
         if verb == "RETURN":
             v = "CICS RETURN"
             if "TRANSID" in opts:
-                v += f" TRANSID({opts['TRANSID']})"
+                v += f" TRANSID({_resource(rs, 'TRANSID', opts['TRANSID'])})"
             return [_hit("create", _CALLER, "CALLER", v, commarea)]
         if verb == "SEND":
-            return [_hit("create", _TERMINAL, endpoint or "terminal", "CICS SEND", from_)]
+            ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
+            return [_mark_dynamic(_hit("create", _TERMINAL, ep, "CICS SEND", from_),
+                                  rs, "MAP", "MAPSET")]
         if verb == "RECEIVE":
-            return [_hit("get", _TERMINAL, endpoint or "terminal", "CICS RECEIVE", into)]
+            ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
+            return [_mark_dynamic(_hit("get", _TERMINAL, ep, "CICS RECEIVE", into),
+                                  rs, "MAP", "MAPSET")]
         if verb in ("READ", "READNEXT", "READPREV"):
-            return [_hit("get", _FILE, endpoint or "<file>", "CICS " + verb,
-                         into or dv.record_fields(endpoint), ridfld)]
+            f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
+            return [_mark_dynamic(
+                _hit("get", _FILE, f, "CICS " + verb,
+                     into or dv.record_fields(f), ridfld), rs, "FILE", "DATASET")]
         if verb in ("STARTBR", "RESETBR"):
-            return [_hit("get", _FILE, endpoint or "<file>", "CICS " + verb, [], ridfld)]
+            f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
+            return [_mark_dynamic(_hit("get", _FILE, f, "CICS " + verb, [], ridfld),
+                                  rs, "FILE", "DATASET")]
         if verb == "ENDBR":
             return []
         if verb in ("WRITE", "REWRITE", "DELETE"):
-            return [_hit("create", _FILE, endpoint or "<file>", "CICS " + verb,
-                         from_, ridfld)]
+            f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
+            return [_mark_dynamic(
+                _hit("create", _FILE, f, "CICS " + verb, from_, ridfld),
+                rs, "FILE", "DATASET")]
         if verb in ("READQ",):
-            q = endpoint or opts.get("QUEUE", "<queue>")
+            q = _resource(rs, "QUEUE", endpoint or opts.get("QUEUE", "<queue>"))
             qtype = "TD" if re.search(r"\bREADQ\s+TD\b", up) else "TS"
-            return [_hit("get", _QUEUE, q, f"CICS READQ {qtype}", into)]
+            return [_mark_dynamic(_hit("get", _QUEUE, q, f"CICS READQ {qtype}", into),
+                                  rs, "QUEUE")]
         if verb in ("WRITEQ",):
-            q = endpoint or opts.get("QUEUE", "<queue>")
+            q = _resource(rs, "QUEUE", endpoint or opts.get("QUEUE", "<queue>"))
             qtype = "TD" if re.search(r"\bWRITEQ\s+TD\b", up) else "TS"
-            return [_hit("create", _QUEUE, q, f"CICS WRITEQ {qtype}", from_)]
+            return [_mark_dynamic(_hit("create", _QUEUE, q, f"CICS WRITEQ {qtype}", from_),
+                                  rs, "QUEUE")]
         if verb == "DELETEQ":
-            q = endpoint or opts.get("QUEUE", "<queue>")
-            return [_hit("create", _QUEUE, q, "CICS DELETEQ", [])]
+            q = _resource(rs, "QUEUE", endpoint or opts.get("QUEUE", "<queue>"))
+            return [_mark_dynamic(_hit("create", _QUEUE, q, "CICS DELETEQ", []),
+                                  rs, "QUEUE")]
         if verb == "START":
-            t = opts.get("TRANSID", "<transid>")
-            return [_hit("create", _TRANSACTION, t, "CICS START", from_)]
+            t = _resource(rs, "TRANSID", opts.get("TRANSID", "<transid>"))
+            return [_mark_dynamic(_hit("create", _TRANSACTION, t, "CICS START", from_),
+                                  rs, "TRANSID")]
         if verb == "RETRIEVE":
             return [_hit("get", _TRANSACTION, "RETRIEVE", "CICS RETRIEVE", into)]
         if verb == "ABEND":

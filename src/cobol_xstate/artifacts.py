@@ -251,7 +251,43 @@ def build_artifacts(machine: Machine) -> dict:
         if lines.get(name):
             row["lines"] = _dedup(sorted(lines[name]))
 
-        if etype == "file":
+        if ep.get("via"):
+            # A dynamic name resolved by constant propagation: the resource name is
+            # proven; `via` records the data item it came through.
+            row["via"] = ep["via"]
+
+        if ep.get("dynamic"):
+            # An UNRESOLVED dynamic name: the "artifact" here is a DATA ITEM whose
+            # run-time value names the real resource (program, transaction, queue,
+            # file, map) - or, for <dynamic-sql>, a statement string assembled at run
+            # time. Presenting it as a resolvable identity would be exactly the false
+            # join this manifest exists to prevent, so downgrade it and say what is
+            # still needed.
+            row["identity"] = "program-local"
+            row["dynamic"] = True
+            if ep.get("candidates"):
+                row["candidates"] = ep["candidates"]
+            row["resolvedBy"] = None
+            if name == "<dynamic-sql>":
+                row["needs"] = ("the SQL statement text is assembled at run time "
+                                "(PREPARE / EXECUTE): the operation and table(s) are "
+                                "not statically knowable - trace the fields that build "
+                                "the statement string")
+                flags.append("db2-table <dynamic-sql>: statement text assembled at "
+                             "run time - tables/operation unresolvable statically")
+            else:
+                kind = cls["kind"]
+                row["needs"] = (f"{name} is a data item, not a {kind} name: the target "
+                                f"is its run-time value"
+                                + (f" (literals seen in this program: "
+                                   f"{', '.join(ep['candidates'])})"
+                                   if ep.get("candidates") else "")
+                                + f"; a reaching-definition trace or the run-time "
+                                  f"configuration is needed to name the real {kind}")
+                flags.append(f"{kind} {name}: dynamic target - {name} is a data item "
+                             f"whose run-time value names the {kind}; not resolvable "
+                             f"from this program alone")
+        elif etype == "file":
             ddname = ep.get("assign")
             if ddname:
                 row["ddname"] = ddname
@@ -277,40 +313,12 @@ def build_artifacts(machine: Machine) -> dict:
                                 "be resolved")
                 flags.append(f"file {name}: no SELECT/ASSIGN - ddname unknown, dataset "
                              f"unresolvable from this program alone")
-        elif etype == "program" and ep.get("dynamic"):
-            # An unresolved dynamic target: the "name" here is a DATA ITEM that holds
-            # the real program name at run time, not a load-module identity. Presenting
-            # it as `identity: global` would be exactly the false join this manifest
-            # exists to prevent, so downgrade it and say what is still needed.
-            row["identity"] = "program-local"
-            row["dynamic"] = True
-            if ep.get("candidates"):
-                row["candidates"] = ep["candidates"]
-            row["resolvedBy"] = None
-            row["needs"] = (f"{name} is a data item, not a program name: the target is "
-                            f"its run-time value"
-                            + (f" (literals seen in this program: "
-                               f"{', '.join(ep['candidates'])})" if ep.get("candidates")
-                               else "")
-                            + "; a reaching-definition trace or the run-time "
-                              "configuration is needed to name the module")
-            flags.append(f"program {name}: dynamic target - {name} is a data item "
-                         f"whose run-time value names the module; not resolvable from "
-                         f"this program alone")
         elif etype == "program" and is_cics:
             # CICS LINK/XCTL is not a batch CALL: which module runs is the installed
             # PROGRAM resource in the CSD, not the link-edit of the caller.
-            if ep.get("via"):
-                row["via"] = ep["via"]
             row["resolvedBy"] = "CICS CSD (DEFINE PROGRAM)"
             row["needs"] = ("the CICS CSD (or autoinstall rule) that installs this "
                             "PROGRAM resource; the binder still link-edits the module")
-        elif etype == "program" and ep.get("via"):
-            # A dynamic CALL resolved by constant propagation: the module name is
-            # proven, but record the data item it came through.
-            row["via"] = ep["via"]
-            row["resolvedBy"] = _CLASS["program"]["resolver"]
-            row["needs"] = _CLASS["program"]["needs"]
         else:
             if cls["resolver"] is not None:
                 row["resolvedBy"] = cls["resolver"]

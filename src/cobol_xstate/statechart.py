@@ -241,6 +241,15 @@ class _BuildCtx:
                       f"- routed to an external guard; verify")
 
 
+# CICS options whose operand names an external RESOURCE and may be a data item instead
+# of a quoted literal (PROGRAM(WS-PGM) vs PROGRAM('FBSPREST')). Everything else in a
+# command (INTO/FROM/RIDFLD/LENGTH/COMMAREA...) legitimately names a data area and is
+# not a resolution candidate.
+_CICS_RES_OPT = re.compile(
+    r"\b(PROGRAM|TRANSID|QUEUE|FILE|DATASET|MAP|MAPSET)\s*\(\s*(['\"]?)"
+    r"([A-Z0-9$#@._-]+)['\"]?\s*\)", re.I)
+
+
 def _call_args_suffix(st: CallStmt) -> str:
     """The `` USING a b RETURNING r`` tail for a CALL's provenance label, so the external
     interface can surface the arguments passed across the boundary."""
@@ -477,28 +486,55 @@ class _ParaCompiler:
                 "action", f"perform_{st.target}__THRU__{st.thru}", cobol, st.line)
         return self.reg.action_named(f"perform_{st.target}", cobol, st.line)
 
-    def _exec_program_target(self, st: ExecStmt):
-        """The module name for a CICS LINK/XCTL target, plus spec extras for the
-        external interface and a provenance note. ``PROGRAM('X')`` IS the module name;
-        a ``PROGRAM(data-name)`` operand resolves by the same constant propagation as
-        a dynamic batch CALL - resolve where provable, flag (don't guess) otherwise."""
-        if not (st.target and st.kind in ("call", "transfer")):
-            return st.target, {}, ""
-        if not st.dynamic:
-            return st.target, {"program": st.target}, ""
-        res = self.ctx.calls.resolve(st.target)
-        if res.confident and res.resolved:
-            return res.resolved, {"program": res.resolved, "programVia": st.target}, \
-                f" [PROGRAM({st.target}) -> resolved '{res.resolved}': {res.reason}]"
-        self.ctx.flag(self.pname, st.line,
-                      f"dynamic CICS {st.verb} PROGRAM({st.target}) - {res.reason}")
-        extras = {"dynamicProgram": True, "programVia": st.target}
-        if res.candidates:
-            extras["programCandidates"] = res.candidates
-        return st.target, extras, ""
+    def _exec_resources(self, st: ExecStmt) -> dict:
+        """The CICS resource-name operands of this command (PROGRAM/TRANSID/QUEUE/
+        FILE/DATASET/MAP/MAPSET), keeping the literal-vs-data-name distinction the raw
+        text still carries: ``PROGRAM('X')`` IS the resource name; ``PROGRAM(data-name)``
+        is a data item holding it, resolved by the same constant propagation as a
+        dynamic batch CALL - resolve where provable, flag (don't guess) otherwise.
+        Returns {OPTION: {name, via?, reason?, dynamic?, candidates?}}."""
+        if st.lang != "CICS":
+            return {}
+        out: dict = {}
+        for m in _CICS_RES_OPT.finditer(st.text):
+            opt, quote, operand = m.group(1).upper(), m.group(2), m.group(3).upper()
+            if quote:
+                out[opt] = {"name": operand}
+            elif operand.startswith("EIB"):
+                # TRANSID(EIBTRNID) and friends: a CICS-supplied field, so there is
+                # nothing in this program to propagate from - runtime by construction.
+                out[opt] = {"name": operand, "dynamic": True}
+                self.ctx.flag(self.pname, st.line,
+                              f"dynamic CICS {st.verb} {opt}({operand}) - {operand} is "
+                              f"a CICS-supplied EIB field; value runtime-determined")
+            else:
+                res = self.ctx.calls.resolve(operand)
+                if res.confident and res.resolved:
+                    out[opt] = {"name": res.resolved, "via": operand,
+                                "reason": res.reason}
+                else:
+                    entry: dict = {"name": operand, "dynamic": True}
+                    if res.candidates:
+                        entry["candidates"] = res.candidates
+                    out[opt] = entry
+                    self.ctx.flag(self.pname, st.line,
+                                  f"dynamic CICS {st.verb} {opt}({operand}) - "
+                                  f"{res.reason}")
+        return out
 
     def _exec_action(self, st: ExecStmt) -> str:
-        target, extras, note = self._exec_program_target(st)
+        resources = self._exec_resources(st)
+        prog = resources.get("PROGRAM", {})
+        target = prog.get("name") or st.target
+        note = ""
+        if prog.get("via"):
+            note = (f" [PROGRAM({prog['via']}) -> resolved '{prog['name']}': "
+                    f"{prog['reason']}]")
+        if st.lang == "SQL" and st.verb in ("PREPARE", "EXECUTE"):
+            self.ctx.flag(self.pname, st.line,
+                          f"dynamic SQL: EXEC SQL {st.verb} - the statement text is "
+                          f"assembled at run time; its operation and tables are not "
+                          f"statically knowable")
         base = f"link_{target}" if st.kind == "call" and target else \
             f"exec_{st.lang.lower()}_{st.verb.lower()}"
         name = self.reg.action_named(base, f"EXEC {st.lang} {st.text} END-EXEC{note}",
@@ -517,7 +553,8 @@ class _ParaCompiler:
             spec = {"verb": st.verb, "kind": f"exec-{st.lang.lower()}",
                     "hostVars": st.host_vars,
                     "raw": f"EXEC {st.lang} {st.text} END-EXEC"}
-            spec.update(extras)
+            if resources:
+                spec["resources"] = resources
             self.ctx.action_sem.setdefault(name, _with_columns(spec, st))
         if st.column_note:
             self.ctx.flag(self.pname, st.line,
@@ -566,8 +603,9 @@ class _ParaCompiler:
             # interface sees it. It was invisible here before. Built first so the
             # resolved target (a dynamic PROGRAM(data-name) operand) is available here.
             eff = self._exec_action(st)
-            sp = self.ctx.action_sem.get(eff, {})
-            resolved = sp.get("program")
+            prog = (self.ctx.action_sem.get(eff, {}).get("resources") or {}) \
+                .get("PROGRAM", {})
+            resolved = prog.get("name")
             if st.kind == "transfer":
                 self.ctx.flag(self.pname, st.line,
                               f"EXEC {st.lang} XCTL to {resolved or st.target or '?'} - "
@@ -575,9 +613,9 @@ class _ParaCompiler:
             meta = {"kind": f"cics-{st.verb.lower()}", "cobolLine": st.line}
             if st.target:
                 meta["target"] = resolved or st.target
-                if resolved and resolved != st.target:
-                    meta["targetVia"] = st.target
-                if sp.get("dynamicProgram"):
+                if prog.get("via"):
+                    meta["targetVia"] = prog["via"]
+                if prog.get("dynamic"):
                     meta["dynamic"] = True
             return self._emit(name, {"type": "final", "entry": [eff], "meta": meta})
         if isinstance(st, ContinueStmt):  # NEXT SENTENCE (plain CONTINUE is straight-line)
