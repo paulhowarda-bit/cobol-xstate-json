@@ -166,6 +166,26 @@ def test_unresolved_dynamic_transid_is_not_presented_as_global():
     assert any("dynamic target" in f for f in man["flags"])
 
 
+def test_dynamic_call_via_missing_copybook_points_at_the_copybook():
+    """CALL CN-X where CN-X (and its VALUE) live in a copybook that was not found:
+    the program row must connect the two facts - undeclared identifier + missing
+    copybook - so the reader knows exactly which artifact to supply."""
+    man = _artifacts_src(
+        "       JM0004.\n"
+        "           CALL CN-DEMOC104 USING DM01104-PARMS\n"
+        "           GOBACK.\n",
+        data_body="       COPY DM01104.\n"
+                  "       01 WS-DUMMY PIC X.\n",
+    )
+    by = _by_name(man)
+    pg = by["CN-DEMOC104"]
+    assert pg["dynamic"] is True
+    assert "not declared in the visible source" in pg["needs"]
+    assert "DM01104" in pg["needs"]
+    # ...and the copybook row itself is present and marked missing.
+    assert by["DM01104"]["status"] == "missing"
+
+
 def test_dynamic_sql_row_is_honest_about_unknown_tables():
     man = _artifacts_src(
         "       0000-MAIN.\n"
