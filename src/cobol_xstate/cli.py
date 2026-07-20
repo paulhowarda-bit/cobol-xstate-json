@@ -12,7 +12,7 @@ from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
 from .jcl import parse_jcl
-from .jcl_views import build_jcl_artifacts, build_jcl_lineage
+from .jcl_views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage
 from .normalizer import SourceFormat, detect_source_format
 from .reactive import build_reactive_view, emit_reactive_module
@@ -125,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-artifacts", action="store_true",
                    help="skip the companion <name>.artifacts.json that the default run "
                         "writes alongside the bundle")
+    p.add_argument("--bind-jcl", action="append", default=[], metavar="FILE",
+                   help="JCL/PROC file(s) whose DD statements bind this COBOL program's "
+                        "file ddnames to datasets (repeatable). Each file row the JCL "
+                        "resolves gains 'dataset' and 'boundBy' (job/step, with the "
+                        "step's run conditions) in the artifacts view - the ddname->DSN "
+                        "join closed.")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
@@ -226,6 +232,20 @@ def run(argv: Optional[List[str]] = None) -> int:
     program = parse_program(source, fmt, resolver=resolver)
     machine = build_machine(program, source_name=source_name)
 
+    # --bind-jcl: parse each JCL once; the artifacts view is then built through the
+    # binding join so its file rows carry the dataset their ddname resolves to.
+    bind_jobs = []
+    for jf in args.bind_jcl:
+        jp = Path(jf)
+        if not jp.exists():
+            print(f"error: no such file: {jp} (--bind-jcl)", file=sys.stderr)
+            return 2
+        bind_jobs.append(parse_jcl(jp.read_text(errors="replace"), source_name=jp.name))
+
+    def _artifacts_obj():
+        art = build_artifacts(machine)
+        return bind_cobol_artifacts(art, bind_jobs) if bind_jobs else art
+
     base = _artifact_base(args, default_stem, machine.program_id)
     out_path = _resolve_out_path(args, base)
     if out_path is not None:
@@ -268,10 +288,11 @@ def run(argv: Optional[List[str]] = None) -> int:
     def _write_artifacts_companion(beside: Path) -> None:
         """The related-artifact manifest: the Db2 tables, files, called programs and
         queues this program touches, each with the resolution chain its program-local
-        name still needs. A logistics view of the same boundary the interface recovers."""
+        name still needs. A logistics view of the same boundary the interface recovers.
+        With --bind-jcl, file rows carry the dataset their ddname resolves to."""
         if args.machine_only or args.no_artifacts:
             return
-        _companion(beside, ".artifacts.json", build_artifacts(machine))
+        _companion(beside, ".artifacts.json", _artifacts_obj())
 
     def _write_reactive_companion(beside: Path) -> None:
         """The event-driven view: the machine the modernized system is built from.
@@ -292,7 +313,7 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     if args.target in ("business", "lineage", "artifacts"):
         obj = (build_lineage(machine) if args.target == "lineage"
-               else build_artifacts(machine) if args.target == "artifacts"
+               else _artifacts_obj() if args.target == "artifacts"
                else build_business_view(machine))
         text = _json.dumps(obj, indent=args.indent)
         if out_path is None:

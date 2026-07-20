@@ -446,3 +446,79 @@ def build_jcl_artifacts(job: Job) -> dict:
         "excluded": excluded,
         "flags": list(job.flags),
     }
+
+
+# --------------------------------------------------------------------------- #
+# the join: resolve a COBOL manifest's file ddnames against JCL ddBindings
+# --------------------------------------------------------------------------- #
+
+def bind_cobol_artifacts(cobol_manifest: dict, jobs) -> dict:
+    """Enrich a COBOL program's artifact manifest (artifacts.build_artifacts output) with
+    the dataset each file's ddname binds to in the supplied JCL job(s).
+
+    This is the join both sides were built for: a COBOL file row carries ``ddname`` and
+    says *"the DSN is in the JCL"*; a JCL job's ``ddBindings`` says ``OUTDD ->
+    PROD.ACCT.UNLOAD`` for the step running this program. Matching on
+    ``(program, ddname)``, each matched file row gains ``dataset`` and ``boundBy`` (which
+    job/step made the binding, with the step's run conditions where the JCL is
+    conditional), and its ``resolvedBy`` becomes the ACTUAL DD statement rather than the
+    category "JCL DD statement".
+
+    Honesty rules: the same program bound to DIFFERENT datasets across the supplied jobs
+    is a fact, not an error - the row lists ``datasetCandidates`` instead of picking one,
+    and a flag says each ``boundBy`` entry names which job uses which. An unmatched ddname
+    is left exactly as it was (still needing JCL). Returns a new manifest; the input is
+    not mutated.
+    """
+    import copy
+    out = copy.deepcopy(cobol_manifest)
+    program = out.get("program")
+    flags: List[str] = out.setdefault("flags", [])
+
+    by_ddname: Dict[str, List[dict]] = {}
+    bound_jobs: List[dict] = []
+    for job in jobs:
+        lin = build_jcl_lineage(job)
+        bound_jobs.append({"job": job.name or None, "source": job.source_name})
+        for b in lin["ddBindings"]:
+            if b["program"] != program:
+                continue
+            entry = {"job": job.name or job.source_name, "step": b["step"],
+                     "dataset": b["dataset"], "io": b["io"]}
+            for k in ("generation", "member", "conditions"):
+                if b.get(k):
+                    entry[k] = b[k]
+            by_ddname.setdefault(b["ddname"], []).append(entry)
+
+    matched = 0
+    for row in out.get("artifacts", []):
+        if row.get("kind") != "file" or not row.get("ddname"):
+            continue
+        found = by_ddname.get(row["ddname"])
+        if not found:
+            continue
+        matched += 1
+        row["boundBy"] = found
+        datasets = sorted({e["dataset"] for e in found})
+        if len(datasets) == 1:
+            row["dataset"] = datasets[0]
+            row["resolvedBy"] = "JCL DD statement: " + ", ".join(
+                sorted({f"{e['job']}.{e['step']}" for e in found}))
+            # The chain is closed: the ddname now has its DSN, so nothing further is
+            # needed to identify the dataset. (Its record layout is a different question.)
+            row.pop("needs", None)
+        else:
+            row["datasetCandidates"] = datasets
+            flags.append(
+                f"file {row['artifact']} (ddname {row['ddname']}): bound to "
+                f"{len(datasets)} different datasets across the supplied JCL - the same "
+                f"program runs against different data in different jobs/steps; 'boundBy' "
+                f"says which job uses which. Not collapsed.")
+
+    out["jclBinding"] = {"jobs": bound_jobs, "boundFiles": matched}
+    if matched:
+        out["note"] = out.get("note", "") + (
+            " File rows with 'dataset'/'boundBy' were resolved against the supplied JCL: "
+            "the ddname -> DSN binding is closed, and 'boundBy' names the job/step that "
+            "closed it (with the step's run conditions where the JCL is conditional).")
+    return out

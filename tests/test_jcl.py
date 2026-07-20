@@ -241,6 +241,99 @@ def test_sysout_and_dummy_are_excluded_with_reason():
 
 
 # --------------------------------------------------------------------------- #
+# the join: bind_cobol_artifacts resolves a COBOL manifest's ddnames via JCL
+# --------------------------------------------------------------------------- #
+
+def _sqlunld_manifest():
+    from cobol_xstate.artifacts import build_artifacts
+    from cobol_xstate.parser import parse_program
+    from cobol_xstate.statechart import build_machine
+    src = (EXAMPLES.parent / "sqlunld.cbl").read_text()
+    return build_artifacts(build_machine(parse_program(src), source_name="sqlunld.cbl"))
+
+
+def test_binding_closes_the_ddname_to_dsn_chain():
+    """The join both sides were built for: SQLUNLD's OUT-FILE row said 'ddname OUTDD, DSN
+    in the JCL'; ACCTUNLD's STEP01 says OUTDD -> PROD.ACCT.UNLOAD. Bound, the row carries
+    the dataset and the ACTUAL DD statement that resolved it."""
+    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    out = bind_cobol_artifacts(_sqlunld_manifest(), [_job("acctunld.jcl")])
+    row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
+    assert row["dataset"] == "PROD.ACCT.UNLOAD"
+    assert row["resolvedBy"] == "JCL DD statement: ACCTUNLD.STEP01"
+    assert "needs" not in row                       # the identity chain is closed
+    assert row["boundBy"][0]["generation"] == "+1"
+    assert out["jclBinding"]["boundFiles"] == 1
+
+
+def test_binding_does_not_mutate_the_input_manifest():
+    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    manifest = _sqlunld_manifest()
+    bind_cobol_artifacts(manifest, [_job("acctunld.jcl")])
+    row = next(a for a in manifest["artifacts"] if a.get("ddname") == "OUTDD")
+    assert "dataset" not in row and "needs" in row
+
+
+def test_binding_ignores_steps_running_a_different_program():
+    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    other = parse_jcl("//J JOB\n//S1 EXEC PGM=OTHERPGM\n"
+                      "//OUTDD DD DSN=PROD.WRONG.FILE,DISP=(NEW,CATLG)\n",
+                      source_name="other.jcl")
+    out = bind_cobol_artifacts(_sqlunld_manifest(), [other])
+    row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
+    assert "dataset" not in row                     # same ddname, wrong program: no join
+    assert "needs" in row                           # still honestly unresolved
+
+
+def test_conflicting_bindings_list_candidates_and_flag_never_collapse():
+    """The same program bound to different datasets in different jobs is a FACT (it runs
+    against different data), not an error - and picking one silently would be a lie."""
+    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    job_b = parse_jcl("//OTHERJOB JOB\n//S1 EXEC PGM=SQLUNLD\n"
+                      "//OUTDD DD DSN=TEST.ACCT.UNLOAD,DISP=(NEW,CATLG)\n",
+                      source_name="other.jcl")
+    out = bind_cobol_artifacts(_sqlunld_manifest(), [_job("acctunld.jcl"), job_b])
+    row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
+    assert "dataset" not in row
+    assert row["datasetCandidates"] == ["PROD.ACCT.UNLOAD", "TEST.ACCT.UNLOAD"]
+    assert len(row["boundBy"]) == 2
+    assert any("2 different datasets" in f for f in out["flags"])
+
+
+def test_binding_carries_the_steps_run_conditions():
+    """A binding made by a conditional step only holds when the step runs - the condition
+    from the IF travels with the boundBy entry."""
+    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    job = parse_jcl("//J JOB\n// IF (PREP.RC = 0) THEN\n//S1 EXEC PGM=SQLUNLD\n"
+                    "//OUTDD DD DSN=PROD.ACCT.UNLOAD,DISP=(NEW,CATLG)\n// ENDIF\n",
+                    source_name="cond.jcl")
+    out = bind_cobol_artifacts(_sqlunld_manifest(), [job])
+    row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
+    assert row["boundBy"][0]["conditions"]["if"] == [
+        {"test": "(PREP.RC = 0)", "negated": False}]
+
+
+def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
+    import json
+    from cobol_xstate.cli import run
+    src = EXAMPLES.parent / "sqlunld.cbl"
+    jcl = EXAMPLES / "acctunld.jcl"
+    assert run([str(src), "--target", "artifacts", "--bind-jcl", str(jcl),
+                "--outdir", str(tmp_path)]) == 0
+    art = json.loads((tmp_path / "sqlunld.artifacts.json").read_text())
+    row = next(a for a in art["artifacts"] if a.get("ddname") == "OUTDD")
+    assert row["dataset"] == "PROD.ACCT.UNLOAD"
+
+
+def test_cli_bind_jcl_missing_file_is_a_clean_error(tmp_path, capsys):
+    from cobol_xstate.cli import run
+    src = EXAMPLES.parent / "sqlunld.cbl"
+    assert run([str(src), "--bind-jcl", str(tmp_path / "nope.jcl"),
+                "--outdir", str(tmp_path)]) == 2
+    assert "no such file" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
 # CLI integration: auto-detection and companion output
 # --------------------------------------------------------------------------- #
 
