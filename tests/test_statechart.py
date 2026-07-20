@@ -21,6 +21,10 @@ def _machine(src: str):
     return build_machine(parse_program(src))
 
 
+def _machine_with(src: str, resolver):
+    return build_machine(parse_program(src, resolver=resolver))
+
+
 def _all_edges(machine):
     return [(name, e) for name, s in machine.config["states"].items()
             for e in s.get("always", [])]
@@ -266,6 +270,45 @@ def test_return_transid_eib_field_flagged_as_cics_supplied():
     )
     msgs = " ".join(f["message"] for f in _machine(src).flags)
     assert "TRANSID(EIBTRNID)" in msgs and "EIB" in msgs
+
+
+_COPYBOOK_CALL_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. FBSB066B.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       COPY DC01104.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       JM0004.\n"
+    "           CALL CN-DCIOC104 USING DC01104-PARMS\n"
+    "           GOBACK.\n"
+)
+
+
+def test_dynamic_call_target_from_copybook_value_resolves(tmp_path):
+    # The target identifier and its VALUE live in a copybook: once the copybook is on
+    # the search path, constant propagation sees the VALUE and resolves the CALL.
+    from cobol_xstate.preprocessor import CopybookResolver
+    (tmp_path / "DC01104.cpy").write_text(
+        "       01 DC01104-CONSTANTS.\n"
+        "          05 CN-DCIOC104            PIC X(8)  VALUE 'DCIOC104'.\n"
+        "       01 DC01104-PARMS             PIC X(100).\n")
+    machine = _machine_with(
+        _COPYBOOK_CALL_SRC, resolver=CopybookResolver(paths=[str(tmp_path)]))
+    assert machine.flags == []
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "call_DCIOC104" in actions
+
+
+def test_dynamic_call_target_in_missing_copybook_diagnosed():
+    # Same program, copybook NOT found: the target cannot resolve, and the flag must
+    # say the real situation - the identifier is not declared in the visible source
+    # and the missing copybook is where its VALUE hides - not "set from variables".
+    machine = _machine(_COPYBOOK_CALL_SRC)
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "dynamic CALL CN-DCIOC104" in msgs
+    assert "not declared in the visible source" in msgs
+    assert "DC01104" in msgs
 
 
 def test_dynamic_sql_execute_immediate_flagged():

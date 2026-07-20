@@ -226,6 +226,12 @@ def build_artifacts(machine: Machine) -> dict:
     artifacts: List[dict] = []
     excluded: List[dict] = []
     flags: List[str] = []
+    # For diagnosing an unresolved dynamic name that is not declared in the visible
+    # source: a missing copybook is the usual place its definition (and VALUE) hides.
+    declared = {str(k).upper() for k in (getattr(machine, "data", None) or {})}
+    missing_cbs = [str(cb.get("member", "")).upper()
+                   for cb in (getattr(machine, "copybooks", None) or [])
+                   if cb.get("status") == "missing"]
     for name, ep in endpoints.items():
         etype = ep["type"]
         if etype in _NON_ARTIFACT:
@@ -277,13 +283,22 @@ def build_artifacts(machine: Machine) -> dict:
                              "run time - tables/operation unresolvable statically")
             else:
                 kind = cls["kind"]
-                row["needs"] = (f"{name} is a data item, not a {kind} name: the target "
-                                f"is its run-time value"
-                                + (f" (literals seen in this program: "
-                                   f"{', '.join(ep['candidates'])})"
-                                   if ep.get("candidates") else "")
-                                + f"; a reaching-definition trace or the run-time "
-                                  f"configuration is needed to name the real {kind}")
+                needs = (f"{name} is a data item, not a {kind} name: the target "
+                         f"is its run-time value"
+                         + (f" (literals seen in this program: "
+                            f"{', '.join(ep['candidates'])})"
+                            if ep.get("candidates") else "")
+                         + f"; a reaching-definition trace or the run-time "
+                           f"configuration is needed to name the real {kind}")
+                if name.upper() not in declared and missing_cbs:
+                    # The single most actionable diagnosis: the item is not declared in
+                    # the visible source, and a copybook that could not be found is
+                    # where its definition - typically with the VALUE that names the
+                    # real target - lives. Supplying that copybook resolves this row.
+                    needs += (f"; NOTE {name} is not declared in the visible source - "
+                              f"missing copybook(s) {', '.join(missing_cbs)} may "
+                              f"define it and the VALUE that names the target")
+                row["needs"] = needs
                 flags.append(f"{kind} {name}: dynamic target - {name} is a data item "
                              f"whose run-time value names the {kind}; not resolvable "
                              f"from this program alone")

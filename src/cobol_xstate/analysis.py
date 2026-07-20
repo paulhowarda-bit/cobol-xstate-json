@@ -37,6 +37,12 @@ class CallResolution:
 class CallAnalysis:
     literal_assigns: Dict[str, Set[str]]
     var_assigns: Set[str]
+    # All data-item names visible to the parse, so an unresolvable name can be
+    # diagnosed honestly: "declared but never assigned" is a different situation from
+    # "not declared at all" - the latter usually means the item (and its VALUE) lives
+    # in a copybook that was not found, which `missing_copybooks` names.
+    declared: Set[str] = field(default_factory=set)
+    missing_copybooks: List[str] = field(default_factory=list)
 
     def resolve(self, name: str) -> CallResolution:
         name = name.upper()
@@ -51,8 +57,19 @@ class CallAnalysis:
         if lits and var:
             return CallResolution(False, None, lits, True,
                                   f"{name} set to {lits} and also to a variable; runtime-determined")
-        return CallResolution(False, None, [], var,
-                              f"{name} set only from variables; target runtime-determined")
+        if var:
+            return CallResolution(False, None, [], True,
+                                  f"{name} set only from variables; target runtime-determined")
+        if name not in self.declared:
+            hint = (f" - likely defined (with its VALUE) in a missing copybook "
+                    f"({', '.join(self.missing_copybooks)})"
+                    if self.missing_copybooks else "")
+            return CallResolution(False, None, [], False,
+                                  f"{name} is not declared in the visible source{hint}; "
+                                  f"target runtime-determined")
+        return CallResolution(False, None, [], False,
+                              f"{name} is declared but never assigned a literal; "
+                              f"target runtime-determined")
 
 
 def analyze_calls(program: Program) -> CallAnalysis:
@@ -80,4 +97,9 @@ def analyze_calls(program: Program) -> CallAnalysis:
                 else:
                     for t in targets:
                         var_assigns.add(t.upper())
-    return CallAnalysis(literal_assigns=literal_assigns, var_assigns=var_assigns)
+    declared = {str(n).upper() for n in (getattr(program, "data_by_name", None) or {})}
+    missing = [str(cb.get("member", "")).upper()
+               for cb in (getattr(program, "copybooks", None) or [])
+               if cb.get("status") == "missing"]
+    return CallAnalysis(literal_assigns=literal_assigns, var_assigns=var_assigns,
+                        declared=declared, missing_copybooks=missing)
