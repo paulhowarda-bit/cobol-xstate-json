@@ -52,6 +52,7 @@ cobol-xstate prog.cbl --target lineage             # the lineage table on its ow
 cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ lineage)
 cobol-xstate prog.cbl --target artifacts           # the related-artifact manifest on its own
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
+cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch   # ...or your artifact service
 ```
 
 A default run writes **five JSON files** — five views of the same program, each answering
@@ -246,9 +247,11 @@ This is a **heuristic control-flow recovery**, not a conformant COBOL parser. It
 deliberately explicit about the gap (the skill's core principle — don't pretend):
 
 - **Copybooks must be resolvable.** `COPY`/`REPLACING`/`EXEC SQL INCLUDE` are expanded
-  via the resolver (`-I DIR`, `--copybook-ext`); a member that can't be found is listed
-  in `notes` as **missing** (its data/logic isn't in the model) rather than silently
-  dropped. An expanded member's `origin` is threaded through to its tokens, so a
+  via the resolver (`-I DIR`, `--copybook-ext`, or `--copybook-fetcher MODULE:FUNC` to
+  pull members from an estate's own artifact service); a member that can't be found is
+  listed in `notes` as **missing** (its data/logic isn't in the model) rather than
+  silently dropped — and because a missing member also hides the `VALUE`/88 clauses that
+  resolve dynamic `CALL` targets, that gap cascades into unresolved program dependencies. An expanded member's `origin` is threaded through to its tokens, so a
   copybook-defined data item carries a `member` in `data`, and a copybook-defined
   paragraph carries `member` in `provenance` — the diagram traces back to the right file.
   (Statement-level action/guard `member` is not yet threaded.) Embedded `EXEC SQL/CICS/DLI`

@@ -124,6 +124,7 @@ Everything on stdout is the artifact; everything on stderr is commentary. So
 cobol-xstate [-h] [-o OUTPUT] [--outdir DIR]
              [--target {json,js,reactive,business,lineage,artifacts}]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
+             [--copybook-fetcher MODULE:FUNC]
              [--machine-only] [--indent N] [--summary]
              source
 ```
@@ -212,6 +213,50 @@ cobol-xstate prog.cbl -I copybooks -I shared/cpy
 
 Extra extension to try when resolving a copybook. Defaults already tried:
 (bare name), `.cpy`, `.CPY`, `.cbl`, `.cob`, `.copy`, `.CBL`.
+
+### `--copybook-fetcher MODULE:FUNC`
+
+Wire an estate's **own artifact service** in as a copybook source. When a member is not
+found under any `-I` path, `FUNC(member_name)` is called; whatever it returns is coerced
+into member text. This is the hook for a network-share client, a source-control API, or
+a member-retrieval library — the same idea as the JCL reader's `resolver(name) -> text`.
+
+```bash
+cobol-xstate FBSB066B.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact
+```
+
+Accepted return shapes (so an existing client usually needs no adapter):
+
+| Returned | Meaning |
+|---|---|
+| `None` / `False` / `{"found": false}` | not found — the member is flagged missing as usual |
+| `"…text…"` | the member text |
+| `(text, source_label)` | text plus where it came from |
+| `{"text"\|"content"\|"source": …}` | text; `source_path`/`path`/`copied_to` used as the label |
+| `{"copied_to": "data/X.CPY", "source_path": "\\\\share\\…"}` | no inline text — the local copy is read, but labelled with `source_path`, because a local cache path is not the member's identity |
+
+Local `-I` paths always win, so a member on disk never costs a network round-trip. Each
+member is fetched **once** and cached. If the fetcher raises, the run does **not** crash:
+the member is treated as missing, a `WARNING: copybook fetcher failed for X` goes to
+stderr, and the note says the fetcher failed rather than implying the member doesn't
+exist. Resolved members record where they came from in `<name>.artifacts.json`
+(`source` on the copybook row) — which answers, for this run, the SYSLIB-order ambiguity
+that a copybook row otherwise only warns about.
+
+Why this matters beyond convenience: a copybook that does not resolve takes its data
+items **and their `VALUE` clauses** out of the model, which is exactly what turns a
+resolvable dynamic `CALL` target into an unresolved one (see the flag table below).
+
+In Python, pass the callable directly:
+
+```python
+from cast_clients.mf_fetch import fetch_artifact
+from cobol_xstate.preprocessor import CopybookResolver
+from cobol_xstate.parser import parse_program
+
+prog = parse_program(src, resolver=CopybookResolver(
+    paths=["copybooks"], fetcher=fetch_artifact))
+```
 
 ### `--machine-only`
 
@@ -1132,7 +1177,8 @@ Almost certainly source-format misdetection. The tool prints its choice and conf
 stderr; if it warned, re-run with `--format fixed` or `--format free`.
 
 **A paragraph I expected is missing.**
-Check `notes` for a **missing copybook** — its logic is not in the model. Add `-I DIR`.
+Check `notes` for a **missing copybook** — its logic is not in the model. Add `-I DIR`,
+or `--copybook-fetcher MODULE:FUNC` to pull it from the estate's artifact service.
 
 **`flags` says "paragraph body did not parse".**
 That paragraph's logic is *not* modeled — it degraded to one opaque action so the batch

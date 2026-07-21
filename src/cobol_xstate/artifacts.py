@@ -162,6 +162,7 @@ def _copybook_rows(machine: Machine, flags: List[str]) -> List[dict]:
             merged[key] = dict(cb)
         else:
             cur["replacing"] = cur.get("replacing") or cb.get("replacing")
+            cur["source"] = cur.get("source") or cb.get("source")
             if cb.get("status") == "missing":
                 cur["status"] = "missing"
 
@@ -178,6 +179,10 @@ def _copybook_rows(machine: Machine, flags: List[str]) -> List[dict]:
         }
         if cb.get("replacing"):
             row["replacing"] = True
+        if cb.get("source"):
+            # WHICH library actually supplied this member - the SYSLIB ambiguity the
+            # `needs` text warns about, answered for this run.
+            row["source"] = cb["source"]
         contributes = {}
         if data_by_member.get(key):
             contributes["dataItems"] = data_by_member[key]

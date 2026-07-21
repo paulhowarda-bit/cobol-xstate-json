@@ -111,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar="DIR", help="copybook search directory (repeatable)")
     p.add_argument("--copybook-ext", action="append", default=[], metavar="EXT",
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
+    p.add_argument("--copybook-fetcher", metavar="MODULE:FUNC",
+                   help="import MODULE and call FUNC(member_name) for any copybook not "
+                        "found locally - the hook for an estate artifact service "
+                        "(e.g. cast_clients.mf_fetch:fetch_artifact). It may return the "
+                        "member text, (text, source), or a dict with text/path/copied_to")
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--no-lineage", action="store_true",
@@ -190,6 +195,24 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str]) -
     return 0
 
 
+def _load_fetcher(spec: Optional[str]):
+    """``module:function`` (or ``module.function``) -> the callable, for
+    --copybook-fetcher. Raises with a readable message; the caller reports it."""
+    if not spec:
+        return None
+    import importlib
+
+    mod_name, sep, func_name = spec.partition(":")
+    if not sep:
+        mod_name, _, func_name = spec.rpartition(".")
+    if not mod_name or not func_name:
+        raise ValueError("expected MODULE:FUNC, e.g. cast_clients.mf_fetch:fetch_artifact")
+    fn = getattr(importlib.import_module(mod_name), func_name)
+    if not callable(fn):
+        raise TypeError(f"{spec} is not callable")
+    return fn
+
+
 def run(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -212,9 +235,16 @@ def run(argv: Optional[List[str]] = None) -> int:
         return _run_jcl(args, source, source_name, default_stem)
 
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
+    try:
+        fetcher = _load_fetcher(args.copybook_fetcher)
+    except Exception as exc:
+        print(f"error: --copybook-fetcher {args.copybook_fetcher}: {exc}",
+              file=sys.stderr)
+        return 2
     resolver = CopybookResolver(
         paths=search_paths,
         exts=tuple(args.copybook_ext) + default_exts,
+        fetcher=fetcher,
     )
     fmt = _format(args.format)
     if fmt is None:
@@ -231,6 +261,13 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     program = parse_program(source, fmt, resolver=resolver)
     machine = build_machine(program, source_name=source_name)
+
+    # A copybook fetcher that ERRORED is not the same as a member that does not exist:
+    # the model is missing logic for a fixable reason (bad credentials, service down),
+    # so say so loudly rather than letting it read as "not on the estate".
+    for member, err in getattr(resolver, "fetch_errors", []):
+        print(f"[{source_name}] WARNING: copybook fetcher failed for {member}: {err}",
+              file=sys.stderr)
 
     # --bind-jcl: parse each JCL once; the artifacts view is then built through the
     # binding join so its file rows carry the dataset their ddname resolves to.

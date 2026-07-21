@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from .normalizer import CodeLine, SourceFormat, normalize
 
@@ -30,11 +30,35 @@ from .normalizer import CodeLine, SourceFormat, normalize
 @dataclass
 class CopybookResolver:
     """Locate copybooks. ``paths`` are searched in order, each combined with every
-    extension in ``exts`` (plus the bare name)."""
+    extension in ``exts`` (plus the bare name).
+
+    ``fetcher`` is an optional caller-supplied callable tried when the local search
+    finds nothing - the hook for an estate's own artifact service (a network share
+    client, a source-control API, a member-retrieval library). It mirrors the JCL
+    reader's ``resolver(name) -> text`` contract, and accepts whatever shape that
+    service already returns:
+
+        fetcher(name) -> None                       # not found
+                      -> "IDENTIFICATION DIVI..."   # the member text
+                      -> (text, source_label)
+                      -> {"text"|"content"|"source": ..., "path"|"source_path": ...}
+                      -> {"copied_to": "data/X.cpy"} / {"path": ...}  # a file to read
+
+    A dict carrying only a path (the common shape for a fetch-to-disk client) is read
+    from that path, so a client that copies the member locally needs no adapter. A
+    ``found: False`` dict is honored as "not found". Results are cached per name, so a
+    member COPYed twice costs one fetch. An exception from the fetcher is swallowed
+    into "not found" and noted - a flaky external service must not crash a batch run,
+    and the missing copybook is already flagged loudly downstream."""
 
     paths: List[str] = field(default_factory=list)
     exts: Tuple[str, ...] = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     missing: str = "continue"  # 'continue' (stub + note) | 'error'
+    fetcher: Optional[Callable[[str], object]] = None
+    # name -> (text, source) | None, so a repeated COPY does not re-hit the service.
+    _cache: dict = field(default_factory=dict, repr=False)
+    # Fetcher failures, surfaced by the caller if it wants them (name, message).
+    fetch_errors: List[Tuple[str, str]] = field(default_factory=list)
 
     def resolve(self, name: str) -> Optional[Tuple[str, str]]:
         name = name.strip().strip("'\"")
@@ -44,6 +68,50 @@ class CopybookResolver:
                 if os.path.isfile(candidate):
                     with open(candidate, "r", errors="replace") as f:
                         return f.read(), candidate
+        if self.fetcher is None:
+            return None
+        key = name.upper()
+        if key in self._cache:
+            return self._cache[key]
+        try:
+            got = self._normalize_fetched(self.fetcher(name), name)
+        except Exception as exc:                      # a flaky service is not fatal
+            self.fetch_errors.append((key, f"{type(exc).__name__}: {exc}"))
+            got = None
+        self._cache[key] = got
+        return got
+
+    def _normalize_fetched(self, got, name: str) -> Optional[Tuple[str, str]]:
+        """Coerce whatever the fetcher returned into ``(text, source_label)``."""
+        if got is None or got is False:
+            return None
+        if isinstance(got, str):
+            return (got, f"<fetched {name}>") if got.strip() else None
+        if isinstance(got, (tuple, list)):
+            if not got:
+                return None
+            text = got[0]
+            src = str(got[1]) if len(got) > 1 and got[1] else f"<fetched {name}>"
+            return (str(text), src) if str(text).strip() else None
+        if isinstance(got, dict):
+            if got.get("found") is False:
+                return None
+            src = next((str(got[k]) for k in
+                        ("source_path", "path", "copied_to", "source_location", "file")
+                        if got.get(k)), f"<fetched {name}>")
+            for k in ("text", "content", "source", "data", "body"):
+                v = got.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v, src
+            # No inline text: a fetch-to-disk client that only reports where it landed.
+            # Read the local copy, but label it with `src` - a local cache path is not
+            # the member's identity; the library it came FROM is.
+            for k in ("copied_to", "path", "source_path", "file"):
+                p = got.get(k)
+                if isinstance(p, str) and os.path.isfile(p):
+                    with open(p, "r", errors="replace") as f:
+                        return f.read(), src
+            return None
         return None
 
 
@@ -165,9 +233,14 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
                    replacing: bool = False) -> None:
     key = member.strip().strip("'\"").upper()
 
-    def record(status: str) -> None:
-        res.copybooks.append({"member": key, "status": status, "via": via,
-                              "replacing": replacing})
+    def record(status: str, source: Optional[str] = None) -> None:
+        row = {"member": key, "status": status, "via": via, "replacing": replacing}
+        if source:
+            # WHERE this member actually came from - a local path or the label an
+            # external fetcher reported. Two programs "using DC01104" are only the
+            # same dependency if the same member resolved, so the source is evidence.
+            row["source"] = source
+        res.copybooks.append(row)
 
     if key in seen:
         record("skipped-cyclic")
@@ -177,11 +250,14 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
     if found is None:
         record("missing")
         res.missing.append(key)
-        res.notes.append(f"COPY {key}: copybook not found on search path - "
-                         f"members/logic it defines are NOT in the model")
+        err = dict(getattr(resolver, "fetch_errors", None) or {}).get(key)
+        res.notes.append(
+            f"COPY {key}: copybook not found on search path"
+            + (f" and the fetcher failed ({err})" if err else "")
+            + " - members/logic it defines are NOT in the model")
         return
     text, path = found
-    record("expanded")
+    record("expanded", path)
     res.expanded.append(key)
     # A copybook inherits the including program's source format - it is a fragment,
     # far too small to auto-detect reliably on its own.

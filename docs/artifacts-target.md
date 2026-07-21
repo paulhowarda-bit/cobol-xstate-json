@@ -102,7 +102,17 @@ program* — the two false-join hazards
 A **missing** copybook — `COPY`d but not found on the search path — is the highest-value row
 in the whole manifest: the data items and logic it defines are silently *absent from every
 view of the program*, so it is listed with `status: "missing"` and raised in `flags`, never
-dropped.
+dropped. This is not a cosmetic gap. A missing member takes its data items **and their
+`VALUE` / 88-level clauses** out of the model, and those are what constant propagation uses
+to resolve a dynamic `CALL` or a CICS `PROGRAM(data-name)` target — so an unresolved
+copybook cascades directly into an unresolved program dependency.
+
+An expanded copybook records **`source`** — the path (or the label an external fetcher
+reported) the member actually came from. That answers, for this run, the very SYSLIB-order
+ambiguity the `needs` text warns about. To resolve members held in an estate's own artifact
+service rather than on a local path, pass a fetcher:
+`cobol-xstate prog.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact`, or
+`CopybookResolver(fetcher=...)` in Python — see the MANUAL for the accepted return shapes.
 
 ## What it will not claim
 
