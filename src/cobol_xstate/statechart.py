@@ -100,16 +100,34 @@ class Machine:
     # COPY / EXEC SQL INCLUDE dependencies (member/status/via/replacing) - a compile-time
     # source dependency the related-artifact manifest lists.
     copybooks: List[dict] = field(default_factory=list)
+    _iface_cache: Optional[dict] = field(default=None, repr=False, compare=False)
+
+    def interface(self) -> dict:
+        """The external-interface overlay over THIS machine's config, computed once.
+
+        A default run builds four companion views (bundle, business, lineage via
+        business, artifacts) and every one of them needs the same overlay over the
+        same unchanged config/semantics/provenance - so without this it ran four to
+        five times per program, re-walking every state and re-classifying every entry
+        action each time. It is a pure read (its only mutation, tagging meta.perimeter
+        onto the nodes, is idempotent), so one result is correct for all callers.
+
+        Note the reactive view is deliberately NOT a caller: it builds its overlay
+        over a FLATTENED, rewritten config, which is a different input.
+        """
+        if self._iface_cache is None:
+            self._iface_cache = build_interface(
+                self.config, self.semantics, self.provenance,
+                data=self.data, using=self.using, returning=self.returning,
+                files=self.files)
+        return self._iface_cache
 
     def bundle(self) -> dict:
         from .harel import to_harel
         # Build the interface FIRST: it tags meta.perimeter/gets/creates onto the flat
         # IR's state nodes, and the Harel view is derived from that IR - so it has to
         # run before the restructuring copies the nodes, or the boundary tags are lost.
-        iface = build_interface(
-            self.config, self.semantics, self.provenance,
-            data=self.data, using=self.using, returning=self.returning,
-            files=self.files)
+        iface = self.interface()
         config, charts = to_harel(self)
         return {
             "format": "xstate-v5-config",

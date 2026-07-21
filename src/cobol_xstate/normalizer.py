@@ -46,6 +46,10 @@ _CODE = slice(7, 72)      # cols 8-72 Area A (8-11) + Area B (12-72)
 
 def _strip_inline_comment(code: str) -> str:
     """Remove a ``*>`` inline comment, but not one inside a string literal."""
+    if "*>" not in code:
+        # Fast path: this is a character-at-a-time scan over EVERY line of every
+        # program, and the overwhelming majority carry no inline comment at all.
+        return code
     in_str: Optional[str] = None
     i = 0
     while i < len(code):
@@ -212,18 +216,49 @@ def _fixed_code(raw: str) -> Optional[str]:
     Honors column 7: ``*`` / ``/`` = full-line comment, ``D`` = debug line (treated
     as a comment unless WITH DEBUGGING MODE, which we do not model), ``-`` =
     continuation (handled by the caller).
+
+    NOT right-stripped: when this line's literal is continued onto the next, the
+    blanks through column 72 are PART OF THE LITERAL. The caller strips once the
+    logical line is complete.
     """
     if len(raw) <= _IND:
         return ""  # too short to hold code; treat as blank
     ind = raw[_IND]
     if ind in ("*", "/", "D", "d"):
         return None
-    code = raw[_CODE] if len(raw) > 7 else ""
-    return code.rstrip()
+    return raw[_CODE] if len(raw) > 7 else ""
 
 
 def _is_fixed_continuation(raw: str) -> bool:
     return len(raw) > _IND and raw[_IND] == "-"
+
+
+# A compiler-directing statement that is not part of the program: CBL / PROCESS carry
+# compiler options and may start in column 1, i.e. inside the sequence area the fixed
+# reader slices off - which would leave a mangled fragment ("RCE,NOSSRANGE") in the
+# stream. Recognized on the RAW line, before any column slicing.
+_CBL_DIRECTIVE = re.compile(r"^\s*(CBL|PROCESS)\b", re.I)
+
+
+def _open_literal_quote(text: str) -> Optional[str]:
+    """The quote character of an unterminated literal at the end of ``text``, else None.
+
+    A continued alphanumeric literal is exactly this case: the line ends inside the
+    literal, and the next line's leading quote is a RESUME marker, not data."""
+    quote: Optional[str] = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                if i + 1 < len(text) and text[i + 1] == quote:
+                    i += 2          # doubled quote = an escaped quote in the literal
+                    continue
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        i += 1
+    return quote
 
 
 def normalize(source: str, fmt: Optional[SourceFormat] = None) -> List[CodeLine]:
@@ -236,38 +271,73 @@ def normalize(source: str, fmt: Optional[SourceFormat] = None) -> List[CodeLine]
         fmt = detect_source_format(source).format
 
     out: List[CodeLine] = []
+    # The logical line under construction, kept UN-stripped so that a continued
+    # literal keeps the blanks through column 72 that belong to it. Flushed (and
+    # stripped) when the next non-continuation line starts.
+    buf: Optional[str] = None
+    buf_line = 0
+    buf_area_a = False
+    seen_division = False
+
+    def flush() -> None:
+        nonlocal buf
+        if buf is not None and buf.strip():
+            out.append(CodeLine(text=buf.rstrip(), line=buf_line, area_a=buf_area_a))
+        buf = None
+
     for idx, raw in enumerate(raw_lines, start=1):
+        # CBL / PROCESS carry compiler options, not program text, and may begin in
+        # column 1 - inside the area the fixed reader slices away. Consume them before
+        # any slicing so no mangled fragment reaches the lexer. Only valid ahead of the
+        # program, which also keeps a paragraph named PROCESS from being eaten.
+        if not seen_division and _CBL_DIRECTIVE.match(raw):
+            continue
+        if _DIVISION_HEADER.search(raw):
+            seen_division = True
+
         if fmt is SourceFormat.FIXED:
             code = _fixed_code(raw)
             if code is None:
                 continue  # comment / debug line
             cont = _is_fixed_continuation(raw)
         else:
-            stripped = raw.lstrip()
-            if stripped.startswith("*"):
+            if raw.lstrip().startswith("*"):
                 continue  # free-format full-line comment
             code = raw.rstrip()
             cont = False  # free format uses no column-7 continuation
 
-        code = _strip_inline_comment(code).rstrip()
+        code = _strip_inline_comment(code)
 
-        if cont and out:
-            # Continuation: append to the previous logical line. A leading-quote
-            # continuation stitches a split literal with no intervening space.
-            prev = out[-1]
-            joiner = "" if code.lstrip().startswith(("'", '"')) else " "
-            prev.text = (prev.text.rstrip() + joiner + code.lstrip())
-        else:
-            indent = len(code) - len(code.lstrip())
-            if fmt is SourceFormat.FIXED:
-                # Area A is cols 8-11; the normalized fixed-format code starts at col 8
-                # (index 0), so a first token within the first 4 chars sits in Area A.
-                area_a = indent < 4
+        if cont and buf is not None:
+            open_quote = _open_literal_quote(buf)
+            body = code.lstrip()
+            if open_quote and body[:1] == open_quote:
+                # A split literal: the continuation's leading quote is the RESUME
+                # marker, not data. Dropping it is what makes 'ABC' + 'DEF' one
+                # literal 'ABCDEF'; keeping it produced a broken literal followed by
+                # a junk word - silent corruption of every value built this way.
+                buf = buf + body[1:]
+            elif open_quote:
+                # Continued literal whose next line has no quote: still a literal
+                # continuation, so append with no separator.
+                buf = buf + body
             else:
-                # Free format has no reference areas: a header may sit at any indent,
-                # so the strict header regex (parser._HEADER_RE) - not a column rule -
-                # is the discriminator. Treat every line as an Area-A candidate.
-                area_a = True
-            out.append(CodeLine(text=code, line=idx, area_a=area_a))
+                # An ordinary continued word/statement: join with one space.
+                buf = buf.rstrip() + " " + body
+            continue
 
+        flush()
+        indent = len(code) - len(code.lstrip())
+        if fmt is SourceFormat.FIXED:
+            # Area A is cols 8-11; the normalized fixed-format code starts at col 8
+            # (index 0), so a first token within the first 4 chars sits in Area A.
+            buf_area_a = indent < 4
+        else:
+            # Free format has no reference areas: a header may sit at any indent,
+            # so the strict header regex (parser._HEADER_RE) - not a column rule -
+            # is the discriminator. Treat every line as an Area-A candidate.
+            buf_area_a = True
+        buf, buf_line = code, idx
+
+    flush()
     return [cl for cl in out if cl.text.strip()]

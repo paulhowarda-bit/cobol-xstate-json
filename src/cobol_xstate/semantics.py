@@ -36,14 +36,20 @@ _RESERVED_BEFORE_PAREN = {
 }
 
 
+_SUB_RELATION = re.compile(r"[<>]|(?<![A-Za-z0-9-])=")
+_SUB_COMMA = re.compile(r"\s*,\s*")
+
+
 def _norm_subscripts(s: str) -> str:
+    if "(" not in s:
+        return s        # per-statement fast path: most statements have no parentheses
     def repl(m):
         name, content = m.group(1), m.group(2).strip()
         if name.upper() in _RESERVED_BEFORE_PAREN:
             return m.group(0)
-        if re.search(r"[<>]|(?<![A-Za-z0-9-])=", content):  # a relation -> sub-condition
+        if _SUB_RELATION.search(content):        # a relation -> sub-condition
             return m.group(0)
-        content = re.sub(r"\s*,\s*", ",", content)  # tighten a subscript list: I, J -> I,J
+        content = _SUB_COMMA.sub(",", content)   # tighten a subscript list: I, J -> I,J
         return f"{name}({content})"
     return _SUBNORM.sub(repl, s)
 
@@ -80,12 +86,24 @@ _FIGURATIVE = {"ZERO", "ZEROS", "ZEROES", "SPACE", "SPACES", "HIGH-VALUE",
                "HIGH-VALUES", "LOW-VALUE", "LOW-VALUES", "QUOTES", "NULL", "NULLS"}
 
 
+_ROUNDED = re.compile(r"\bROUNDED\b", re.I)
+_SIZE_ERROR = re.compile(r"\bON\s+SIZE\s+ERROR\b", re.I)
+_ARITH_CLAUSE = re.compile(
+    r"\b(?:ROUNDED|ON\s+SIZE\s+ERROR|NOT\s+ON\s+SIZE\s+ERROR)\b", re.I)
+
+
 def _strip_arith_clauses(s: str):
-    """Pull ROUNDED / ON SIZE ERROR off an arithmetic statement; return (core, flags)."""
-    rounded = bool(re.search(r"\bROUNDED\b", s, re.I))
-    size_err = bool(re.search(r"\bON\s+SIZE\s+ERROR\b", s, re.I))
-    core = re.split(r"\b(?:ROUNDED|ON\s+SIZE\s+ERROR|NOT\s+ON\s+SIZE\s+ERROR)\b",
-                    s, flags=re.I)[0]
+    """Pull ROUNDED / ON SIZE ERROR off an arithmetic statement; return (core, flags).
+
+    Gated on a cheap substring test first: this runs for EVERY statement, and MOVE -
+    by far the most common verb - can carry none of these clauses, so the common case
+    should not pay for three full case-insensitive scans of the statement text."""
+    up = s.upper()
+    if "ROUNDED" not in up and "SIZE ERROR" not in up:
+        return s.strip(), False, False
+    rounded = bool(_ROUNDED.search(s))
+    size_err = bool(_SIZE_ERROR.search(s))
+    core = _ARITH_CLAUSE.split(s)[0]
     return core.strip(), rounded, size_err
 
 

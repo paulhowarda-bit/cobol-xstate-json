@@ -178,9 +178,11 @@ not binary float. `--machine-only` emits just the config.
 ```
 raw source
   → normalizer  fixed/free format, column-7 comment/continuation/debug, *> comments,
-                continuation-literal stitching, Area-A detection            (normalizer.py)
+                continuation-literal stitching (the resume quote is a marker, not
+                data), CBL/PROCESS consumption, Area-A detection            (normalizer.py)
   → preprocess  COPY / REPLACING / EXEC SQL INCLUDE expansion via a configurable
-                copybook resolver (search paths, exts, missing policy)   (preprocessor.py)
+                copybook resolver (search paths, exts, missing policy, or a pluggable
+                fetcher); EJECT/SKIPn/TITLE listing directives consumed  (preprocessor.py)
   → lexer       words / numbers / string literals / period / operators,
                 each carrying its source line                              (lexer.py)
   → parser      DATA DIVISION → typed data dictionary (PIC/USAGE/sign, 88-levels);
