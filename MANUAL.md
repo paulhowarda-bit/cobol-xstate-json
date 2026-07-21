@@ -887,7 +887,7 @@ unrecovered spot is visible.
 | `REDEFINES … same category/size` | safe value alias; mirror the value if one is written and the other read |
 | `SEARCH … index iteration is an opaque effect` | WHEN/AT END are real; the advance-until-match loop is not |
 | `SORT … opaque effect` | record ordering (ASCENDING/DESCENDING KEY) is not modeled |
-| `dynamic CALL … ` | the target could not be proven constant. The reason spells out WHY: assigned from variables (genuinely runtime), several candidate literals, declared-but-never-assigned, or **not declared in the visible source** — the latter names the missing copybook that likely holds the `VALUE`; supply it and the target resolves |
+| `dynamic CALL … ` | the target could not be proven constant. The reason spells out WHY: assigned from variables (genuinely runtime), several candidate literals, 88-level `VALUE`s present but no `SET … TO TRUE` visible (candidates listed), declared-but-never-assigned, or **not declared in the visible source** — the latter names the missing copybook that likely holds the `VALUE`; supply it and the target resolves. Constant propagation covers `VALUE` clauses, `MOVE 'lit'`, and `SET <88-condition> TO TRUE` |
 | `dynamic CICS <verb> <OPT>(…)` | a `PROGRAM`/`TRANSID`/`QUEUE`/`FILE`/`MAP`/`MAPSET` operand is a data name — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise (an `EIB*` operand is CICS-supplied, always runtime) |
 | `dynamic SQL: EXEC SQL PREPARE/EXECUTE` | the statement text is assembled at run time — operation and tables not statically knowable |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
