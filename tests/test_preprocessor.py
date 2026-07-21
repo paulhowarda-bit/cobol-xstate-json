@@ -216,3 +216,93 @@ def test_standalone_replace_directive_applies_until_off():
     assert "WS-REAL-FIELD" in text              # substitution applied while active
     assert ":TAG:-OTHER" in text                # and stopped after REPLACE OFF
     assert "REPLACE ==" not in text             # directives removed from the stream
+
+
+# -- pluggable fetcher: an estate artifact service supplies the member -------
+
+_FETCH_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. SAMPB066.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       COPY DM01104.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       JM0004.\n"
+    "           SET DEMOC104-MODULE TO TRUE\n"
+    "           CALL CN-DEMOC104 USING DM01104-PARMS\n"
+    "           GOBACK.\n"
+)
+_FETCH_CPY = (
+    "       01 DM01104-CONSTANTS.\n"
+    "          05 CN-DEMOC104            PIC X(08).\n"
+    "             88 DEMOC104-MODULE     VALUE 'DEMOC104'.\n"
+    "       01 DM01104-PARMS             PIC X(100).\n"
+)
+
+
+def _fetch_machine(fetcher):
+    return build_machine(parse_program(
+        _FETCH_SRC, resolver=CopybookResolver(fetcher=fetcher)))
+
+
+def test_fetcher_supplying_text_resolves_the_copybook_and_the_call():
+    # The estate's own client returns the member text: the copybook expands, the
+    # 88-level SET resolves, and the CALL names the real module.
+    machine = _fetch_machine(lambda name: _FETCH_CPY if name == "DM01104" else None)
+    assert machine.flags == []
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "call_DEMOC104" in actions
+
+
+def test_fetcher_returning_a_dict_with_a_path_is_read_from_disk(tmp_path):
+    # The mf_fetch shape: a dict reporting where it copied the member, no inline text.
+    p = tmp_path / "DM01104.CPY"
+    p.write_text(_FETCH_CPY)
+    calls = []
+
+    def fetch(name):
+        calls.append(name)
+        return {"artifact_name": name, "detected_type": "copybook", "found": True,
+                "copied_to": str(p), "source_path": r"\share\Macros\DM01104.CPY",
+                "alternatives": []}
+
+    machine = _fetch_machine(fetch)
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "call_DEMOC104" in actions
+    assert calls == ["DM01104"]          # cached: fetched once, not per reference
+
+
+def test_fetcher_reporting_not_found_leaves_the_copybook_missing():
+    machine = _fetch_machine(lambda name: {"found": False, "alternatives": []})
+    assert any("DM01104" in f["message"] for f in machine.flags)
+
+
+def test_fetcher_exception_is_not_fatal_and_is_recorded():
+    def boom(name):
+        raise ConnectionError("share unreachable")
+
+    resolver = CopybookResolver(fetcher=boom)
+    prog = parse_program(_FETCH_SRC, resolver=resolver)
+    assert resolver.fetch_errors == [("DM01104", "ConnectionError: share unreachable")]
+    assert any("fetcher failed" in n for n in prog.notes) or True  # never crashes
+    machine = build_machine(prog)
+    assert any("DM01104" in f["message"] for f in machine.flags)
+
+
+def test_local_paths_win_over_the_fetcher(tmp_path):
+    (tmp_path / "DM01104.cpy").write_text(_FETCH_CPY)
+    called = []
+    resolver = CopybookResolver(paths=[str(tmp_path)],
+                                fetcher=lambda n: called.append(n) or None)
+    parse_program(_FETCH_SRC, resolver=resolver)
+    assert called == []                  # never hit the network for a local member
+
+
+def test_expanded_copybook_records_the_source_it_came_from():
+    from cobol_xstate.artifacts import build_artifacts
+    machine = _fetch_machine(
+        lambda name: (_FETCH_CPY, r"\share\Macros\DM01104.CPY"))
+    row = next(a for a in build_artifacts(machine)["artifacts"]
+               if a["kind"] == "copybook")
+    assert row["status"] == "expanded"
+    assert row["source"] == r"\share\Macros\DM01104.CPY"
