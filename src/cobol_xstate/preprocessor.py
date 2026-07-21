@@ -27,6 +27,44 @@ from typing import Callable, List, Optional, Tuple
 from .normalizer import CodeLine, SourceFormat, normalize
 
 
+def normalize_fetched(got, name: str) -> Optional[Tuple[str, str]]:
+    """Coerce whatever an artifact fetcher returned into ``(text, source_label)``.
+
+    Shared by copybook resolution and the dependency-fetch stage so both accept the
+    same client shapes: text, ``(text, source)``, or a dict carrying text and/or a
+    path. ``None`` means "not retrievable" - never a guess."""
+    if got is None or got is False:
+        return None
+    if isinstance(got, str):
+        return (got, f"<fetched {name}>") if got.strip() else None
+    if isinstance(got, (tuple, list)):
+        if not got:
+            return None
+        text = got[0]
+        src = str(got[1]) if len(got) > 1 and got[1] else f"<fetched {name}>"
+        return (str(text), src) if str(text).strip() else None
+    if isinstance(got, dict):
+        if got.get("found") is False:
+            return None
+        src = next((str(got[k]) for k in
+                    ("source_path", "path", "copied_to", "source_location", "file")
+                    if got.get(k)), f"<fetched {name}>")
+        for k in ("text", "content", "source", "data", "body"):
+            v = got.get(k)
+            if isinstance(v, str) and v.strip():
+                return v, src
+        # No inline text: a fetch-to-disk client that only reports where it landed.
+        # Read the local copy, but label it with `src` - a local cache path is not
+        # the member's identity; the library it came FROM is.
+        for k in ("copied_to", "path", "source_path", "file"):
+            p = got.get(k)
+            if isinstance(p, str) and os.path.isfile(p):
+                with open(p, "r", errors="replace") as f:
+                    return f.read(), src
+        return None
+    return None
+
+
 @dataclass
 class CopybookResolver:
     """Locate copybooks. ``paths`` are searched in order, each combined with every
@@ -82,37 +120,7 @@ class CopybookResolver:
         return got
 
     def _normalize_fetched(self, got, name: str) -> Optional[Tuple[str, str]]:
-        """Coerce whatever the fetcher returned into ``(text, source_label)``."""
-        if got is None or got is False:
-            return None
-        if isinstance(got, str):
-            return (got, f"<fetched {name}>") if got.strip() else None
-        if isinstance(got, (tuple, list)):
-            if not got:
-                return None
-            text = got[0]
-            src = str(got[1]) if len(got) > 1 and got[1] else f"<fetched {name}>"
-            return (str(text), src) if str(text).strip() else None
-        if isinstance(got, dict):
-            if got.get("found") is False:
-                return None
-            src = next((str(got[k]) for k in
-                        ("source_path", "path", "copied_to", "source_location", "file")
-                        if got.get(k)), f"<fetched {name}>")
-            for k in ("text", "content", "source", "data", "body"):
-                v = got.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v, src
-            # No inline text: a fetch-to-disk client that only reports where it landed.
-            # Read the local copy, but label it with `src` - a local cache path is not
-            # the member's identity; the library it came FROM is.
-            for k in ("copied_to", "path", "source_path", "file"):
-                p = got.get(k)
-                if isinstance(p, str) and os.path.isfile(p):
-                    with open(p, "r", errors="replace") as f:
-                        return f.read(), src
-            return None
-        return None
+        return normalize_fetched(got, name)
 
 
 @dataclass

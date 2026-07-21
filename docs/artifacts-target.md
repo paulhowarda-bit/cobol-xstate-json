@@ -114,6 +114,24 @@ service rather than on a local path, pass a fetcher:
 `cobol-xstate prog.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact`, or
 `CopybookResolver(fetcher=...)` in Python — see the MANUAL for the accepted return shapes.
 
+## Fetching them — `--fetch-deps`
+
+Knowing *what* a program depends on is one question; *having* those artifacts is the next.
+`--fetch-deps [DIR]` walks this manifest and retrieves every row that names something
+retrievable — called programs, copybooks, ASM modules, CNTL/PARM members, Db2 DDL, BMS
+mapsets — through the same `--copybook-fetcher` callable, writing `<name>.fetch.json`.
+With `--fetch-depth N` it parses each fetched COBOL program and follows *its* manifest,
+so one command walks the dependency closure.
+
+The rows this manifest is careful about are exactly the rows the fetch stage refuses to
+guess at. A `file` row is requested by its **dataset** (when `--bind-jcl` resolved one),
+else its **ddname** — never the program-local file name, because no member called
+`OUT-FILE` exists anywhere on the estate. A `dynamic` row is not requested at all: the
+name is a data item, and fetching it would return nothing or an unrelated member that
+happens to share the name. Both are reported as `skipped` **with the reason**, which
+keeps the report's "we asked and it does not exist" distinct from "this was never a name
+we could ask for". See the MANUAL for the full status table.
+
 ## What it will not claim
 
 - A file referenced with **no `SELECT ... ASSIGN`** (and no CICS `FILE(...)`) has no known
