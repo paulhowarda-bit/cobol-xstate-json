@@ -11,6 +11,7 @@ from typing import List, Optional
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
+from .fetch import fetch_dependencies
 from .jcl import parse_jcl
 from .jcl_views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage
@@ -111,11 +112,23 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar="DIR", help="copybook search directory (repeatable)")
     p.add_argument("--copybook-ext", action="append", default=[], metavar="EXT",
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
-    p.add_argument("--copybook-fetcher", metavar="MODULE:FUNC",
-                   help="import MODULE and call FUNC(member_name) for any copybook not "
-                        "found locally - the hook for an estate artifact service "
+    p.add_argument("--copybook-fetcher", "--fetcher", dest="copybook_fetcher",
+                   metavar="MODULE:FUNC",
+                   help="import MODULE and call FUNC(name) for any copybook not found "
+                        "locally - the hook for an estate artifact service "
                         "(e.g. cast_clients.mf_fetch:fetch_artifact). It may return the "
-                        "member text, (text, source), or a dict with text/path/copied_to")
+                        "member text, (text, source), or a dict with text/path/"
+                        "copied_to. Also used by --fetch-deps")
+    p.add_argument("--fetch-deps", nargs="?", const="", metavar="DIR",
+                   help="fetch EVERY dependent artifact through the fetcher - called "
+                        "programs, copybooks, ASM modules, CNTL/PARM members, Db2 DDL, "
+                        "BMS mapsets - and write <name>.fetch.json reporting each "
+                        "outcome. Give DIR to save the retrieved artifacts there "
+                        "(usable as a later -I path). Requires --copybook-fetcher")
+    p.add_argument("--fetch-depth", type=int, default=1, metavar="N",
+                   help="how many levels of the dependency tree --fetch-deps walks: 1 "
+                        "(default) = this program's direct dependencies; higher parses "
+                        "each fetched COBOL program and follows its dependencies too")
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--no-lineage", action="store_true",
@@ -347,6 +360,30 @@ def run(argv: Optional[List[str]] = None) -> int:
             print(f"[{source_name}] note: no reactive view - {exc}", file=sys.stderr)
             return
         _companion(beside, ".reactive.json", view)
+
+    # --fetch-deps: retrieve every dependent artifact through the same fetcher. Done
+    # before the views are written so its report lands even when a later view refuses.
+    if args.fetch_deps is not None:
+        if fetcher is None:
+            print("error: --fetch-deps needs --copybook-fetcher MODULE:FUNC to know how "
+                  "to retrieve artifacts", file=sys.stderr)
+            return 2
+        report = fetch_dependencies(
+            _artifacts_obj(), fetcher,
+            dest=(args.fetch_deps or None), depth=max(1, args.fetch_depth),
+            copybook_paths=search_paths)
+        fetch_path = (out_path.with_name(base + ".fetch.json") if out_path is not None
+                      else Path(args.outdir) / f"{base}.fetch.json")
+        fetch_path.parent.mkdir(parents=True, exist_ok=True)
+        _write(fetch_path, _json.dumps(report, indent=args.indent) + "\n")
+        print(f"[{source_name}] wrote {fetch_path}", file=sys.stderr)
+        c = report["counts"]
+        print(f"[{source_name}] fetched {c.get('fetched', 0)}, "
+              f"not-found {c.get('not-found', 0)}, skipped {c.get('skipped', 0)}, "
+              f"errors {c.get('error', 0)}"
+              + (f" -> {args.fetch_deps}" if args.fetch_deps else ""), file=sys.stderr)
+        for e in report["errors"]:
+            print(f"  FETCH ERROR {e['artifact']}: {e['error']}", file=sys.stderr)
 
     if args.target in ("business", "lineage", "artifacts"):
         obj = (build_lineage(machine) if args.target == "lineage"

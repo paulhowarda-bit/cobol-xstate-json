@@ -53,6 +53,8 @@ cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ 
 cobol-xstate prog.cbl --target artifacts           # the related-artifact manifest on its own
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
 cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch   # ...or your artifact service
+cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch \
+             --fetch-deps deps --fetch-depth 3   # fetch EVERY dependency, transitively
 ```
 
 A default run writes **five JSON files** — five views of the same program, each answering
@@ -65,6 +67,7 @@ a different question:
 | `prog.lineage.json` | **Where did each value come from, and under what condition?** One row per (external event, field): the event each value originates from, plus the guards that govern the write. |
 | `prog.reactive.json` | **What replaces it?** The event-driven machine: its `on` waits and `publish_*` effects are the new system's message contract. |
 | `prog.artifacts.json` | **What else does it touch?** The related-artifact manifest: the Db2 tables, files/datasets, called programs and queues it touches at run time, plus the copybooks (`COPY` / `EXEC SQL INCLUDE`) it is built from — each with the resolution chain (JCL, CSD, DDL, binder, SYSLIB) its program-local name still needs. See [docs/artifacts-target.md](docs/artifacts-target.md). |
+| `prog.fetch.json` | **Did we actually get them?** (`--fetch-deps`) One row per dependency with the outcome of retrieving it through your estate's artifact service — `fetched` / `not-found` / `error` / `skipped`, the last carrying the reason a row was never fetchable. |
 
 Four of the five are things you **read or draw** (all are renderable `xstate-v5-config`, bar
 the lineage and artifact tables). The **runnable** modules stay behind their own flag:

@@ -224,7 +224,15 @@ def _parse_file_control(lines: List[CodeLine]) -> Dict[str, dict]:
         am = re.search(r"\bASSIGN\s+(?:TO\s+)?([A-Z0-9$#@.-]+|'[^']*'|\"[^\"]*\")",
                        body, re.I)
         if am:
-            entry["assign"] = am.group(1).strip("'\"").upper()
+            raw = am.group(1)
+            if raw[:1] in ("'", '"'):
+                assign = raw.strip("'\"")          # a literal keeps any dots it has
+            else:
+                # An unquoted operand ends at the sentence period; a ddname never
+                # contains one. Keeping it would produce "CNTLDD." - a name that
+                # matches no //DD statement, silently breaking the JCL join.
+                assign = raw.rstrip(".")
+            entry["assign"] = assign.upper()
         om = re.search(r"\bORGANIZATION\s+(?:IS\s+)?([A-Z-]+)", body, re.I)
         if om:
             entry["organization"] = om.group(1).upper()
@@ -893,7 +901,12 @@ class StmtParser:
                     passing = t.up
                     self._next()
                     continue
-                if t.up in STARTERS and t.up != "CALL":
+                if t.up in STARTERS:
+                    # Including a following CALL: two CALLs in one sentence
+                    # (`CALL 'A'` newline `CALL 'B'.`) are two statements, and
+                    # consuming the second as this one's trailing tokens loses an
+                    # entire program dependency. CALL is a reserved word, so it can
+                    # never be an argument name here.
                     break
                 if mode == "using":
                     using.append(t.up)

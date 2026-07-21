@@ -124,7 +124,7 @@ Everything on stdout is the artifact; everything on stderr is commentary. So
 cobol-xstate [-h] [-o OUTPUT] [--outdir DIR]
              [--target {json,js,reactive,business,lineage,artifacts}]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
-             [--copybook-fetcher MODULE:FUNC]
+             [--copybook-fetcher MODULE:FUNC] [--fetch-deps [DIR]] [--fetch-depth N]
              [--machine-only] [--indent N] [--summary]
              source
 ```
@@ -257,6 +257,56 @@ from cobol_xstate.parser import parse_program
 prog = parse_program(src, resolver=CopybookResolver(
     paths=["copybooks"], fetcher=fetch_artifact))
 ```
+
+### `--fetch-deps [DIR]` and `--fetch-depth N`
+
+Retrieve **every dependent artifact**, not just copybooks: the called COBOL programs,
+the copybooks, the assembler modules, the control (CNTL/PARM) members, the Db2 DDL for
+each table, the BMS mapsets. Uses the `--copybook-fetcher` callable (required), passing
+the artifact name and a `type` hint in the estate's own vocabulary — `cobol`,
+`copybook`, `ddl`, `cntl`, `bms`, `csd` — which a service that auto-detects can ignore.
+
+```bash
+# what this program depends on, saved into deps/
+cobol-xstate FBSB066B.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact \
+    --fetch-deps deps
+
+# ...and what THOSE depend on, three levels down
+cobol-xstate FBSB066B.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact \
+    --fetch-deps deps --fetch-depth 3
+```
+
+`--fetch-depth 1` (the default) fetches this program's direct dependencies. Higher
+values **parse each fetched COBOL program and follow its dependencies too**, so one
+command walks the closure. Each artifact is fetched once no matter how many programs
+reference it, and a fetched program whose source will not parse is reported without
+stopping the walk. Give `DIR` to save what came back — a directory you can hand to a
+later run as `-I DIR`.
+
+Writes `<name>.fetch.json`, one row per artifact:
+
+| `status` | Meaning |
+|---|---|
+| `fetched` | retrieved; carries `source` (where it came from) and `savedTo` |
+| `not-found` | the service was asked and had nothing — a real gap on the estate |
+| `error` | the request itself failed — **fixable**, and *not* evidence the artifact is absent |
+| `already-fetched` | reached again by another program in this walk |
+| `skipped` | the row never named a retrievable artifact, with the reason |
+
+The `skipped` rows are the honest part. Three cases, and each would produce the wrong
+file if fetched blindly:
+
+- **A file with no ddname or dataset.** `OUT-FILE` is a name inside *one program*; no
+  member called `OUT-FILE` exists anywhere. File rows are requested by their **dataset**
+  when `--bind-jcl` resolved one, else their **ddname** — and if neither is known the row
+  says so and names `--bind-jcl` as the fix.
+- **A dynamic name.** `WS-FBSPREST` is a data item. Fetching it would return nothing, or
+  worse, an unrelated member that happens to share the name.
+- **`CALLER` / `SYSOUT` / `<dynamic-sql>`**, which are not stored artifacts at all.
+
+In Python, `fetch_dependencies(manifest, fetcher, dest=..., depth=...)` from
+`cobol_xstate.fetch`; `build_fetch_plan(manifest)` returns the same plan without making
+any calls, so you can review it before hitting a service.
 
 ### `--machine-only`
 
