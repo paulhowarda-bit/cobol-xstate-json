@@ -126,10 +126,15 @@ def _io(directions: List[str]) -> str:
 
 
 def _dedup(seq: List) -> List:
-    """Order-preserving de-duplication (verbs/lines read better in first-seen order)."""
+    """Order-preserving de-duplication (verbs/lines read better in first-seen order).
+
+    Set-guarded: the membership test against a growing list was O(n^2), and the line
+    list for a heavily-used endpoint runs to thousands of entries."""
     out: List = []
+    seen = set()
     for x in seq:
-        if x not in out:
+        if x not in seen:
+            seen.add(x)
             out.append(x)
     return out
 
@@ -210,10 +215,7 @@ def build_artifacts(machine: Machine) -> dict:
     touches, with the resolution chain each program-local name still needs. Pure read
     over the emitted machine - it re-projects ``build_interface``'s endpoint inventory and
     invents nothing."""
-    iface = build_interface(
-        machine.config, machine.semantics, machine.provenance,
-        data=machine.data, using=machine.using, returning=machine.returning,
-        files=machine.files)
+    iface = machine.interface()
     endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
 
     # Aggregate the events per endpoint: which verbs touch it, on which source lines.

@@ -155,6 +155,7 @@ def _save(dest: str, name: str, kind: str, text: str) -> str:
 def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = None,
                        depth: int = 1, copybook_paths: Optional[List[str]] = None,
                        _seen: Optional[Set[str]] = None,
+                       _resolver: Optional[CopybookResolver] = None,
                        _level: int = 0) -> dict:
     """Fetch every retrievable artifact in ``manifest``; recurse into fetched COBOL
     programs up to ``depth`` levels (``depth=1`` = this program's direct dependencies).
@@ -174,6 +175,10 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
     from .statechart import build_machine
 
     seen: Set[str] = _seen if _seen is not None else set()
+    # ONE resolver for the whole walk: it memoizes each member, so a copybook shared
+    # by fifty callees costs one round-trip to the estate service instead of fifty.
+    resolver = _resolver if _resolver is not None else CopybookResolver(
+        paths=list(copybook_paths or []), fetcher=fetcher)
     program = manifest.get("program") or "?"
     seen.add(str(program).upper())
 
@@ -202,7 +207,15 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
         seen.add(key)
 
         try:
-            got = normalize_fetched(_call_fetcher(fetcher, name, row.get("type")), name)
+            if kind == "copybook":
+                # Route copybooks through the resolver: it already memoizes members
+                # (so parsing a callee and listing its copybook cost ONE round-trip,
+                # not two) and it searches the local -I paths first, so a member
+                # already on disk is never re-fetched from the network.
+                got = resolver.resolve(name)
+            else:
+                got = normalize_fetched(
+                    _call_fetcher(fetcher, name, row.get("type")), name)
         except Exception as exc:
             row.update({"status": "error", "error": f"{type(exc).__name__}: {exc}"})
             errors.append({"artifact": name, "error": row["error"]})
@@ -232,8 +245,6 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
         if name.upper() in seen and _level > 0:
             continue
         try:
-            resolver = CopybookResolver(paths=list(copybook_paths or []),
-                                        fetcher=fetcher)
             sub = build_artifacts(build_machine(
                 parse_program(text, resolver=resolver), source_name=name))
         except Exception as exc:      # a callee that will not parse must not stop the walk
@@ -243,7 +254,7 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
             continue
         children.append(fetch_dependencies(
             sub, fetcher, dest=dest, depth=depth, copybook_paths=copybook_paths,
-            _seen=seen, _level=_level + 1))
+            _seen=seen, _resolver=resolver, _level=_level + 1))
 
     for child in children:
         rows.extend(child["artifacts"])

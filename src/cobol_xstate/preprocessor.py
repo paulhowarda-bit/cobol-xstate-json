@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, List, Optional, Tuple
 
 from .normalizer import CodeLine, SourceFormat, normalize
@@ -145,6 +146,17 @@ _COPY_RE = re.compile(
 _SQL_INCLUDE_RE = re.compile(
     r"\bEXEC\s+SQL\s+INCLUDE\s+([A-Z0-9$#@_-]+)\s+END-EXEC\s*\.?\s*$", re.I | re.S)
 
+# Listing directives: they lay out the compiler listing and have no runtime meaning.
+# Matched only as a WHOLE line so a data item or paragraph called TITLE is not eaten.
+_LISTING_DIRECTIVE = re.compile(
+    r"\s*(?:(?:EJECT|SKIP[123])\s*\.?|TITLE\s+(?:'[^']*'|\"[^\"]*\")\s*\.?)\s*$", re.I)
+# Hot per-line tests, compiled once: `preprocess` runs these over every line of every
+# program (and every copybook), so an uncompiled literal here is a corpus-scale cost.
+_REPLACE_START = re.compile(r"\s*REPLACE\b", re.I)
+_REPLACE_OFF = re.compile(r"\bREPLACE\s+(?:OFF|LAST\s+OFF)\b", re.I)
+_REPLACE_HEAD = re.compile(r"^\s*REPLACE\b", re.I)
+_SQL_INCLUDE_PROBE = re.compile(r"\bEXEC\s+SQL\s+INCLUDE\b", re.I)
+
 
 def _parse_replacing(clause: str) -> List[Tuple[str, str]]:
     """Parse REPLACING pairs: ==a== BY ==b==  or  word BY word."""
@@ -159,13 +171,21 @@ def _parse_replacing(clause: str) -> List[Tuple[str, str]]:
     return pairs
 
 
+@lru_cache(maxsize=512)
+def _replacing_pattern(a: str):
+    """Compiled, whitespace-tolerant matcher for one REPLACING operand.
+
+    Cached because the substitution runs per LINE while a REPLACE is active and for
+    every line of every expanded copybook: recompiling the same handful of patterns
+    per line is pure waste at corpus scale."""
+    return re.compile(re.escape(a).replace(r"\ ", r"\s+"), re.I)
+
+
 def _apply_replacing(text: str, pairs: List[Tuple[str, str]]) -> str:
     for a, b in pairs:
         if not a:
             continue
-        # Whitespace-tolerant, case-insensitive textual substitution.
-        pat = re.compile(re.escape(a).replace(r"\ ", r"\s+"), re.I)
-        text = pat.sub(b.replace("\\", r"\\"), text)
+        text = _replacing_pattern(a).sub(b.replace("\\", r"\\"), text)
     return text
 
 
@@ -199,20 +219,30 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
     while i < len(lines):
         line = lines[i]
         up = line.text.upper()
-        if re.match(r"\s*REPLACE\b", up):
+        if _LISTING_DIRECTIVE.match(up):
+            # EJECT / SKIP1|2|3 / TITLE are listing directives: they format the compiler
+            # listing and have NO runtime behavior. Left in the stream they parse as
+            # statements, so the model grows phantom actions (an `EJECT` effect in the
+            # statechart, an unknown op in the emitted module) for something that does
+            # not exist at run time.
+            i += 1
+            continue
+        if _REPLACE_START.match(up):
             # standalone REPLACE ==a== BY ==b== ... / REPLACE OFF: text substitution
             # active on every following line until turned off.
             stmt, nxt = _gather_statement(lines, i)
-            if re.search(r"\bREPLACE\s+(?:OFF|LAST\s+OFF)\b", stmt, re.I):
+            if _REPLACE_OFF.search(stmt):
                 active_replace = []
                 i = nxt
                 continue
-            prs = _parse_replacing(re.sub(r"^\s*REPLACE\b", "", stmt, flags=re.I))
+            prs = _parse_replacing(_REPLACE_HEAD.sub("", stmt))
             if prs:
                 active_replace = prs
                 i = nxt
                 continue
-        if "COPY" in up or re.search(r"\bEXEC\s+SQL\s+INCLUDE\b", up):
+        # "INCLUDE" gates the second (expensive) probe: without it the regex ran on
+        # essentially every line of every program, since `COPY` short-circuits rarely.
+        if "COPY" in up or ("INCLUDE" in up and _SQL_INCLUDE_PROBE.search(up)):
             stmt, nxt = _gather_statement(lines, i)
             copy_m = _COPY_RE.search(stmt)
             m = copy_m or _SQL_INCLUDE_RE.search(stmt)
@@ -273,7 +303,13 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
     seen = seen | {key}
     # Recursively preprocess the copybook (nested COPY), then apply REPLACING.
     inner = preprocess(sub, resolver, seen, fmt)
-    res.expanded.extend(x for x in inner.expanded if x not in res.expanded)
+    # Set-guarded: `x not in res.expanded` on a growing list is O(n^2), and a
+    # copybook-heavy program pulls in hundreds of members transitively.
+    already = set(res.expanded)
+    for x in inner.expanded:
+        if x not in already:
+            already.add(x)
+            res.expanded.append(x)
     res.missing.extend(inner.missing)
     res.notes.extend(inner.notes)
     res.copybooks.extend(inner.copybooks)   # nested COPY inside this member

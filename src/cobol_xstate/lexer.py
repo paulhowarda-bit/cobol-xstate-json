@@ -22,13 +22,23 @@ class Token:
     line: int   # 1-based source line
     kind: str   # 'word' | 'number' | 'string' | 'period' | 'punct'
     origin: Optional[str] = None  # copybook member name if from a COPY-expanded line
+    # Upper-cased spelling, computed ONCE. COBOL is case-insensitive, so the parser
+    # compares against `up` constantly - it is the single hottest expression in the
+    # pipeline (dozens of reads per token, ~10^9 tokens over a large corpus). As a
+    # property it re-uppercased the text on every read.
+    up: str = ""
 
-    @property
-    def up(self) -> str:
-        return self.text.upper()
+    def __post_init__(self) -> None:
+        if not self.up:
+            self.up = self.text.upper()
 
     def is_word(self, *words: str) -> bool:
-        return self.kind == "word" and self.up in {w.upper() for w in words}
+        """True when this is a word token spelled as one of ``words``.
+
+        ``words`` are ASCII-uppercase literals at every call site, so they are
+        compared directly - the previous version built a fresh set and re-uppercased
+        each literal on every call, per token."""
+        return self.kind == "word" and self.up in words
 
 
 # Multi-character operators recognized before single chars.

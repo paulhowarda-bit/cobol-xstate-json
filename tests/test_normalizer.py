@@ -193,3 +193,75 @@ def test_detect_margin_code_is_free_via_division_header_and_column7():
     assert det.format is SourceFormat.FREE
     texts = [cl.text.strip() for cl in normalize(src)]
     assert "PROGRAM-ID. FOO." in texts
+
+
+# -- continuation of a split literal (parsing-cobol.md Stage 1) --------------
+
+def test_continuation_stitches_a_split_literal_without_the_resume_quote():
+    """A literal continued across lines: the continuation's leading quote is the
+    RESUME marker, not data. Keeping it produced a truncated literal followed by a
+    junk word - silent corruption of every value built this way."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 'ABCDEFGHIJ\n"
+        "      -    'KLMNO' TO WS-LONG.\n"
+    )
+    text = normalize(src, SourceFormat.FIXED)[-1].text
+    assert "'ABCDEFGHIJKLMNO'" in text
+    assert "'ABCDEFGHIJ'" not in text      # not closed early
+    assert text.count("'") == 2            # exactly one literal, properly terminated
+
+
+def test_continuation_of_a_plain_word_still_joins_with_a_space():
+    src = (
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE WS-A\n"
+        "      -    TO WS-B.\n"
+    )
+    text = normalize(src, SourceFormat.FIXED)[-1].text
+    assert "MOVE WS-A TO WS-B." in text
+
+
+def test_continued_literal_keeps_blanks_that_belong_to_it():
+    """Blanks through column 72 are part of a continued literal, so they must not be
+    right-stripped away before the stitch."""
+    line1 = "           MOVE 'AB" + " " * 10          # literal open, trailing blanks
+    src = (
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        + line1 + "\n"
+        "      -    'CD' TO WS-X.\n"
+    )
+    text = normalize(src, SourceFormat.FIXED)[-1].text
+    assert "'AB          CD'" in text
+
+
+# -- compiler-directing statements -------------------------------------------
+
+def test_cbl_directive_line_is_consumed_not_mangled():
+    """CBL/PROCESS may start in column 1 - inside the sequence area the fixed reader
+    slices off - which used to leave a fragment like 'RCE,NOSSRANGE' in the stream."""
+    src = (
+        "CBL SOURCE,NOSSRANGE\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. PAYROLL.\n"
+    )
+    texts = [cl.text.strip() for cl in normalize(src, SourceFormat.FIXED)]
+    assert texts[0] == "IDENTIFICATION DIVISION."
+    assert not any("NOSSRANGE" in t for t in texts)
+
+
+def test_a_paragraph_named_process_is_not_eaten_as_a_directive():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       PROCESS-RECORD.\n"
+        "           MOVE 1 TO WS-A.\n"
+    )
+    texts = [cl.text.strip() for cl in normalize(src, SourceFormat.FIXED)]
+    assert "PROCESS-RECORD." in texts

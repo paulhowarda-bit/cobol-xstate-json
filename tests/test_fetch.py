@@ -336,3 +336,32 @@ def test_assign_literal_keeps_its_dots():
         "       0000-MAIN.\n"
         "           OPEN INPUT F.\n")
     assert prog.files["F"]["assign"] == "PROD.CNTL.FILE"
+
+
+def test_a_copybook_shared_by_callees_is_fetched_once_for_the_whole_walk():
+    """One resolver spans the walk, so a member COPYd by many callees costs one
+    round-trip to the estate service instead of one per callee."""
+    shared = "       01 SHARED-REC PIC X(80).\n"
+    callee = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. {name}.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY CUSTCPY.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           DISPLAY SHARED-REC\n"
+        "           GOBACK.\n"
+    )
+    store = {"DCIOC104": callee.format(name="DCIOC104"),
+             "AUDITLOG": callee.format(name="AUDITLOG"),
+             "CUSTCPY": shared}
+    log = []
+    rep = fetch_dependencies(
+        _manifest("       0000-MAIN.\n"
+                  "           CALL 'DCIOC104'\n"
+                  "           CALL 'AUDITLOG'.\n"),
+        _fetcher(store, log=log), depth=3)
+    assert [n for n, _ in log].count("CUSTCPY") == 1
+    assert _by(rep, "DCIOC104")["status"] == "fetched"
+    assert _by(rep, "AUDITLOG")["status"] == "fetched"

@@ -92,10 +92,7 @@ class _BusinessView:
         self.guards: Dict[str, dict] = machine.semantics.get("guards", {})
         self.actions: Dict[str, dict] = machine.semantics.get("actions", {})
         self.provenance = machine.provenance
-        iface = _iface.build_interface(
-            machine.config, machine.semantics, machine.provenance,
-            data=machine.data, using=machine.using, returning=machine.returning,
-            files=getattr(machine, "files", {}) or {})
+        iface = machine.interface()
         self.iface = iface
         self.perimeter = iface["perimeterStates"]
         self.files = getattr(machine, "files", {}) or {}

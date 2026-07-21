@@ -306,3 +306,41 @@ def test_expanded_copybook_records_the_source_it_came_from():
                if a["kind"] == "copybook")
     assert row["status"] == "expanded"
     assert row["source"] == r"\share\Macros\DC01104.CPY"
+
+
+# -- listing directives (EJECT / SKIP / TITLE) -------------------------------
+
+def test_listing_directives_do_not_become_statements():
+    """EJECT / SKIPn / TITLE format the compiler listing and have no runtime meaning.
+    Left in the stream they parsed as actions, giving the model phantom effects."""
+    from cobol_xstate.model import walk_statements
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 1 TO WS-A.\n"
+        "       EJECT\n"
+        "       1000-NEXT.\n"
+        "           MOVE 2 TO WS-B.\n"
+        "       SKIP2\n"
+        "           MOVE 3 TO WS-C.\n"
+        "       TITLE 'MONTHLY REPORT'\n"
+        "           MOVE 4 TO WS-D.\n")
+    texts = [getattr(s, "text", "") for p in prog.paragraphs
+             for s in walk_statements(p.statements)]
+    assert texts == ["MOVE 1 TO WS-A", "MOVE 2 TO WS-B", "MOVE 3 TO WS-C",
+                     "MOVE 4 TO WS-D"]
+
+
+def test_a_data_item_named_title_is_not_eaten():
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 TITLE-LINE PIC X(20).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 'X' TO TITLE-LINE.\n")
+    assert "TITLE-LINE" in prog.data_by_name

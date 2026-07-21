@@ -23,6 +23,8 @@ from .model import Action, Program, walk_statements
 _MOVE_RE = re.compile(r"^MOVE\s+(.+?)\s+TO\s+(.+)$", re.I)
 _SET_TRUE_RE = re.compile(r"^SET\s+(.+?)\s+TO\s+TRUE\b", re.I)
 _NAME_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]*$", re.I)
+# Runs for every MOVE / SET in the program - compiled once, like its neighbours.
+_SPLIT_OPERANDS = re.compile(r"[\s,]+")
 
 
 @dataclass
@@ -117,7 +119,7 @@ def analyze_calls(program: Program) -> CallAnalysis:
                 if not m:
                     continue
                 source = m.group(1).strip()
-                targets = [t for t in re.split(r"[\s,]+", m.group(2).strip())
+                targets = [t for t in _SPLIT_OPERANDS.split(m.group(2).strip())
                            if _NAME_RE.match(t)]
                 if source[:1] in ("'", '"'):
                     lit = source.strip("'\"").rstrip()
@@ -130,7 +132,7 @@ def analyze_calls(program: Program) -> CallAnalysis:
                 m = _SET_TRUE_RE.match(st.text.strip())
                 if not m:
                     continue
-                for t in re.split(r"[\s,]+", m.group(1).strip()):
+                for t in _SPLIT_OPERANDS.split(m.group(1).strip()):
                     cl = cond_lit.get(t.upper())
                     if cl:
                         literal_assigns.setdefault(cl[0], set()).add(cl[1])

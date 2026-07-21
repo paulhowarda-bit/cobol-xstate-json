@@ -29,7 +29,8 @@ Every classification is traced to the same source line as the action it came fro
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from collections import deque
+from typing import Deque, Dict, List, Optional
 
 # endpoint kinds
 _FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE = (
@@ -139,36 +140,47 @@ class _DataView:
     def __init__(self, data: Optional[dict]):
         self.data = data or {}
         self.children: Dict[str, List[str]] = {}
+        # file -> its top-level record names, indexed in the SAME pass as children.
+        # Answering this by re-filtering the whole data dictionary per I/O statement
+        # was O(statements x data items) on copybook-heavy programs.
+        self.records: Dict[str, List[str]] = {}
         for name, it in self.data.items():
-            if isinstance(it, dict) and it.get("parent"):
-                self.children.setdefault(it["parent"].upper(), []).append(name)
+            if not isinstance(it, dict):
+                continue
+            parent = it.get("parent")
+            if parent:
+                self.children.setdefault(parent.upper(), []).append(name)
+            elif it.get("file") and it.get("kind") != "condition-name":
+                self.records.setdefault(it["file"], []).append(name)
 
     def file_of(self, name: str) -> Optional[str]:
         it = self.data.get((name or "").upper())
         return it.get("file") if isinstance(it, dict) else None
 
     def records_of(self, file_name: str) -> List[str]:
-        return [n for n, it in self.data.items()
-                if isinstance(it, dict) and it.get("file") == file_name
-                and not it.get("parent") and it.get("kind") != "condition-name"]
+        return self.records.get(file_name, [])
 
     def leaves(self, name: str, limit: int = 64) -> List[str]:
         """Elementary (leaf) fields under `name`, in dictionary order; the record's
         actual field layout, for field-level interface fidelity."""
         out: List[str] = []
-        stack = [(name or "").upper()]
+        root = (name or "").upper()
+        # A deque: the previous list `pop(0)` was O(n) per step and `kids + stack`
+        # reallocated the whole frontier on every expansion - quadratic on a wide
+        # COMMAREA/FD record with hundreds of subordinate fields.
+        stack: Deque[str] = deque([root])
         while stack and len(out) < limit:
-            cur = stack.pop(0)
+            cur = stack.popleft()
             kids = [k for k in self.children.get(cur, [])
                     if isinstance(self.data.get(k), dict)
                     and self.data[k].get("kind") != "condition-name"]
             if not kids:
-                if cur in self.data and cur != (name or "").upper():
+                if cur in self.data and cur != root:
                     out.append(cur)
-                elif cur == (name or "").upper() and not self.children.get(cur):
+                elif cur == root and not self.children.get(cur):
                     out.append(cur)
             else:
-                stack = kids + stack
+                stack.extendleft(reversed(kids))
         return out
 
     def record_fields(self, record: str) -> List[str]:
@@ -565,25 +577,29 @@ def _perimeter_kind(gets: List[str], creates: List[str]) -> str:
     return "input" if gets else "output"
 
 
-def _find_state(config: dict, name: str) -> Optional[dict]:
-    """Locate a state dict by name anywhere in the (possibly nested/parallel) config."""
+def _state_index(config: dict) -> Dict[str, dict]:
+    """name -> state node, for every state in the (possibly nested/parallel) config.
+
+    Built in ONE walk. Looking each name up with its own recursive descent made
+    annotation O(perimeter states x all states) - on a large program that is millions
+    of dict visits for something a single pass answers."""
+    index: Dict[str, dict] = {}
+
     def rec(states):
         for n, st in (states or {}).items():
-            if n == name:
-                return st
-            found = rec(st.get("states"))
-            if found is not None:
-                return found
-        return None
-    return rec(config.get("states", {}))
+            index.setdefault(n, st)
+            rec(st.get("states"))
+    rec(config.get("states", {}))
+    return index
 
 
 def _annotate_states(config: dict, perimeter: Dict[str, dict]) -> None:
     """Tag each perimeter state's node in the machine with ``meta.perimeter`` (input /
     output / input-output) and its get/create events, so the boundary is visible on the
     state itself - not only in the separate overlay. Idempotent."""
+    index = _state_index(config)
     for name, d in perimeter.items():
-        st = _find_state(config, name)
+        st = index.get(name)
         if st is None:
             continue
         meta = st.setdefault("meta", {})
@@ -663,6 +679,14 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     # each file's FILE STATUS field (the file subsystem's response register).
     status_fields = {v["statusField"]: k for k, v in files.items()
                      if isinstance(v, dict) and v.get("statusField")}
+    # item -> which kind of external read branching on it represents. Depends only on
+    # the file/linkage sets, so it is built ONCE here rather than per guarded edge -
+    # a COMMAREA-heavy CICS program has hundreds of linkage names and thousands of
+    # edges, which made rebuilding it per edge a six-figure cost per program.
+    wanted: Dict[str, str] = {r: "response" for r in _RESPONSE_ITEMS}
+    wanted.update({e: "eib" for e in _EIB_INPUTS})
+    wanted.update({s: "status" for s in status_fields})
+    wanted.update({l: "linkage" for l in linkage_all})
     events: List[dict] = []
     perimeter: Dict[str, dict] = {}
     endpoints: Dict[str, dict] = {}
@@ -727,10 +751,6 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             if not g:
                 continue
             tree = guards.get(g)
-            wanted = {r: "response" for r in _RESPONSE_ITEMS}
-            wanted.update({e: "eib" for e in _EIB_INPUTS})
-            wanted.update({s: "status" for s in status_fields})
-            wanted.update({l: "linkage" for l in linkage_all})
             for item in _guard_items(tree, wanted):
                 kind = wanted[item]
                 if kind == "response":
