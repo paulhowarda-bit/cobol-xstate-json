@@ -300,6 +300,69 @@ def test_dynamic_call_target_from_copybook_value_resolves(tmp_path):
     assert "call_DCIOC104" in actions
 
 
+def test_dynamic_call_via_88_level_set_to_true_resolves(tmp_path):
+    # The FBSB066B idiom: the target item has NO VALUE clause - an 88-level condition
+    # carries the module name, and the program does SET <88> TO TRUE before the CALL.
+    # SET stores the 88's VALUE into the parent, so the target is provably constant.
+    from cobol_xstate.preprocessor import CopybookResolver
+    (tmp_path / "DC01104.cpy").write_text(
+        "       01 DC01104-CONSTANTS.\n"
+        "          05 CN-DCIOC104            PIC X(08).\n"
+        "             88 DCIOC104-MODULE     VALUE 'DCIOC104'.\n"
+        "       01 DC01104-PARMS             PIC X(100).\n")
+    src = _COPYBOOK_CALL_SRC.replace(
+        "           CALL CN-DCIOC104 USING DC01104-PARMS\n",
+        "           SET DCIOC104-MODULE TO TRUE\n"
+        "           CALL CN-DCIOC104 USING DC01104-PARMS\n")
+    machine = _machine_with(src, resolver=CopybookResolver(paths=[str(tmp_path)]))
+    assert machine.flags == []
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    assert "call_DCIOC104" in actions
+
+
+def test_dynamic_call_with_88_values_but_no_set_lists_candidates(tmp_path):
+    # Same declaration but the SET is not visible (e.g. done in unparsed code): the
+    # 88 VALUEs are still the values the program was WRITTEN to use - candidates,
+    # reported in the flag, never presented as proof.
+    from cobol_xstate.preprocessor import CopybookResolver
+    (tmp_path / "DC01104.cpy").write_text(
+        "       01 DC01104-CONSTANTS.\n"
+        "          05 CN-DCIOC104            PIC X(08).\n"
+        "             88 DCIOC104-MODULE     VALUE 'DCIOC104'.\n"
+        "       01 DC01104-PARMS             PIC X(100).\n")
+    machine = _machine_with(
+        _COPYBOOK_CALL_SRC, resolver=CopybookResolver(paths=[str(tmp_path)]))
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "dynamic CALL CN-DCIOC104" in msgs
+    assert "88-level" in msgs and "DCIOC104" in msgs
+
+
+def test_two_88_modules_both_set_stay_ambiguous():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TWOMOD.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-MODULE PIC X(8).\n"
+        "          88 MOD-A VALUE 'PGMA'.\n"
+        "          88 MOD-B VALUE 'PGMB'.\n"
+        "       01 WS-FLAG PIC X.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           IF WS-FLAG = 'A'\n"
+        "               SET MOD-A TO TRUE\n"
+        "           ELSE\n"
+        "               SET MOD-B TO TRUE\n"
+        "           END-IF\n"
+        "           CALL WS-MODULE\n"
+        "           GOBACK.\n"
+    )
+    machine = _machine(src)
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "dynamic CALL WS-MODULE" in msgs
+    assert "PGMA" in msgs and "PGMB" in msgs
+
+
 def test_dynamic_call_target_in_missing_copybook_diagnosed():
     # Same program, copybook NOT found: the target cannot resolve, and the flag must
     # say the real situation - the identifier is not declared in the visible source
