@@ -40,32 +40,21 @@ provable rather than blocking the offset.
 
 from __future__ import annotations
 
-import re
 from typing import Dict, List, Optional, Tuple
+
+from .data_division import expand_pic
 
 # PICTURE symbols that occupy no storage: the implied decimal point, scaling positions,
 # and the sign (unless SIGN IS SEPARATE, handled by the caller).
 _NO_BYTE = set("VPS")
-# `X(8)` / `9(5)` - a repeat count to expand before counting positions.
-_REPEAT = re.compile(r"([A-Z9])\((\d+)\)", re.I)
 _BINARY_USAGES = {"COMP", "COMP-4", "COMP-5", "BINARY"}
-
-
-def _expand_pic(pic: str) -> str:
-    """``S9(5)V99`` -> ``S999 99`` style expansion: every symbol written out once."""
-    out = pic.upper()
-    while True:
-        m = _REPEAT.search(out)
-        if not m:
-            return out
-        out = out[:m.start()] + m.group(1) * int(m.group(2)) + out[m.end():]
 
 
 def pic_positions(pic: Optional[str]) -> Optional[int]:
     """Character positions a PICTURE occupies, or ``None`` if it cannot be read."""
     if not pic:
         return None
-    expanded = _expand_pic(str(pic).strip().rstrip("."))
+    expanded = expand_pic(str(pic).strip().rstrip(".")).upper()
     if not expanded:
         return None
     return sum(1 for ch in expanded if ch not in _NO_BYTE)
@@ -163,13 +152,38 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
     blockers: List[str] = []
     fields: List[dict] = []
 
+    def _repeat(name: str, ent: dict) -> Optional[int]:
+        """How many times `ent` occupies its bytes: OCCURS n, or 1. ``None`` if the
+        count is present but unreadable - an unknown repeat moves every later field."""
+        occurs = ent.get("occurs")
+        if not occurs:
+            return 1
+        try:
+            n = int(occurs)
+        except (TypeError, ValueError):
+            n = 0
+        if n < 1:
+            blockers.append(
+                f"{name} OCCURS {occurs!r} - the repeat count could not be read as a "
+                f"positive number, so every field after the table moves by an "
+                f"unknown amount")
+            return None
+        return n
+
     def walk(name: str, ent: dict, offset: int) -> Optional[int]:
-        """Append leaves under `name`, returning the offset just past it."""
+        """Append leaves under `name`, returning the offset just past it.
+
+        A table occupies ``n`` copies of its element, so the offset handed to the NEXT
+        field must clear the whole table - not just its first occurrence. The listed
+        rows describe occurrence one (the only one whose position is fixed relative to
+        the record); `occurs`/`elementLength` say how to step through the rest.
+        """
         kids = _children(data, name)
         if ent.get("redefines"):
             blockers.append(
                 f"{name} REDEFINES {ent['redefines']} - two names occupy the same "
                 f"bytes, so a single offset would not describe both")
+        n = _repeat(name, ent)
         if not kids:
             size, why = item_size(ent)
             row = {"name": name, "level": ent.get("level"),
@@ -177,19 +191,33 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
             if size is None:
                 blockers.append(f"{name}: {why}")
             else:
-                row.update({"offset": offset, "length": size})
+                row.update({"offset": offset, "length": size * (n or 1)})
+                if n and n > 1:
+                    row.update({"occurs": n, "elementLength": size})
             fields.append(row)
-            return None if size is None else offset + size
+            return None if size is None or n is None else offset + size * n
         cur = offset
         for kid_name, kid in kids:
             nxt = walk(kid_name, kid, cur)
             if nxt is None:
                 return None
             cur = nxt
-        return cur
+        if n is None:
+            return None
+        # A repeating GROUP: the children above are occurrence one; the group's whole
+        # extent is n copies of it.
+        return offset + (cur - offset) * n
 
     end = walk(record.upper(), entry, 1)
     total = _sized(data, record.upper(), entry, blockers)
+
+    # Two independent computations of the same number: `walk` accumulates field by
+    # field, `_sized` sums the tree. If they disagree, one of them is wrong and we
+    # cannot tell which - which is exactly the case this module refuses to guess in.
+    if end is not None and total is not None and end - 1 != total:
+        blockers.append(
+            f"{record.upper()}: the field walk ends at byte {end - 1} but the record "
+            f"sizes to {total} bytes - the two disagree, so no offset here is trusted")
 
     out: dict = {"record": record.upper(), "fields": fields}
     if blockers or end is None or total is None:
@@ -213,13 +241,7 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
 
 
 def _dedup(items: List[str]) -> List[str]:
-    seen: set = set()
-    out: List[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
+    return list(dict.fromkeys(items))
 
 
 def field_position(data: Dict[str, dict], field: str) -> dict:
@@ -231,12 +253,25 @@ def field_position(data: Dict[str, dict], field: str) -> dict:
     if not isinstance(entry, dict):
         return {"field": field, "provable": False,
                 "reason": f"{field} is not a declared item in this program"}
+    # Walk to the topmost ancestor. This tool parses whatever text the estate returns -
+    # including a truncated or malformed member - so `parent` can point back into the
+    # chain it came from (`01 REC.` / `05 REC PIC X.` leaves REC its own parent). Track
+    # what we have seen: a cycle is a broken declaration, not a reason to hang the run.
     record = field.upper()
+    seen = {record}
     while True:
         parent = data.get(record, {}).get("parent")
         if not parent:
             break
-        record = str(parent).upper()
+        parent = str(parent).upper()
+        if parent in seen:
+            return {"record": record, "field": field.upper(), "provable": False,
+                    "layout": {"record": record, "provable": False, "fields": []},
+                    "reason": f"{field.upper()} sits under a cyclic declaration "
+                              f"({parent} contains itself), so it has no record to be "
+                              f"positioned within"}
+        seen.add(parent)
+        record = parent
 
     layout = record_layout(data, record)
     out = {"record": record, "field": field.upper(),

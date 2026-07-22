@@ -389,7 +389,16 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     return []
 
 
-_OPEN_MODES = re.compile(r"\b(INPUT|OUTPUT|I-O|EXTEND)\b((?:\s+[A-Z0-9-]+)+)", re.I)
+# One OPEN can carry several mode clauses: `OPEN INPUT F1 OUTPUT F2`. The file-name run
+# must therefore STOP at the next mode keyword - a plain `[A-Z0-9-]+` swallowed it, so
+# that statement parsed as one INPUT clause over three "files", inventing an endpoint
+# literally named OUTPUT and classifying the output file as read. The inner
+# `(?![A-Z0-9-])` keeps a file genuinely named OUTPUT-FILE or I-O-AREA from being read
+# as the keyword, since a plain \b would match before the hyphen.
+_OPEN_MODE = r"(?:INPUT|OUTPUT|I-O|EXTEND)"
+_OPEN_MODES = re.compile(
+    rf"\b({_OPEN_MODE})(?![A-Z0-9-])"
+    rf"((?:\s+(?!{_OPEN_MODE}(?![A-Z0-9-]))[A-Z0-9-]+)+)", re.I)
 
 
 def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,

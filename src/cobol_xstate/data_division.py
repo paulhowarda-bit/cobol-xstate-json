@@ -99,12 +99,46 @@ _USAGES = {
 }
 
 
+# A quoted VALUE literal is DATA, not syntax - its text must never be read as a clause.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+# Clauses whose operand is a data-NAME the programmer chose. The name is not syntax
+# either, so `REDEFINES INDEX-TAB` must not make this item USAGE INDEX.
+_NAME_OPERAND = re.compile(r"\b(?:REDEFINES|RENAMES|DEPENDING\s+ON)\s+[A-Z0-9-]+", re.I)
+# One compiled alternation instead of a per-keyword loop that re-escaped and re-looked-up
+# 18 patterns for every data entry in the program. LONGEST FIRST so COMP-3 still wins
+# over COMP. Both regexes are built once, at import.
+_USAGE_RE = re.compile(
+    r"(?<![A-Z0-9-])("
+    + "|".join(re.escape(k) for k in sorted(_USAGES, key=len, reverse=True))
+    + r")(?![A-Z0-9-])")
+# Every key contains one of these, so a miss here is a guaranteed miss above.
+_USAGE_HINT = re.compile(r"COMP|BINARY|DISPLAY|INDEX|POINTER|PACKED")
+
+
 def _find_usage(text: str) -> Optional[str]:
+    """The USAGE clause of one data entry, or None.
+
+    Two kinds of text in the entry are DATA, not syntax, and matching a USAGE keyword
+    inside either one gives the item a wrong size that storage.py then reports as a
+    provable byte offset - shifting every later field in the record:
+
+    * a quoted VALUE literal - ``PIC X(30) VALUE 'INDEX OUT OF RANGE'`` sized as a
+      4-byte INDEX instead of 30 bytes;
+    * a data-name operand - ``REDEFINES INDEX-TAB``, ``DEPENDING ON COMP-CNT``.
+
+    Both are blanked first. The keyword match then requires that no hyphen or
+    alphanumeric touch either end: COBOL data-names may contain hyphens, so a plain
+    ``\\bINDEX\\b`` still matches inside ``INDEX-TAB``.
+    """
     up = text.upper()
-    for kw, norm in _USAGES.items():
-        if re.search(rf"\b{re.escape(kw)}\b", up):
-            return norm
-    return None
+    # Cheap gate first: this runs once per data entry, and the commonest entry by far
+    # (a plain PIC X(n) with no USAGE clause) would otherwise pay a full scan to learn
+    # it has nothing to find.
+    if not _USAGE_HINT.search(up):
+        return None
+    up = _NAME_OPERAND.sub(" ", _QUOTED.sub(" ", up))
+    m = _USAGE_RE.search(up)
+    return _USAGES[m.group(1)] if m else None
 
 
 def expand_pic(pic: str) -> str:
@@ -131,16 +165,27 @@ def parse_pic(pic: Optional[str], usage: Optional[str]) -> PicType:
         return PicType(category="alphabetic", usage=u, pic=raw)
     if "9" in exp or "V" in exp or "P" in exp:
         digit_part = body
-        # scale = digits to the right of V (or of an actual decimal point in edited)
+        edited = any(c in exp for c in "ZB*$,/") or ("." in exp and "V" not in exp)
+        # Digit positions are `9`, plus the suppression symbols `Z`/`*` in an EDITED
+        # picture (they hold a digit that may print as a space or star). `P` is a
+        # SCALING position: it moves the implied decimal point but is neither a digit
+        # position nor a byte - IBM: "P is not counted in the size of the data item".
+        # Counting P inflated the packed-decimal byte count (S9(5)PPP sized as 8 digits
+        # -> 5 bytes instead of 5 digits -> 3) and the runtime truncation modulus.
+        digit_syms = "9Z*" if edited else "9"
         scale = 0
         if "V" in digit_part:
             after = digit_part.split("V", 1)[1]
-            scale = sum(1 for c in after if c in "9P")
-            digits = sum(1 for c in digit_part if c in "9P")
+            scale = sum(1 for c in after if c in digit_syms or c == "P")
+        elif edited and "." in digit_part:
+            after = digit_part.split(".", 1)[1]
+            scale = sum(1 for c in after if c in digit_syms)
         else:
-            digits = sum(1 for c in digit_part if c in "9P")
-        cat = "numeric-edited" if any(c in exp for c in "ZB*$,/") or (
-            "." in exp and "V" not in exp) else "numeric"
+            # No point written: leading Ps put it left of the digits, trailing Ps right.
+            lead = len(digit_part) - len(digit_part.lstrip("P"))
+            scale = lead if lead else -(len(digit_part) - len(digit_part.rstrip("P")))
+        digits = sum(1 for c in digit_part if c in digit_syms)
+        cat = "numeric-edited" if edited else "numeric"
         return PicType(category=cat, digits=digits, scale=scale,
                        signed=bool(re.match(r"^S", exp)) or signed and cat == "numeric",
                        usage=u, pic=raw)
@@ -173,7 +218,12 @@ def _entries(region: List[CodeLine]):
     for cl in region:
         t = cl.text.strip()
         up = t.upper()
-        sec = next((s for s in _SECTIONS if up.startswith(s + " SECTION")), None)
+        # One or more spaces: COBOL lets any number of blanks separate the words, and
+        # aligned source routinely uses two. Matching only `NAME SECTION` left every
+        # item in a `LINKAGE  SECTION.` untagged, which silently drops the whole
+        # COMMAREA/caller perimeter from the recovered interface.
+        sec = next((s for s in _SECTIONS
+                    if re.match(rf"{re.escape(s)}\s+SECTION\b", up)), None)
         if sec:
             if buf:
                 yield " ".join(buf), first_line, section, first_origin, first_fd
