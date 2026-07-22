@@ -88,8 +88,9 @@ _FIGURATIVE = {"ZERO", "ZEROS", "ZEROES", "SPACE", "SPACES", "HIGH-VALUE",
 
 _ROUNDED = re.compile(r"\bROUNDED\b", re.I)
 _SIZE_ERROR = re.compile(r"\bON\s+SIZE\s+ERROR\b", re.I)
-_ARITH_CLAUSE = re.compile(
-    r"\b(?:ROUNDED|ON\s+SIZE\s+ERROR|NOT\s+ON\s+SIZE\s+ERROR)\b", re.I)
+# Matches the NOT form too, so `... NOT ON SIZE ERROR ...` does not leave a dangling
+# "NOT" on the end of the core statement.
+_SIZE_ERROR_CLAUSE = re.compile(r"\b(?:NOT\s+)?ON\s+SIZE\s+ERROR\b", re.I)
 
 
 def _strip_arith_clauses(s: str):
@@ -103,8 +104,15 @@ def _strip_arith_clauses(s: str):
         return s.strip(), False, False
     rounded = bool(_ROUNDED.search(s))
     size_err = bool(_SIZE_ERROR.search(s))
-    core = _ARITH_CLAUSE.split(s)[0]
-    return core.strip(), rounded, size_err
+    # The two clauses are not the same shape. ON SIZE ERROR opens a HANDLER: everything
+    # after it is a separate statement list and is not part of the operation, so it
+    # truncates. ROUNDED is an inline modifier attached to a receiver, so it has to be
+    # DELETED from the text. Truncating on it too turned `COMPUTE X ROUNDED = A / B`
+    # into `COMPUTE X`, which then failed to match and dropped the assignment from the
+    # model altogether - the statement was emitted as an empty function.
+    core = _SIZE_ERROR_CLAUSE.split(s)[0]
+    core = _ROUNDED.sub(" ", core)
+    return " ".join(core.split()), rounded, size_err
 
 
 def parse_operation(text: str, data: Optional[Dict] = None) -> Optional[dict]:
@@ -138,7 +146,7 @@ def parse_operation(text: str, data: Optional[Dict] = None) -> Optional[dict]:
             targets = _operands(m.group(2))
             return spec("assign", [{"target": t, "expr": src} for t in targets])
     elif verb == "ADD":
-        return _arith_add(core, rounded, size_err, spec)
+        return _arith_add(core, spec)
     elif verb == "SUBTRACT":
         return _arith_sub(core, spec)
     elif verb == "MULTIPLY":
@@ -173,7 +181,7 @@ def _sum_expr(operands: List[str]) -> str:
     return " + ".join(operands)
 
 
-def _arith_add(core, rounded, size_err, spec):
+def _arith_add(core, spec):
     m = re.match(r"ADD\s+(.+?)\s+(?:TO|GIVING)\s+(.+)$", core, re.I)
     if not m:
         return spec("effect")

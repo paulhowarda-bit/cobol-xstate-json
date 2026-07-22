@@ -21,8 +21,11 @@ _OP_WORDS = {
 def _slug(text: str, maxlen: int = 60) -> str:
     text = text.strip()
     # Map relational operators to words so names stay identifier-safe and readable.
-    for op, word in _OP_WORDS.items():
-        text = text.replace(op, f" {word} ")
+    # LONGEST FIRST: iterating the table's own order let the single-character "=", ">"
+    # and "<" fire first, so ">=" became "gt eq" and "<>" became "lt gt" - and the
+    # "ge"/"le"/"ne" spellings the table declares could never be produced at all.
+    for op in sorted(_OP_WORDS, key=len, reverse=True):
+        text = text.replace(op, f" {_OP_WORDS[op]} ")
     text = text.replace("'", "").replace('"', "")
     text = re.sub(r"[^0-9A-Za-z_\- ]+", " ", text)
     parts = [p for p in text.split() if p]
@@ -40,6 +43,31 @@ class ProvenanceEntry:
     cobol: str       # the exact COBOL text / condition / statement
     line: int
     member: Optional[str] = None  # copybook member, if this came from a COPY expansion
+
+
+# A quoted alphanumeric literal, kept out of the case-folding below.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _signature(kind: str, cobol: str) -> str:
+    """Reuse key for ``cobol``: case-folded OUTSIDE quoted literals only.
+
+    COBOL is case-insensitive for keywords and data-names, so `MOVE A TO B` and
+    `move a to b` are one statement and should share one action name. The CONTENTS of
+    an alphanumeric literal are case-sensitive data, though: `MOVE 'Error'` and
+    `MOVE 'ERROR'` store different bytes, and `IF C = 'y'` and `IF C = 'Y'` test
+    different values. Folding the whole string collapsed those pairs onto one name, so
+    whichever registered first silently won at both call sites - a wrong stored string,
+    or a guard that sends the other branch the wrong way.
+    """
+    out: List[str] = []
+    pos = 0
+    for m in _QUOTED.finditer(cobol):
+        out.append(cobol[pos:m.start()].upper())
+        out.append(m.group(0))          # literal verbatim - its case is data
+        pos = m.end()
+    out.append(cobol[pos:].upper())
+    return f"{kind}::{''.join(out)}"
 
 
 @dataclass
@@ -60,7 +88,7 @@ class NameRegistry:
     def register(self, kind: str, base: str, cobol: str, line: int) -> str:
         """Register a name for ``cobol``. Identical (kind, cobol) reuse one name so
         the same statement/condition maps to a single guard/action."""
-        sig = f"{kind}::{cobol.strip().upper()}"
+        sig = _signature(kind, cobol.strip())
         if sig in self._by_signature:
             return self._by_signature[sig]
         name = self._unique(base)

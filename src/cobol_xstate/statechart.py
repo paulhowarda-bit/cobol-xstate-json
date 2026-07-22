@@ -1143,7 +1143,11 @@ def _build_handlers_region(program: Program, ctx: "_BuildCtx"):
                       para.line, member=para.origin)
         cont = dnames[idx + 1] if idx + 1 < len(dnames) else _DECL_END
         _ParaCompiler(ctx, para).compile(cont)
-    decl_states = {k: ctx.states.pop(k) for k in (set(ctx.states) - before)}
+    # Iterate ctx.states (insertion-ordered) and test membership against `before`, rather
+    # than iterating a set difference: a set has no order, so the DECLARATIVES region's
+    # states came out in a different order on every run and the emitted machine was not
+    # byte-reproducible for the same input.
+    decl_states = {k: ctx.states.pop(k) for k in list(ctx.states) if k not in before}
     if any(tr.get("target") == _DECL_END
            for s in decl_states.values() for tr in s.get("always", [])):
         decl_states[_DECL_END] = {"type": "final"}

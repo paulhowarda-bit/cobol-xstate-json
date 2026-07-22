@@ -350,9 +350,14 @@ def _build_ops(machine: Machine, fields: Dict[str, dict]
                 pairs.append((_js_str(tu),
                               f'notModeled({_js_str(f"store into {tu}")})'))
             else:
-                val = _emit_assignment_value(a["target"], a.get("expr", ""), kind,
+                # Upper-case like the two branches above: the data dictionary, FIELDS
+                # and every guard operand are keyed upper, so a lowercase source (legal
+                # - COBOL is case-insensitive) otherwise misses its own field spec, is
+                # treated as non-numeric, and emits a notModeled() that throws.
+                tu = a["target"].upper()
+                val = _emit_assignment_value(tu, a.get("expr", ""), kind,
                                              rounded, fields)
-                pairs.append((_js_str(a["target"]), val))
+                pairs.append((_js_str(tu), val))
         # Assignments apply IN ORDER and later ones see earlier results (DIVIDE ...
         # REMAINDER reads the stored quotient), so the op body is sequential over a
         # shadow copy; the returned partial holds only the written keys.
@@ -694,7 +699,11 @@ def _build_actors(pool: dict, buildable: set, seed: set, ordered: List[str],
     resolve). A range target owns its whole paragraph span; a section owns its members;
     a plain target owns itself."""
     actor_configs: Dict[str, dict] = {}
-    work = list(seed)
+    # Drain the work list in a DEFINED order. `seed` and `needed` are sets, so iterating
+    # them directly made actor build order - and therefore the key order of actorConfigs
+    # in the emitted module and of `charts` in the JSON bundle - vary run to run on
+    # identical input, which makes the output unreproducible and diff review useless.
+    work = sorted(seed, reverse=True)          # reverse: pop() takes from the end
     while work:
         target = work.pop()
         name = f"actor:{target}"
@@ -713,7 +722,7 @@ def _build_actors(pool: dict, buildable: set, seed: set, ordered: List[str],
         _reroute_to_return(states, owner)
         states["__RET__"] = {"type": "final"}
         actor_configs[name] = {"initial": initial, "states": states}
-        work.extend(needed)
+        work.extend(sorted(needed, reverse=True))
     return actor_configs
 
 

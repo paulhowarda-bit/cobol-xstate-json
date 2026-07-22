@@ -100,12 +100,6 @@ def _find_program_id(lines: List[CodeLine]) -> str:
     return "RECOVERED"
 
 
-def _header_name(cl: CodeLine) -> Optional[str]:
-    """Return the paragraph/section name if this line is an Area-A header."""
-    split = _split_header(cl)
-    return split[0] if split else None
-
-
 def _rest_line(cl: CodeLine, rest: str) -> CodeLine:
     """A synthetic Area-B line carrying the code that followed a same-line header."""
     return CodeLine(text=rest, line=cl.line, area_a=False, origin=cl.origin)
@@ -478,7 +472,7 @@ class StmtParser:
         if v == "EXEC":
             return self.parse_exec()
         if v == "IF":
-            return self.parse_if()
+            return self.parse_if(stops)
         if v == "EVALUATE":
             return self.parse_evaluate()
         if v == "PERFORM":
@@ -654,16 +648,27 @@ class StmtParser:
         return Action(line=line, text=" ".join(parts), verb=start.up)
 
     # -- IF ----------------------------------------------------------------
-    def parse_if(self) -> Stmt:
+    def parse_if(self, stops: Set[str]) -> Stmt:
+        """Parse IF [THEN] ... [ELSE ...] [END-IF].
+
+        Both branches inherit the caller's ``stops``: an IF nested in a WHEN, an AT END
+        handler or another IF's branch must not read past the terminator that closes the
+        construct it sits in. ``ELSE`` joins them because of the dangling-else rule -
+        ELSE binds to the NEAREST unmatched IF, so once this IF has taken its own ELSE, a
+        further ELSE at the same depth closes this statement and belongs to an outer one.
+        Without that, a period-terminated `IF / IF / ELSE / ELSE` (no END-IF) hands the
+        inner IF both else-bodies and leaves the outer one with none - an inversion.
+        """
         line = self._next().line  # IF
         cond = self._collect_condition()
         if self._peek() and self._peek().is_word("THEN"):
             self._next()
-        then_body = self.parse_block(stops={"ELSE"})
+        inner = stops | {"ELSE"}
+        then_body = self.parse_block(stops=inner)
         else_body: List[Stmt] = []
         if self._peek() and self._peek().is_word("ELSE"):
             self._next()
-            else_body = self.parse_block(stops=set())
+            else_body = self.parse_block(stops=inner)
         if self._peek() and self._peek().is_word("END-IF"):
             self._next()
         return IfStmt(line=line, cond_text=cond, then_body=then_body, else_body=else_body)
