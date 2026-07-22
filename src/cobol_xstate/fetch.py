@@ -1,16 +1,28 @@
-"""Stage 7 - retrieve every artifact the program depends on.
+"""Stage 2 - retrieve every artifact the program depends on.
 
 ``artifacts.build_artifacts`` answers *which* other things on the estate a program
 touches. This stage answers the next question a migration or impact analysis asks:
 
     > Now go and GET them - all of them, not just the copybooks.
 
-It walks the artifact manifest and calls a caller-supplied ``fetcher(name, ...)`` for
-every row that names something actually retrievable: the called COBOL programs, the
-copybooks, the assembler modules, the control (CNTL/PARM) members, the Db2 DDL/DCLGEN
-for each table, the BMS mapsets, the JCL/PROC. A fetched COBOL program can then be
-parsed in turn and *its* dependencies fetched, so a single call walks the whole
-dependency closure to whatever depth the caller allows.
+It walks the artifact manifest and asks the estate's artifact service
+(``artifact_service``, mf-fetch by default) for every row that names something actually
+retrievable: the called COBOL programs, the copybooks, the assembler modules, the control
+(CNTL/PARM) members, the Db2 DDL/DCLGEN for each table, the BMS mapsets, the JCL/PROC.
+
+**This stage fetches the program's IMMEDIATE dependencies and stops there.** It does not
+parse what it fetched and walk on. That boundary is deliberate: the manifest it works
+from describes *this* program's relationships, and a callee's own dependencies are a
+question about the callee - answered by running the tool on the callee, with its own
+prefetch, its own complete parse, and its own manifest. Walking transitively from here
+would produce those rows from a parse that had never been prefetched, which is precisely
+the failure ``prefetch.py`` exists to prevent.
+
+**It runs after ``prefetch.py``, and cannot be correct before it.** The manifest is a
+product of the parse, and the parse is only complete once the copybooks and control
+members are in hand - a dynamic ``CALL`` whose target literal lives in a copybook that
+never arrived is not a row in this manifest at all. Members prefetch already retrieved
+are reported here as ``prefetched`` rather than requested a second time.
 
 The honest part - the reason this is a projection over the manifest rather than a
 ``grep`` for identifiers - is that **not every artifact row names something fetchable**,
@@ -37,24 +49,38 @@ service returns, via ``preprocessor.normalize_fetched``.
 
 from __future__ import annotations
 
-import os
 import re
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Tuple
 
-from .preprocessor import CopybookResolver, normalize_fetched
+from .artifact_service import ServiceUnavailable, call_service, collect
 
-# artifact kind -> (type hint passed to the fetcher, file extension used when saving).
-# The hint is the estate's vocabulary, not ours: a service that auto-detects can ignore
-# it (the fetcher is called without it first if it does not accept the keyword).
-_KIND_TYPE: Dict[str, tuple] = {
-    "program":          ("cobol", ".cbl"),
-    "copybook":         ("copybook", ".cpy"),
-    "db2-table":        ("ddl", ".sql"),
-    "file":             ("cntl", ".txt"),
-    "terminal-map":     ("bms", ".bms"),
-    "cics-transaction": ("csd", ".txt"),
-    "queue":            ("csd", ".txt"),
+# artifact kind -> the type HINT passed to the service, in the estate's own vocabulary.
+# Only ever a hint: it is what this program's usage suggests the artifact is, which a
+# service that auto-detects is free to override - and when it does, its `detected_type`
+# is the answer that goes in the report. The extension a member is saved under follows
+# the type, and lives in artifact_service.EXT_FOR_TYPE so both stages agree.
+_KIND_TYPE: Dict[str, str] = {
+    # ...from a COBOL program's manifest
+    "program":          "cobol",
+    "copybook":         "copybook",
+    "db2-table":        "ddl",
+    "file":             "cntl",
+    "terminal-map":     "bms",
+    "cics-transaction": "csd",
+    "queue":            "csd",
+    # ...and from a JCL job's manifest (jcl_views.build_jcl_artifacts). The control
+    # members among these are normally already in hand: resolving them is what stage 1
+    # had to do in order for the job to parse at all, so they report as `prefetched`.
+    "proc":             "proc",
+    "include-member":   "cntl",
+    "control-card":     "cntl",
+    "dataset":          "cntl",
 }
+
+# `PARM.LIB(SORTCRD)` - a dataset that names one member. The member is the retrievable
+# identity; which library it lives in is the estate service's business, not ours.
+_DSN_MEMBER = re.compile(r"^(?P<dsn>[A-Z0-9$#@.-]+)\((?P<member>[A-Z0-9$#@]{1,8})\)$",
+                         re.I)
 
 # Rows that never name a retrievable artifact, and why. Kept explicit so the report
 # says WHY rather than silently shortening the list.
@@ -68,9 +94,6 @@ _NEVER_FETCHABLE = {
 # space, a wildcard, or the tool's own placeholder brackets is a description, not a name.
 _MEMBER_NAME = re.compile(r"^[A-Z0-9$#@][A-Z0-9$#@._-]{0,43}$", re.I)
 
-_COBOL_MARKERS = re.compile(
-    r"\b(IDENTIFICATION\s+DIVISION|PROGRAM-ID|PROCEDURE\s+DIVISION)\b", re.I)
-
 
 def _request_name(row: dict) -> tuple:
     """(name_to_request, reason_if_not_fetchable) for one artifact row.
@@ -83,9 +106,22 @@ def _request_name(row: dict) -> tuple:
     if kind in _NEVER_FETCHABLE:
         return None, _NEVER_FETCHABLE[kind]
     if row.get("dynamic"):
-        return None, (f"{name} is a data item whose run-time value names the artifact, "
-                      f"not the artifact name itself - fetching it would retrieve the "
-                      f"wrong member or nothing")
+        why = (f"{name} is a data item whose run-time value names the artifact, "
+               f"not the artifact name itself - fetching it would retrieve the "
+               f"wrong member or nothing")
+        # ...but the manifest may know WHERE the run-time value comes from. Saying so
+        # here turns a dead end into an instruction: this row cannot be fetched, and
+        # the artifact that does name the target can.
+        named = row.get("namedBy") or []
+        if named:
+            why += ("; the name is supplied by "
+                    + ", ".join(str(n.get("dataset") or n.get("artifact"))
+                                for n in named)
+                    + " - fetch that instead and read the targets out of it")
+        elif row.get("candidates"):
+            why += (f"; nothing external writes it, so the target is one of "
+                    f"{', '.join(row['candidates'])} - fetch those directly")
+        return None, why
     if kind == "file":
         # dataset (resolved by --bind-jcl) is the real identity; the ddname is the
         # next-best request; the program-local file name is not fetchable at all.
@@ -100,6 +136,9 @@ def _request_name(row: dict) -> tuple:
                       f"this can be fetched")
     if kind not in _KIND_TYPE:
         return None, f"artifact kind '{kind}' has no known retrieval type"
+    dsn = _DSN_MEMBER.match(name)
+    if dsn:
+        return dsn.group("member").upper(), None
     if not _MEMBER_NAME.match(name):
         return None, f"'{name}' is not a member name that can be requested"
     return name, None
@@ -122,83 +161,93 @@ def build_fetch_plan(manifest: dict) -> List[dict]:
             entry.update({"status": "skipped", "reason": reason})
         else:
             entry.update({"status": "planned", "request": name,
-                          "type": _KIND_TYPE.get(kind, (None, ""))[0]})
+                          "type": _KIND_TYPE.get(kind)})
             if name != row.get("artifact"):
                 # Say WHY the request name differs from the row name (a file requested
-                # by its DSN), so the report is auditable.
-                entry["requestedAs"] = ("dataset" if row.get("dataset") == name
-                                        else "ddname")
+                # by its DSN, a control member requested out of `LIB(MEMBER)`), so the
+                # report is auditable.
+                entry["requestedAs"] = (
+                    "dataset" if row.get("dataset") == name
+                    else "member" if _DSN_MEMBER.match(str(row.get("artifact") or ""))
+                    else "ddname")
         plan.append(entry)
     return plan
 
 
-def _call_fetcher(fetcher: Callable, name: str, type_hint: Optional[str]):
-    """Call the fetcher, passing ``type=`` only if it is accepted. An estate client
-    that auto-detects (or names the keyword differently) must not be broken by us."""
-    if type_hint:
-        try:
-            return fetcher(name, type=type_hint)
-        except TypeError:
-            pass          # signature does not take `type` - fall through to name-only
-    return fetcher(name)
+def candidate_requests(dynamic: Optional[dict]) -> List[dict]:
+    """The candidate targets of unresolved dynamic calls, as fetch requests.
+
+    A dynamic CALL's target is not a manifest row - deliberately, because the manifest's
+    value is that everything in it is a proven dependency and a candidate is not one. But
+    a candidate IS a concrete member name we have reason to believe the program may
+    invoke, and having it locally is strictly better than not. So the candidates are
+    fetched from HERE instead: retrieved and reported, without ever being asserted as
+    dependencies.
+
+    Both grades come through, carrying which they are: ``assigned`` (a MOVE or VALUE
+    provably stores it) and ``declared-88`` (an 88-level names it, but nothing proves it
+    is ever stored)."""
+    out: List[dict] = []
+    for row in ((dynamic or {}).get("dynamicCalls") or []):
+        item = row.get("item")
+        for names, evidence in ((row.get("candidates") or [], "assigned"),
+                                (row.get("declaredCandidates") or [], "declared-88")):
+            for name in names:
+                clean = str(name).strip().strip("'\"").upper()
+                if not clean or not _MEMBER_NAME.match(clean):
+                    continue
+                out.append({"artifact": clean, "kind": "program",
+                            "dependency": "runtime", "forDynamicCall": item,
+                            "evidence": evidence})
+    return out
 
 
-def _save(dest: str, name: str, kind: str, text: str) -> str:
-    ext = _KIND_TYPE.get(kind, (None, ".txt"))[1]
-    safe = re.sub(r"[^A-Za-z0-9$#@._-]", "_", name)
-    path = os.path.join(dest, safe + ext)
-    with open(path, "w", encoding="utf-8", errors="replace") as f:
-        f.write(text)
-    return path
+def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
+                       dest: Optional[str] = None,
+                       prefetched: Optional[Dict[str, Tuple[str, str]]] = None,
+                       unavailable: Optional[str] = None,
+                       dynamic: Optional[dict] = None) -> dict:
+    """Fetch this program's immediate dependent artifacts.
 
+    ``fetcher(name, type=..., copy=...)`` is the estate's artifact service - mf-fetch by
+    default (see ``artifact_service``). ``prefetched`` is the store stage 1 filled: a
+    member already in it is reported, not re-requested. ``dest``, when given, collects
+    everything retrieved into one directory a later run can be pointed at with ``-I``.
 
-def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = None,
-                       depth: int = 1, copybook_paths: Optional[List[str]] = None,
-                       _seen: Optional[Set[str]] = None,
-                       _resolver: Optional[CopybookResolver] = None,
-                       _level: int = 0) -> dict:
-    """Fetch every retrievable artifact in ``manifest``; recurse into fetched COBOL
-    programs up to ``depth`` levels (``depth=1`` = this program's direct dependencies).
+    ``dynamic`` is the dynamic-calls report; its candidate targets are fetched too. They
+    come from here rather than from the manifest because a candidate is not a proven
+    dependency and must not be listed as one - but it is a real member name worth having.
 
-    ``fetcher(name, type=...)`` is the caller's retrieval function - the same one the
-    copybook resolver takes. ``dest``, when given, is a directory each fetched artifact
-    is written into (so a later run can use it as a ``-I`` path).
-
-    Returns a report: one row per artifact with its status (``fetched`` / ``not-found``
-    / ``skipped`` / ``error``), where it came from, where it was saved, and the depth it
-    was discovered at. Nothing is invented: a name that was never fetchable is reported
-    as ``skipped`` with the reason, not quietly dropped."""
-    # Import here: parser/statechart import this module's siblings, and only the
-    # recursive step needs them.
-    from .artifacts import build_artifacts
-    from .parser import parse_program
-    from .statechart import build_machine
-
-    seen: Set[str] = _seen if _seen is not None else set()
-    # ONE resolver for the whole walk: it memoizes each member, so a copybook shared
-    # by fifty callees costs one round-trip to the estate service instead of fifty.
-    resolver = _resolver if _resolver is not None else CopybookResolver(
-        paths=list(copybook_paths or []), fetcher=fetcher)
+    Returns a report: one row per artifact with its status (``fetched`` / ``prefetched``
+    / ``not-found`` / ``error`` / ``no-service`` / ``skipped`` / ``already-fetched``),
+    where it came from, and what else carried the same name. Nothing is invented: a name
+    that was never fetchable is reported as ``skipped`` with the reason, not dropped."""
+    prefetched = prefetched or {}
     program = manifest.get("program") or "?"
-    seen.add(str(program).upper())
-
-    if dest:
-        os.makedirs(dest, exist_ok=True)
+    seen: set = {str(program).upper()}      # never fetch the program being analysed
 
     rows: List[dict] = []
     errors: List[dict] = []
-    to_recurse: List[tuple] = []      # (program_name, text) fetched at this level
 
-    for entry in build_fetch_plan(manifest):
+    # Manifest rows first, then dynamic-call candidates. Order matters: a name that is
+    # BOTH a proven dependency and a candidate should be recorded as the dependency.
+    plan = build_fetch_plan(manifest) + [
+        dict(entry, status="planned", request=entry["artifact"], type="cobol")
+        for entry in candidate_requests(dynamic)]
+
+    for entry in plan:
         row = dict(entry)
-        row["depth"] = _level
         row["forProgram"] = program
         if row["status"] == "skipped":
             rows.append(row)
             continue
 
         name, kind = row["request"], row["kind"]
-        key = f"{kind}:{name.upper()}"
+        # Keyed on the NAME alone, not name+kind: one member is one round-trip however
+        # many ways this manifest arrives at it. A JCL job that both EXECs PAYPROC and
+        # names it as a called program produces two rows for one member, and asking the
+        # estate twice for the same thing is waste that scales with the estate.
+        key = name.upper()
         if key in seen:
             row.update({"status": "already-fetched",
                         "reason": f"{name} was already retrieved in this run"})
@@ -206,18 +255,26 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
             continue
         seen.add(key)
 
+        hit = prefetched.get(name.upper())
+        if hit is not None:
+            # Stage 1 already paid for this member. Reported, because a reader tracing
+            # what this run retrieved needs it in the list - but not requested twice.
+            row.update({"status": "prefetched", "source": hit[1], "bytes": len(hit[0]),
+                        "reason": "retrieved by prefetch (stage 1), before the parse"})
+            rows.append(row)
+            continue
+
+        if fetcher is None:
+            row.update({"status": "no-service",
+                        "reason": (unavailable or "no estate artifact service is "
+                                   "configured, so this artifact was never looked for")})
+            rows.append(row)
+            continue
+
         try:
-            if kind == "copybook":
-                # Route copybooks through the resolver: it already memoizes members
-                # (so parsing a callee and listing its copybook cost ONE round-trip,
-                # not two) and it searches the local -I paths first, so a member
-                # already on disk is never re-fetched from the network.
-                got = resolver.resolve(name)
-            else:
-                got = normalize_fetched(
-                    _call_fetcher(fetcher, name, row.get("type")), name)
-        except Exception as exc:
-            row.update({"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            got = call_service(fetcher, name, row.get("type"), dest)
+        except ServiceUnavailable as exc:
+            row.update({"status": "error", "error": str(exc)})
             errors.append({"artifact": name, "error": row["error"]})
             rows.append(row)
             continue
@@ -227,38 +284,12 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
             rows.append(row)
             continue
 
-        text, source = got
-        row.update({"status": "fetched", "source": source, "bytes": len(text)})
-        if dest:
-            row["savedTo"] = _save(dest, name, kind, text)
+        got = collect(got, dest)
+        row["status"] = "fetched"
+        # The service's own answers - what it found, where, and what else shares the
+        # name - in preference to the kind we inferred from one program's usage.
+        row.update(got.row())
         rows.append(row)
-
-        # A fetched COBOL program is itself analyzable - queue it for the next level.
-        if kind == "program" and _level + 1 < depth and _COBOL_MARKERS.search(text):
-            to_recurse.append((name, text))
-
-    # Recurse: parse each fetched program and fetch ITS dependencies. The copybook
-    # resolver gets the same fetcher, so a callee's copybooks resolve too - which is
-    # what makes its own dynamic CALL targets resolvable in turn.
-    children: List[dict] = []
-    for name, text in to_recurse:
-        if name.upper() in seen and _level > 0:
-            continue
-        try:
-            sub = build_artifacts(build_machine(
-                parse_program(text, resolver=resolver), source_name=name))
-        except Exception as exc:      # a callee that will not parse must not stop the walk
-            errors.append({"artifact": name,
-                           "error": f"fetched but could not be analyzed: "
-                                    f"{type(exc).__name__}: {exc}"})
-            continue
-        children.append(fetch_dependencies(
-            sub, fetcher, dest=dest, depth=depth, copybook_paths=copybook_paths,
-            _seen=seen, _resolver=resolver, _level=_level + 1))
-
-    for child in children:
-        rows.extend(child["artifacts"])
-        errors.extend(child["errors"])
 
     counts: Dict[str, int] = {}
     for r in rows:
@@ -267,19 +298,34 @@ def fetch_dependencies(manifest: dict, fetcher: Callable, dest: Optional[str] = 
     return {
         "format": "cobol-xstate-fetch",
         "program": program,
-        "depth": depth,
         "note": (
-            "One row per artifact this program depends on, with the outcome of "
-            "retrieving it. 'fetched' carries the source it came from (and savedTo when "
-            "a destination was given); 'not-found' means the estate service was asked "
-            "and had nothing; 'error' means the request itself failed (a fixable "
-            "condition, NOT evidence the artifact is absent); 'skipped' means the row "
-            "never named a retrievable artifact and says why - a program-local file "
-            "name with no ddname/DSN, a dynamic name that is really a data item, or a "
-            "caller/spool destination. Fetched COBOL programs are parsed and their own "
-            "dependencies followed, up to 'depth' levels."
+            "Stage 2: one row per artifact this program depends on, with the outcome of "
+            "retrieving it. These are the program's IMMEDIATE dependencies - a callee's "
+            "own dependencies are a question about the callee, answered by running the "
+            "tool on it. 'fetched' carries the library it came from (and alternatives, "
+            "when the same name exists in more than one); 'prefetched' was already "
+            "retrieved by stage 1 before the parse; 'not-found' means the estate service "
+            "was asked and had nothing; 'error' means the request itself failed (a "
+            "fixable condition, NOT evidence the artifact is absent); 'no-service' means "
+            "no estate client was reachable, so it was never looked for; 'skipped' means "
+            "the row never named a retrievable artifact and says why - a program-local "
+            "file name with no ddname/DSN, a dynamic name that is really a data item, or "
+            "a caller/spool destination. " + _candidate_note()
         ),
         "counts": counts,
         "artifacts": rows,
         "errors": errors,
     }
+
+
+def _candidate_note() -> str:
+    return (
+        "Rows carrying 'forDynamicCall' are CANDIDATE targets of an unresolved dynamic "
+        "call, not proven dependencies - which is why they appear here and NOT in the "
+        "artifact manifest, whose value is that everything in it is real. 'evidence' "
+        "grades them: 'assigned' means a MOVE or VALUE clause provably stores the name; "
+        "'declared-88' means an 88-level names it but nothing proves it is ever stored. "
+        "A candidate that is not on the estate is counted as 'not-found' like any other "
+        "- we had a concrete name and the estate could not produce it, which is worth "
+        "knowing however we came by the name."
+    )

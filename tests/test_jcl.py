@@ -313,6 +313,11 @@ def test_binding_carries_the_steps_run_conditions():
         {"test": "(PREP.RC = 0)", "negated": False}]
 
 
+def _run_dir(root):
+    """Where a run writes: --outdir itself, taken literally with nothing appended."""
+    return Path(root)
+
+
 def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
     import json
     from cobol_xstate.cli import run
@@ -320,7 +325,7 @@ def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
     jcl = EXAMPLES / "acctunld.jcl"
     assert run([str(src), "--target", "artifacts", "--bind-jcl", str(jcl),
                 "--outdir", str(tmp_path)]) == 0
-    art = json.loads((tmp_path / "sqlunld.artifacts.json").read_text())
+    art = json.loads((_run_dir(tmp_path) / "sqlunld.artifacts.json").read_text())
     row = next(a for a in art["artifacts"] if a.get("ddname") == "OUTDD")
     assert row["dataset"] == "PROD.ACCT.UNLOAD"
 
@@ -341,9 +346,13 @@ def test_cli_autodetects_jcl_and_writes_both_views(tmp_path):
     import json
     from cobol_xstate.cli import run
     assert run([str(EXAMPLES / "acctunld.jcl"), "--outdir", str(tmp_path)]) == 0
-    names = {f.name for f in tmp_path.iterdir()}
-    assert names == {"acctunld.jcl.artifacts.json", "acctunld.jcl.lineage.json"}
-    art = json.loads((tmp_path / "acctunld.jcl.artifacts.json").read_text())
+    d = _run_dir(tmp_path)
+    names = {f.name for f in d.iterdir()}
+    assert names == {"acctunld.jcl.artifacts.json", "acctunld.jcl.lineage.json",
+                     # the JCL path retrieves its dependencies too, and must: a
+                     # cataloged PROC carries EXEC PGM= steps that are in no other file
+                     "acctunld.jcl.prefetch.json", "acctunld.jcl.fetch.json"}
+    art = json.loads((d / "acctunld.jcl.artifacts.json").read_text())
     assert art["format"] == "cobol-xstate-jcl-artifacts"
 
 

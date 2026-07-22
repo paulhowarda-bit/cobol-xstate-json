@@ -133,13 +133,18 @@ def test_every_fixture_produces_lineage_without_crashing():
 # CLI wiring
 # --------------------------------------------------------------------------- #
 
+def _run_dir(root):
+    """Where a run writes: --outdir itself, taken literally with nothing appended."""
+    return Path(root)
+
+
 def test_cli_lineage_target_writes_its_own_file(tmp_path):
     import json
     from cobol_xstate.cli import run
     rc = run([str(EXAMPLES / "lineage.cbl"), "--target", "lineage",
               "--outdir", str(tmp_path)])
     assert rc == 0
-    out = tmp_path / "lineage.lineage.json"      # peer artifact, not the bundle
+    out = _run_dir(tmp_path) / "lineage.lineage.json"   # peer artifact, not the bundle
     assert out.exists()
     d = json.loads(out.read_text(encoding="utf-8"))
     assert d["format"] == "cobol-xstate-lineage"
@@ -154,42 +159,49 @@ def test_default_run_writes_bundle_and_lineage_side_by_side(tmp_path):
     from cobol_xstate.cli import run
     rc = run([str(EXAMPLES / "lineage.cbl"), "--outdir", str(tmp_path)])
     assert rc == 0
-    bundle, lin = tmp_path / "lineage.json", tmp_path / "lineage.lineage.json"
+    d = _run_dir(tmp_path)
+    bundle, lin = d / "lineage.json", d / "lineage.lineage.json"
     assert bundle.exists() and lin.exists()      # the machine, and its table
     assert json.loads(bundle.read_text(encoding="utf-8"))["format"] == "xstate-v5-config"
     assert json.loads(lin.read_text(encoding="utf-8"))["format"] == "cobol-xstate-lineage"
 
 
-def test_companion_lineage_follows_an_explicit_output_path(tmp_path):
+def test_the_lineage_companion_lands_in_the_same_run_directory(tmp_path):
+    """Every artifact of a run shares one directory - there is no mechanism that could
+    separate a companion from its bundle."""
     from cobol_xstate.cli import run
-    out = tmp_path / "custom.json"
-    assert run([str(EXAMPLES / "lineage.cbl"), "-o", str(out)]) == 0
-    assert out.exists()
-    assert (tmp_path / "custom.lineage.json").exists()
+    assert run([str(EXAMPLES / "lineage.cbl"), "--outdir", str(tmp_path)]) == 0
+    d = _run_dir(tmp_path)
+    assert (d / "lineage.json").exists()
+    assert (d / "lineage.lineage.json").exists()
 
 
 def test_no_lineage_opts_out(tmp_path):
     from cobol_xstate.cli import run
     assert run([str(EXAMPLES / "lineage.cbl"), "--no-lineage",
                 "--outdir", str(tmp_path)]) == 0
-    assert (tmp_path / "lineage.json").exists()
-    assert not (tmp_path / "lineage.lineage.json").exists()
+    d = _run_dir(tmp_path)
+    assert (d / "lineage.json").exists()
+    assert not (d / "lineage.lineage.json").exists()
 
 
 def test_machine_only_writes_the_bare_config_alone(tmp_path):
     from cobol_xstate.cli import run
     assert run([str(EXAMPLES / "lineage.cbl"), "--machine-only",
                 "--outdir", str(tmp_path)]) == 0
-    assert (tmp_path / "lineage.json").exists()
-    assert not (tmp_path / "lineage.lineage.json").exists()
+    d = _run_dir(tmp_path)
+    assert (d / "lineage.json").exists()
+    assert not (d / "lineage.lineage.json").exists()
 
 
-def test_stdout_carries_only_the_bundle(capsys, tmp_path):
+def test_the_bundle_is_the_faithful_machine_not_a_view(tmp_path):
     import json
     from cobol_xstate.cli import run
-    assert run([str(EXAMPLES / "lineage.cbl"), "-o", "-"]) == 0
-    out = capsys.readouterr().out
-    assert json.loads(out)["format"] == "xstate-v5-config"   # one stream, one document
+    assert run([str(EXAMPLES / "lineage.cbl"), "--outdir", str(tmp_path)]) == 0
+    bundle = json.loads(
+        (_run_dir(tmp_path) / "lineage.json").read_text(encoding="utf-8"))
+    assert bundle["format"] == "xstate-v5-config"
+    assert bundle["metadata"].get("view") is None
 
 
 # --------------------------------------------------------------------------- #

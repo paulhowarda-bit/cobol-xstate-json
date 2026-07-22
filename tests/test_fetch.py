@@ -142,62 +142,84 @@ def test_fetches_every_kind_and_records_the_source():
         "       0000-MAIN.\n"
         "           CALL 'DCIOC104'\n"
         "           EXEC CICS SEND MAP('MENUMAP') END-EXEC.\n")
-    rep = fetch_dependencies(man, _fetcher(), depth=1)
+    rep = fetch_dependencies(man, _fetcher())
     assert _by(rep, "DCIOC104")["status"] == "fetched"
     assert _by(rep, "DCIOC104")["source"] == r"\\share\DCIOC104"
     assert _by(rep, "MENUMAP")["status"] == "fetched"
     assert rep["counts"]["fetched"] == 2
 
 
-def test_depth_walks_the_dependency_closure():
-    """MAINPGM -> DCIOC104 -> (ACCOUNT table, AUDITLOG program). Depth 3 reaches all."""
+def test_only_immediate_dependencies_are_fetched():
+    """MAINPGM -> DCIOC104 -> (ACCOUNT, AUDITLOG). Only DCIOC104 is this program's
+    dependency; what DCIOC104 in turn needs is a question about DCIOC104, answered by
+    running the tool on it - with its own prefetch and its own complete parse. Walking
+    on from here would answer it from a parse that had never been prefetched, which is
+    exactly the shortfall stage 1 exists to prevent."""
     man = _manifest(
         "       0000-MAIN.\n"
         "           CALL 'DCIOC104'.\n")
-    rep = fetch_dependencies(man, _fetcher(), depth=3)
-    got = {r["artifact"]: r for r in rep["artifacts"] if r["status"] == "fetched"}
-    assert set(got) == {"DCIOC104", "ACCOUNT", "AUDITLOG"}
-    assert got["DCIOC104"]["depth"] == 0        # a direct dependency
-    assert got["ACCOUNT"]["depth"] == 1         # found by analyzing DCIOC104
-    assert got["AUDITLOG"]["depth"] == 1
-
-
-def test_depth_one_does_not_recurse():
-    man = _manifest(
-        "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'.\n")
-    rep = fetch_dependencies(man, _fetcher(), depth=1)
+    rep = fetch_dependencies(man, _fetcher())
     assert [r["artifact"] for r in rep["artifacts"] if r["status"] == "fetched"] \
         == ["DCIOC104"]
 
 
-def test_an_artifact_is_fetched_once_across_the_whole_walk():
+def test_one_member_is_one_round_trip_however_many_rows_reach_it():
+    """A JCL job that both EXECs PAYPROC and names it as a called program produces two
+    rows for one member. Asking the estate twice for the same thing is waste that scales
+    with the estate, so the second row reports what happened instead of repeating it."""
+    calls = []
+    man = {"program": "PAYJOB", "artifacts": [
+        {"artifact": "AUDITLOG", "kind": "program", "dependency": "runtime"},
+        {"artifact": "AUDITLOG", "kind": "proc", "dependency": "compile-time"},
+    ]}
+    rep = fetch_dependencies(man, _fetcher(log=calls))
+    assert [n for n, _ in calls].count("AUDITLOG") == 1
+    assert [r["status"] for r in rep["artifacts"]] == ["fetched", "already-fetched"]
+
+
+def test_a_prefetched_member_is_reported_but_not_requested_again():
+    """Stage 1 already paid for it. It still appears in the report - a reader tracing
+    what this run retrieved needs the whole list - but the service is not asked twice."""
     calls = []
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'\n"
-        "           CALL 'AUDITLOG'.\n")
-    rep = fetch_dependencies(man, _fetcher(log=calls), depth=3)
-    assert [n for n, _ in calls].count("AUDITLOG") == 1
-    assert any(r["status"] == "already-fetched" for r in rep["artifacts"])
+        "           CALL 'DCIOC104'.\n")
+    rep = fetch_dependencies(man, _fetcher(log=calls),
+                             prefetched={"DCIOC104": ("...text...", "PROD.SRCLIB")})
+    row = _by(rep, "DCIOC104")
+    assert row["status"] == "prefetched"
+    assert row["source"] == "PROD.SRCLIB"
+    assert calls == []
 
 
 def test_not_found_is_distinct_from_skipped():
     man = _manifest(
         "       0000-MAIN.\n"
         "           CALL 'NOSUCHPG'.\n")
-    rep = fetch_dependencies(man, _fetcher(), depth=1)
+    rep = fetch_dependencies(man, _fetcher())
     assert _by(rep, "NOSUCHPG")["status"] == "not-found"
 
 
+def test_no_service_is_distinct_from_not_found():
+    """Nothing was looked for, so nothing being found says nothing about the estate.
+    Reporting this as 'not-found' would manufacture evidence of absence."""
+    man = _manifest(
+        "       0000-MAIN.\n"
+        "           CALL 'DCIOC104'.\n")
+    rep = fetch_dependencies(man, None, unavailable="no client installed")
+    row = _by(rep, "DCIOC104")
+    assert row["status"] == "no-service"
+    assert "no client installed" in row["reason"]
+
+
 def test_a_failing_fetcher_is_reported_not_fatal():
-    def boom(name, type=None):
+    def boom(name, type=None, copy=None):
         raise ConnectionError("share unreachable")
 
     man = _manifest(
         "       0000-MAIN.\n"
         "           CALL 'DCIOC104'.\n")
-    rep = fetch_dependencies(man, boom, depth=2)
+    rep = fetch_dependencies(man, boom)
     row = _by(rep, "DCIOC104")
     assert row["status"] == "error"
     assert "ConnectionError" in row["error"]
@@ -207,66 +229,75 @@ def test_a_failing_fetcher_is_reported_not_fatal():
 def test_a_fetcher_without_a_type_keyword_still_works():
     seen = []
 
-    def name_only(name):            # no `type=` in the signature
+    def name_only(name):            # no `type=` / `copy=` in the signature
         seen.append(name)
         return STORE.get(name.upper())
 
     man = _manifest(
         "       0000-MAIN.\n"
         "           CALL 'DCIOC104'.\n")
-    rep = fetch_dependencies(man, name_only, depth=1)
+    rep = fetch_dependencies(man, name_only)
     assert _by(rep, "DCIOC104")["status"] == "fetched"
     assert seen == ["DCIOC104"]
 
 
-def test_fetched_artifacts_are_saved_and_usable_as_a_search_path(tmp_path):
+def test_fetched_artifacts_are_collected_and_usable_as_a_search_path(tmp_path):
     man = _manifest(
         "       0000-MAIN.\n"
         "           CALL 'DCIOC104'\n"
         "           EXEC SQL SELECT BAL INTO :WS-B FROM ACCOUNT END-EXEC.\n",
         data_body="       01 WS-B PIC 9(5).\n")
-    rep = fetch_dependencies(man, _fetcher(), dest=str(tmp_path), depth=1)
+    rep = fetch_dependencies(man, _fetcher(), dest=str(tmp_path))
     names = {p.name for p in tmp_path.iterdir()}
     assert {"DCIOC104.cbl", "ACCOUNT.sql"} <= names
-    assert _by(rep, "DCIOC104")["savedTo"].endswith("DCIOC104.cbl")
+    assert _by(rep, "DCIOC104")["copiedTo"].endswith("DCIOC104.cbl")
 
 
-def test_a_fetched_program_that_will_not_parse_does_not_stop_the_walk():
-    store = dict(STORE, DCIOC104="       IDENTIFICATION DIVISION.\n\x00 garbage\n")
-    man = _manifest(
-        "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'\n"
-        "           EXEC CICS SEND MAP('MENUMAP') END-EXEC.\n")
-    rep = fetch_dependencies(man, _fetcher(store), depth=3)
-    assert _by(rep, "DCIOC104")["status"] == "fetched"
-    assert _by(rep, "MENUMAP")["status"] == "fetched"     # the walk carried on
+def test_the_service_type_wins_over_our_guess_and_the_disagreement_is_recorded():
+    """We infer 'cobol' from a CALL; the estate says the member is an assembler module.
+    The estate is looking at the member and we are looking at one program's usage of a
+    name, so its answer wins - and the disagreement is a finding worth surfacing, not a
+    discrepancy to smooth over."""
+    def asm(name, type=None, copy=None):
+        return {"artifact_name": name, "found": True, "text": "         CSECT\n",
+                "detected_type": "asm", "source_location": "PROD.ASMLIB(DCIOC104)"}
 
-
-def test_copybooks_resolved_during_the_walk_use_the_same_fetcher():
-    """A callee's copybook must resolve too - that is what makes the callee's own
-    dynamic CALL targets (whose VALUEs live in copybooks) resolvable."""
-    callee = (
-        "       IDENTIFICATION DIVISION.\n"
-        "       PROGRAM-ID. DCIOC104.\n"
-        "       DATA DIVISION.\n"
-        "       WORKING-STORAGE SECTION.\n"
-        "       COPY CUSTCPY.\n"
-        "       PROCEDURE DIVISION.\n"
-        "       0000-MAIN.\n"
-        "           DISPLAY CUST-REC\n"
-        "           GOBACK.\n"
-    )
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"),
-        _fetcher(dict(STORE, DCIOC104=callee)), depth=2)
-    row = _by(rep, "CUSTCPY")
-    assert row["status"] == "fetched" and row["depth"] == 1
+        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), asm)
+    row = _by(rep, "DCIOC104")
+    assert row["detectedType"] == "asm"
+    assert "requested as cobol" in row["typeNote"]
+
+
+def test_alternatives_are_recorded_so_the_syslib_choice_is_visible():
+    """The same member name in three libraries is the SYSLIB-order ambiguity. Which one
+    resolved is a fact; that two others could have is a fact the reader needs too."""
+    def many(name, type=None, copy=None):
+        return {"artifact_name": name, "found": True, "text": "X\n",
+                "source_location": "PROD.SRCLIB(DCIOC104)",
+                "alternatives": ["TEST.SRCLIB(DCIOC104)", "DEV.SRCLIB(DCIOC104)"]}
+
+    rep = fetch_dependencies(
+        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), many)
+    row = _by(rep, "DCIOC104")
+    assert row["source"] == "PROD.SRCLIB(DCIOC104)"
+    assert row["alternatives"] == ["TEST.SRCLIB(DCIOC104)", "DEV.SRCLIB(DCIOC104)"]
+
+
+def test_a_control_member_is_requested_out_of_its_dataset():
+    """`PARM.LIB(SORTCRD)` names a member inside a library. The member is what can be
+    requested; which library holds it is the service's business."""
+    man = {"artifacts": [{"artifact": "PARM.LIB(SORTCRD)", "kind": "control-card",
+                          "dependency": "runtime"}]}
+    row = build_fetch_plan(man)[0]
+    assert row["status"] == "planned"
+    assert row["request"] == "SORTCRD"
+    assert row["requestedAs"] == "member"
 
 
 def test_report_shape_is_self_describing():
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"),
-        _fetcher(), depth=1)
+        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), _fetcher())
     assert rep["format"] == "cobol-xstate-fetch"
     assert rep["program"] == "MAINPGM"
     assert "note" in rep and "counts" in rep and "errors" in rep
@@ -338,30 +369,5 @@ def test_assign_literal_keeps_its_dots():
     assert prog.files["F"]["assign"] == "PROD.CNTL.FILE"
 
 
-def test_a_copybook_shared_by_callees_is_fetched_once_for_the_whole_walk():
-    """One resolver spans the walk, so a member COPYd by many callees costs one
-    round-trip to the estate service instead of one per callee."""
-    shared = "       01 SHARED-REC PIC X(80).\n"
-    callee = (
-        "       IDENTIFICATION DIVISION.\n"
-        "       PROGRAM-ID. {name}.\n"
-        "       DATA DIVISION.\n"
-        "       WORKING-STORAGE SECTION.\n"
-        "       COPY CUSTCPY.\n"
-        "       PROCEDURE DIVISION.\n"
-        "       0000-MAIN.\n"
-        "           DISPLAY SHARED-REC\n"
-        "           GOBACK.\n"
-    )
-    store = {"DCIOC104": callee.format(name="DCIOC104"),
-             "AUDITLOG": callee.format(name="AUDITLOG"),
-             "CUSTCPY": shared}
-    log = []
-    rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n"
-                  "           CALL 'DCIOC104'\n"
-                  "           CALL 'AUDITLOG'.\n"),
-        _fetcher(store, log=log), depth=3)
-    assert [n for n, _ in log].count("CUSTCPY") == 1
-    assert _by(rep, "DCIOC104")["status"] == "fetched"
-    assert _by(rep, "AUDITLOG")["status"] == "fetched"
+# A copybook shared by many members costing one round-trip is now stage 1's guarantee,
+# and is tested there: see test_prefetch.py::test_a_member_reached_many_ways_is_fetched_once

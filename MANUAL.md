@@ -113,18 +113,21 @@ Zero flags means every construct in this program was modeled outright. State nam
 `1000-INIT__io5` are structural sub-states of the `1000-INIT` paragraph — see
 [section 5](#5-the-json-bundle-section-by-section).
 
-Everything on stdout is the artifact; everything on stderr is commentary. So
-`cobol-xstate prog.cbl -o - > chart.json` gives you a clean file.
+Everything on stderr is commentary: the format detection, the two retrieval stages, and
+any member that could not be found. The artifacts themselves are always files, written
+into one directory per program (see `--outdir`).
 
 ---
 
 ## 3. Command-line reference
 
 ```
-cobol-xstate [-h] [-o OUTPUT] [--outdir DIR]
+cobol-xstate [-h] [--outdir DIR]
              [--target {json,js,reactive,business,lineage,artifacts}]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
-             [--copybook-fetcher MODULE:FUNC] [--fetch-deps [DIR]] [--fetch-depth N]
+             [--copybook-fetcher MODULE:FUNC]
+             [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
+             [--no-dynamic-calls] [--bind-jcl FILE]
              [--machine-only] [--indent N] [--summary]
              source
 ```
@@ -138,23 +141,16 @@ cobol-xstate prog.cbl
 cobol-xstate - < prog.cbl        # output name falls back to the PROGRAM-ID
 ```
 
-### `-o, --output PATH`
-
-Exact output path. Overrides `--outdir` and the automatic name. `-o -` writes the
-artifact to **stdout** instead of a file (useful for piping).
-
-```bash
-cobol-xstate prog.cbl -o build/custom.json
-cobol-xstate prog.cbl -o - | jq '.flags'
-```
-
 ### `--outdir DIR`
 
-Directory for the auto-named output files. Default: current directory. Relative paths
-resolve against the current directory; `.` is the current directory. **Created with
-parents if it does not exist.**
+Where output goes. Default `./out`. The path is taken **literally** — nothing is appended
+to it. Relative paths resolve against the current directory; created with parents if it
+does not exist.
 
-Files are named after the source stem, or after the PROGRAM-ID when reading stdin.
+Every file a run produces goes here: the bundle, all six views, both retrieval reports,
+the artifacts fetched from the estate (under `deps/`), and the JS runtime when
+`--target js` needs it. This is the *only* placement mechanism — there is no flag that can
+put a file anywhere else.
 
 ```bash
 cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
@@ -162,17 +158,32 @@ cobol-xstate prog.cbl --outdir build/charts     # -> build/charts/prog.json
                                                 #  + build/charts/prog.lineage.json
                                                 #  + build/charts/prog.reactive.json
                                                 #  + build/charts/prog.artifacts.json
+                                                #  + build/charts/prog.dynamic-calls.json
+                                                #  + build/charts/prog.prefetch.json
+                                                #  + build/charts/prog.fetch.json
+                                                #  + build/charts/deps/...
 ```
 
-### `--no-lineage` / `--no-business` / `--no-reactive` / `--no-artifacts`
+Files are named after the source stem (or the PROGRAM-ID when reading stdin), so several
+programs can share one `--outdir` without colliding — and they then share one `deps/`
+cache, which is usually what you want across a corpus.
 
-Skip a companion. A default run writes all five views because they answer different
+The default is `./out` rather than `.` so a bare run never scatters files into whatever
+directory it happened to be invoked from.
+
+### `--no-lineage` / `--no-business` / `--no-reactive` / `--no-artifacts` / `--no-dynamic-calls`
+
+Skip a companion. A default run writes all six views because they answer different
 questions about the same program and are normally read together; these opt out when you
 want fewer. `--machine-only` suppresses all of them.
 
 A program the reactive lowering refuses (CICS handler regions, recursive `PERFORM`) gets
 no `.reactive.json` and a note on stderr — the refusal is a fact about that program, not
-a failure of the run, so the other four views still land.
+a failure of the run, so the other five views still land.
+
+`.dynamic-calls.json` is written even when it is empty: "this program has no unresolvable
+dynamic calls" is a real and reassuring answer, and a missing file would be ambiguous
+between that and the view not having run.
 
 ### `--target {json,js,reactive,business,lineage,artifacts}`
 
@@ -216,14 +227,25 @@ Extra extension to try when resolving a copybook. Defaults already tried:
 
 ### `--copybook-fetcher MODULE:FUNC`
 
-Wire an estate's **own artifact service** in as a copybook source. When a member is not
-found under any `-I` path, `FUNC(member_name)` is called; whatever it returns is coerced
-into member text. This is the hook for a network-share client, a source-control API, or
-a member-retrieval library — the same idea as the JCL reader's `resolver(name) -> text`.
+**Overrides** the estate artifact service. It does not enable retrieval — every run
+retrieves through `cast_clients.mf_fetch:fetch_artifact` by default, because only the
+estate knows where its members live. Use this only for a differently-named client.
 
 ```bash
-cobol-xstate FBSB066B.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact
+cobol-xstate FBSB066B.cbl                                    # uses mf-fetch
+cobol-xstate FBSB066B.cbl --copybook-fetcher pkg.client:get  # ...or your own
 ```
+
+`FUNC(name, type=, copy=)` is called for any member not found under an `-I` path. Both
+keyword arguments are optional parts of the contract: a client that does not accept them
+is called without, so an existing client needs no adapter. `type` is only ever a *hint* —
+what this program's usage suggests the artifact is — and a service that auto-detects is
+free to ignore it and answer with `detected_type`, which is what the reports record.
+
+If the client cannot be imported, the run is **not** an error: it proceeds against the
+local `-I` paths and every unobtainable member is reported as `no-service` — never as
+`not-found`, which would manufacture evidence that the estate lacks something nobody ever
+asked it for.
 
 Accepted return shapes (so an existing client usually needs no adapter):
 
@@ -258,39 +280,48 @@ prog = parse_program(src, resolver=CopybookResolver(
     paths=["copybooks"], fetcher=fetch_artifact))
 ```
 
-### `--fetch-deps [DIR]` and `--fetch-depth N`
+### Dependency retrieval (always on)
 
-Retrieve **every dependent artifact**, not just copybooks: the called COBOL programs,
-the copybooks, the assembler modules, the control (CNTL/PARM) members, the Db2 DDL for
-each table, the BMS mapsets. Uses the `--copybook-fetcher` callable (required), passing
-the artifact name and a `type` hint in the estate's own vocabulary — `cobol`,
-`copybook`, `ddl`, `cntl`, `bms`, `csd` — which a service that auto-detects can ignore.
+Every run retrieves what the source depends on, in two stages, with no flag to turn
+either on. Full rationale in [docs/fetch-stages.md](docs/fetch-stages.md); the short
+version is that the dependency manifest is a *product of the parse*, so anything the
+parse could not see is not in it:
+
+**Stage 1 — prefetch**, before the parse. The members that complete the source text:
+`COPY` / `EXEC SQL INCLUDE` members for COBOL; cataloged PROCs, `INCLUDE` members and
+control-card datasets for JCL. Followed transitively, because a copybook that COPYs a
+copybook has a hole in it exactly like the program did.
+
+**Stage 2 — fetch**, after it. This program's **immediate** dependent artifacts: called
+programs, copybooks, assembler modules, control (CNTL/PARM) members, Db2 DDL, BMS
+mapsets, PROCs. What a *callee* depends on is a question about the callee — run the tool
+on the callee, and it gets its own prefetch and its own complete parse.
 
 ```bash
-# what this program depends on, saved into deps/
-cobol-xstate FBSB066B.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact \
-    --fetch-deps deps
-
-# ...and what THOSE depend on, three levels down
-cobol-xstate FBSB066B.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact \
-    --fetch-deps deps --fetch-depth 3
+cobol-xstate FBSB066B.cbl                 # both stages; deps in out/deps/
+cobol-xstate FBSB066B.cbl -I out/deps     # a later run reuses them, no round-trips
 ```
 
-`--fetch-depth 1` (the default) fetches this program's direct dependencies. Higher
-values **parse each fetched COBOL program and follow its dependencies too**, so one
-command walks the closure. Each artifact is fetched once no matter how many programs
-reference it, and a fetched program whose source will not parse is reported without
-stopping the walk. Give `DIR` to save what came back — a directory you can hand to a
-later run as `-I DIR`.
+Why the order is not negotiable: a copybook that does not arrive takes its `VALUE`
+clauses out of the model, so `CALL WS-SUBPGM` cannot be proved constant, so the program
+it calls is not a row in the manifest and stage 2 never asks for it. Nothing errors —
+the program simply appears not to call anything. The same shape costs a JCL job every
+step inside an unresolved PROC.
 
-Writes `<name>.fetch.json`, one row per artifact:
+`--machine-only` suppresses the two reports but **not** the retrieval: what was fetched
+decides whether the machine is right.
+
+Writes `<name>.prefetch.json` and `<name>.fetch.json`, one row per member/artifact:
 
 | `status` | Meaning |
 |---|---|
-| `fetched` | retrieved; carries `source` (where it came from) and `savedTo` |
+| `fetched` | retrieved; carries the library it came from, plus `alternatives` when the same name exists in more than one, and `typeNote` when the service's `detected_type` disagrees with the kind we inferred |
+| `local` | already on an `-I` path — no round-trip |
+| `prefetched` | *(stage 2)* stage 1 already retrieved it; reported, not re-requested |
 | `not-found` | the service was asked and had nothing — a real gap on the estate |
 | `error` | the request itself failed — **fixable**, and *not* evidence the artifact is absent |
-| `already-fetched` | reached again by another program in this walk |
+| `no-service` | no estate client was reachable, so it was never looked for |
+| `already-fetched` | another row in this manifest reached the same member |
 | `skipped` | the row never named a retrievable artifact, with the reason |
 
 The `skipped` rows are the honest part. Three cases, and each would produce the wrong
@@ -373,7 +404,7 @@ back on `onDone`, so WORKING-STORAGE threads correctly through nested calls. The
 runs end-to-end under stock `createActor` with no custom interpreter.
 
 ```bash
-cobol-xstate prog.cbl --target js -o out/prog.machine.mjs
+cobol-xstate prog.cbl --target js        # -> out/prog.mjs + out/cobolRuntime.mjs
 # writes out/prog.machine.mjs and out/cobolRuntime.mjs
 ```
 
@@ -552,6 +583,58 @@ cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no m
 
 See [docs/artifacts-target.md](docs/artifacts-target.md).
 
+### `<name>.dynamic-calls.json` — the calls it makes but will not name
+
+A `CALL identifier` whose target this program proves constant is resolved and becomes an
+ordinary dependency. What is left are the **true** dynamic calls, and for those the useful
+question is not the one that was asked:
+
+> This program cannot tell you **which** program it calls.
+> It can tell you exactly **where the name comes from**.
+
+Each row names the artifact that supplies the run-time value, and the route from there to
+the CALL — the retrieval verb, the field it lands in (for Db2, the **column**, since the
+host-variable name is program-local and the column is the database's), and every
+assignment in between, in source order:
+
+```
+CALL WS-SUBPGM   <- MOVE WS-HOLD TO WS-SUBPGM
+                 <- MOVE CTL-PGM-NAME TO WS-HOLD
+                 <- READ CTL-FILE            field CTL-PGM-NAME
+                 <- ddname CTLDD -> PROD.PARM.CNTL      (with --bind-jcl)
+```
+
+**Read `PROD.PARM.CNTL` and you have the call graph.** The view never guesses the target:
+a control file's contents are run-time data, so naming the artifact is a fact and
+enumerating what it holds would be a fiction.
+
+Each source also carries an **`extract`** block — the last mile. For Db2 that is the query
+to run (`SELECT DISTINCT HANDLER FROM ROUTING`); for a file it is the byte position to
+read (`bytes 5-12 of the 78-byte record`), computed from the record layout and **withheld**
+whenever `OCCURS DEPENDING`, `REDEFINES`, `SYNCHRONIZED` or an unreadable PICTURE makes the
+arithmetic uncertain — you get the ordered layout and the reason instead, because a wrong
+offset is indistinguishable from a right one.
+
+Six other outcomes are reported differently because each sends you somewhere else: a
+`caller` source (the value is passed in — enumerate this program's *callers*), a
+`called-program` source (passed BY REFERENCE to a callee that may write it — the target is
+decided *there*), `candidates` with no external source (the target is one of a known set),
+`chainBroken` (the trace hit an unmodeled construct — not the same as nothing feeding it),
+`deadEnds` (the chain bottoms out at an item nothing ever assigns — usually a **defect**,
+not an indirection), and an undeclared item (marked `provisional`: nearly always a copybook
+that did not resolve, so supplying it may delete the row).
+
+Candidate targets are **fetched** but appear only in `<name>.fetch.json`, never as program
+rows in the manifest — a candidate is not a proven dependency. Each carries an `evidence`
+grade: `assigned` (a `MOVE`/`VALUE` provably stores it) or `declared-88` (an `88`-level
+names it, but nothing proves it is ever stored).
+
+The same finding is attached to `<name>.artifacts.json` (as `namedBy`, replacing that
+row's "a reaching-definition trace is needed" text) and to the `skipped` row in
+`<name>.fetch.json`, which then says what to fetch *instead*.
+
+See [docs/dynamic-calls.md](docs/dynamic-calls.md).
+
 ### JCL / PROC — the dataset identity the COBOL was missing
 
 Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.proc`, or force with
@@ -559,7 +642,6 @@ Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.proc`, or for
 
 ```bash
 cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl.lineage.json
-cobol-xstate acctunld.jcl -o -   # both views as one bundle on stdout
 ```
 
 The **lineage** view gives the dataflow across steps (`dataflow` producer→consumer edges),
@@ -994,11 +1076,13 @@ unrecovered spot is visible.
 
 ```bash
 # every flag for one program
-cobol-xstate prog.cbl --summary -o /dev/null
+cobol-xstate prog.cbl --summary
 
-# flags across a corpus, ranked by frequency
-for f in src/*.cbl; do cobol-xstate "$f" -o - 2>/dev/null; done \
-  | jq -r '.flags[].message' | sed 's/[A-Z0-9-]\{3,\}//g' | sort | uniq -c | sort -rn
+# flags across a corpus, ranked by frequency. Each program writes its own directory,
+# so the whole corpus can be run first and the bundles read afterwards.
+for f in src/*.cbl; do cobol-xstate "$f" --outdir corpus 2>/dev/null; done
+jq -r '.flags[].message' corpus/*.json 2>/dev/null \
+  | sed 's/[A-Z0-9-]\{3,\}//g' | sort | uniq -c | sort -rn
 ```
 
 Priority order: `did not parse` → `raw condition` → opaque data effects
@@ -1011,7 +1095,7 @@ Priority order: `did not parse` → `raw condition` → opaque data effects
 ### Under stock XState
 
 ```bash
-cobol-xstate examples/accum.cbl --target js -o out/accum.machine.mjs
+cobol-xstate examples/accum.cbl --target js   # -> out/accum.mjs
 ```
 
 ```js

@@ -171,6 +171,15 @@ class _Lineage:
         self.dv = _iface._DataView(self.data)
         self.cursors = _iface._cursor_tables(self.provenance)
         self.flags: List[str] = []
+        # Primitive provenance facts, recorded during the final (row-emitting) pass so a
+        # backward query can answer "where did THIS item's value come from" for an item
+        # that never crosses the boundary itself - a dynamic CALL target being the case
+        # that matters. Recorded HERE, from the fixpoint's own steps, rather than
+        # re-derived elsewhere: a second traversal would drift from this one, and the
+        # drift would be invisible (a plausible chain that is not the real one).
+        self.fills: List[dict] = []       # field <- an external input event
+        self.flow: List[dict] = []        # target <- source operands, at one write site
+        self.dynamic_sites: List[dict] = []   # unresolved dynamic targets + their origins
         raw: Dict[str, dict] = {}
         for name, _region, st in _iface._iter_states(self.config):
             raw[name] = st
@@ -512,6 +521,15 @@ class _Lineage:
                 if rows is not None:
                     for f in h["fields"]:
                         rows.append(self._row(name, h, "input", f, cur, aname, line))
+                        self.fills.append({
+                            "field": f.upper(), "event": ev, "endpoint": h["endpoint"],
+                            "endpointType": h["etype"], "verb": h["verb"],
+                            "state": name, "line": line, "cobol": cobol,
+                            # host variable -> COLUMN. A host-variable name is
+                            # program-local; the column is the database's, and it is the
+                            # column a reader has to go and look at.
+                            "columns": h.get("columns") or {},
+                        })
 
             # 2. data movement: the target inherits its operands' origins.
             if spec and spec.get("assignments"):
@@ -531,6 +549,11 @@ class _Lineage:
                     if got:      # e.g. SELECT ... INTO: already set by the event above
                         continue
                     cur[base] = frozenset(acc)
+                    if rows is not None:
+                        self.flow.append({
+                            "target": base, "sources": list(srcs), "state": name,
+                            "line": line, "cobol": cobol, "action": aname,
+                        })
 
             # 3. opaque-but-traceable verbs: dependency only, value not modeled.
             if spec and spec.get("kind") == "effect":
@@ -560,6 +583,21 @@ class _Lineage:
                 for h in made:
                     for f in h["fields"]:
                         rows.append(self._row(name, h, "output", f, cur, aname, line))
+                    # 6. an UNRESOLVED dynamic target. The "endpoint" here is the DATA
+                    # ITEM whose run-time value names the real resource, so the question
+                    # the manifest cannot answer - which program does this call? - turns
+                    # into one this analysis can: where does that item's value come from?
+                    # Snapshot the origins reaching it AT THE CALL, which is why this is
+                    # recorded here and not from the state's entry map: an assignment
+                    # earlier in the same state changes the answer.
+                    if h.get("dynamic"):
+                        self.dynamic_sites.append({
+                            "item": str(h["endpoint"]).upper(),
+                            "endpointType": h["etype"], "verb": h["verb"],
+                            "state": name, "line": line, "cobol": cobol,
+                            "candidates": list(h.get("candidates") or []),
+                            "origins": self._origins_of(str(h["endpoint"]), cur),
+                        })
         return cur
 
     def _origins_of(self, field: str, cur: State) -> List[Origin]:

@@ -107,21 +107,32 @@ dropped. This is not a cosmetic gap. A missing member takes its data items **and
 to resolve a dynamic `CALL` or a CICS `PROGRAM(data-name)` target — so an unresolved
 copybook cascades directly into an unresolved program dependency.
 
-An expanded copybook records **`source`** — the path (or the label an external fetcher
-reported) the member actually came from. That answers, for this run, the very SYSLIB-order
-ambiguity the `needs` text warns about. To resolve members held in an estate's own artifact
-service rather than on a local path, pass a fetcher:
-`cobol-xstate prog.cbl --copybook-fetcher cast_clients.mf_fetch:fetch_artifact`, or
-`CopybookResolver(fetcher=...)` in Python — see the MANUAL for the accepted return shapes.
+An expanded copybook records **`source`** — the library the member actually came from (and
+`alternatives`, when the same name exists in more than one). That answers, for this run,
+the very SYSLIB-order ambiguity the `needs` text warns about. Members are retrieved through
+the estate's own artifact service automatically; see [fetch-stages.md](fetch-stages.md).
 
-## Fetching them — `--fetch-deps`
+A `dynamic` row — one whose "artifact" is really a data item holding the run-time name —
+may carry **`namedBy`**: the artifact that *supplies* that value, with its ddname/dataset
+and the field to read. When present, the row's `needs` text is replaced rather than
+extended, because it used to say a reaching-definition trace was needed and that trace has
+now been done. The full route from the artifact to the CALL lives in
+[dynamic-calls.md](dynamic-calls.md).
+
+A row may also carry **`resolvedBy`**, naming the prefetched member that made it
+resolvable at all — a dynamic `CALL` target proved through a data item whose `VALUE`
+clause lives in a copybook exists as a row *because* that copybook was retrieved before
+the parse. Without the annotation the row looks like it was always resolvable.
+
+## Fetching them
 
 Knowing *what* a program depends on is one question; *having* those artifacts is the next.
-`--fetch-deps [DIR]` walks this manifest and retrieves every row that names something
-retrievable — called programs, copybooks, ASM modules, CNTL/PARM members, Db2 DDL, BMS
-mapsets — through the same `--copybook-fetcher` callable, writing `<name>.fetch.json`.
-With `--fetch-depth N` it parses each fetched COBOL program and follows *its* manifest,
-so one command walks the dependency closure.
+Every run walks this manifest and retrieves each row that names something retrievable —
+called programs, copybooks, ASM modules, CNTL/PARM members, Db2 DDL, BMS mapsets — writing
+`<name>.fetch.json`. No flag: the manifest is a product of the parse, and the parse is only
+complete once the copybooks and control members are in hand, which is what the preceding
+prefetch stage is for. These are the program's **immediate** dependencies; a callee's own
+dependencies are a question about the callee.
 
 The rows this manifest is careful about are exactly the rows the fetch stage refuses to
 guess at. A `file` row is requested by its **dataset** (when `--bind-jcl` resolved one),

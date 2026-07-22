@@ -1,0 +1,343 @@
+"""Stage 1 - prefetch: get the members that COMPLETE THE SOURCE TEXT, before parsing it.
+
+The dependency fetch (``fetch.py``) works from the artifact manifest, and the manifest
+comes from a parse. That is a circle, and until this stage existed the tool ran round it
+in the wrong direction: it parsed whatever text it happened to have, built a manifest
+from that, and fetched accordingly. Both of the things a migration most needs are exactly
+the things that circle loses:
+
+* **Dynamic ``CALL`` targets.** ``CALL WS-SUBPGM`` resolves only when the single literal
+  reaching ``WS-SUBPGM`` is visible, and that literal is almost always a ``VALUE`` clause
+  in a copybook. Copybook absent -> the data item is not declared -> the target stays
+  unresolved -> the called program is never fetched. Nothing errors; the answer is just
+  quietly short, which is the worst possible failure for an impact analysis.
+* **Calls inside control files.** A cataloged PROC, an ``INCLUDE`` member and a
+  control-card dataset each carry ``EXEC PGM=`` steps that exist nowhere in the JCL file
+  itself. Unresolved, those steps do not appear as programs, as datasets, or at all.
+
+So this stage runs first and closes over the text: COPY / EXEC SQL INCLUDE members for
+COBOL, cataloged PROCs / INCLUDE members / control-card datasets for JCL. Transitively -
+a copybook COPYs copybooks, a PROC INCLUDEs members - because the point is a source text
+with no holes in it, and a hole one level down is still a hole.
+
+**Two different discovery mechanisms, for one reason.**
+
+COBOL is scanned *lexically* (:func:`preprocessor.scan_copy_members`): ``COPY X.`` names
+its member right there in the text, so no parse is needed and prefetch can genuinely run
+before parsing.
+
+JCL is discovered by *record-and-replay*: parse the job with a resolver that fetches
+nothing and merely records what it was asked for, retrieve those, then re-parse with the
+retrieved members in hand - repeating until the parse stops asking for anything new. It
+would have been easy to write a second lexical scanner for ``EXEC PROC=`` and
+``INCLUDE MEMBER=`` here, and it would have been wrong: a PROC name can arrive through a
+symbolic parameter, an INCLUDE can be nested inside an expanded PROC body, and a
+control-card DSN can be built from a JCL symbol. Only the JCL parser resolves symbols and
+folds continuations correctly, and it already funnels every external member it needs
+through one call (``jcl._Parser._resolve``). Replaying that parse asks exactly the right
+questions; a scanner would ask approximately the right ones.
+
+**What this stage will not do:** invent a location. Where a member lives - which SYSLIB,
+which library concatenation, which share - is knowledge this tool does not have and does
+not model. It asks the estate's own artifact service (``artifact_service.mf-fetch``) by
+name, and reports what came back. A member that is not retrievable is reported as such,
+with which of the several distinct reasons applies.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
+
+from .artifact_service import Fetched, ServiceUnavailable, call_service, collect
+from .normalizer import SourceFormat
+from .preprocessor import scan_copy_members
+
+# A member name that can plausibly be requested from a library. A control-card DD may
+# instead name a full dataset (`PARM.LIB(SORTCRD)`), handled by _DSN_MEMBER below.
+_MEMBER_NAME = re.compile(r"^[A-Z0-9$#@][A-Z0-9$#@._-]{0,43}$", re.I)
+_DSN_MEMBER = re.compile(r"^(?P<dsn>[A-Z0-9$#@.-]+)\((?P<member>[A-Z0-9$#@]{1,8})\)$",
+                         re.I)
+# Extensions tried when looking for a member already on the local search path.
+_LOCAL_EXTS = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL",
+               ".jcl", ".JCL", ".prc", ".PRC", ".proc", ".txt")
+
+
+def _key(name: str) -> str:
+    return str(name).strip().strip("'\"").upper()
+
+
+@dataclass
+class PrefetchResult:
+    """What stage 1 retrieved, and the honest account of what it could not.
+
+    ``store`` is the payload the rest of the run consumes: pass it to
+    ``CopybookResolver(store=...)`` for the COBOL parse and :meth:`resolver` to
+    ``parse_jcl(resolver=...)``. Both then read members already paid for, so stage 2
+    re-fetches nothing."""
+
+    source_name: str = "<source>"
+    store: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+    fetched: Dict[str, Fetched] = field(default_factory=dict)
+    rows: List[dict] = field(default_factory=list)
+    # Set when the estate client itself could not be reached. NOT the same as any
+    # individual member being absent, and never reported as if it were.
+    unavailable: Optional[str] = None
+
+    def resolver(self) -> Callable[[str], Optional[str]]:
+        """A ``resolver(name) -> text | None`` over the store, for ``parse_jcl``."""
+        def _resolve(name: str) -> Optional[str]:
+            hit = self.store.get(_key(name))
+            if hit is None:
+                # A control-card DD names a full DSN; the member is what was retrieved.
+                m = _DSN_MEMBER.match(_key(name))
+                if m:
+                    hit = self.store.get(m.group("member").upper())
+            return hit[0] if hit else None
+        return _resolve
+
+    @property
+    def counts(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for row in self.rows:
+            out[row["status"]] = out.get(row["status"], 0) + 1
+        return out
+
+    @property
+    def missing(self) -> List[str]:
+        """Members the source text needs and this run does not have - the holes that
+        remain. Anything downstream that looks short should be read against this list."""
+        return [r["member"] for r in self.rows
+                if r["status"] in ("not-found", "error", "no-service")]
+
+    def report(self) -> dict:
+        return {
+            "format": "cobol-xstate-prefetch",
+            "source": self.source_name,
+            "note": (
+                "Stage 1: the members needed to COMPLETE THE SOURCE TEXT before it is "
+                "parsed - COPY/EXEC SQL INCLUDE members for COBOL, cataloged PROCs, "
+                "INCLUDE members and control-card datasets for JCL - retrieved "
+                "transitively. This runs before the parse because the parse is what "
+                "produces the dependency manifest: a copybook missing here takes its "
+                "VALUE clauses out of the model, which turns a resolvable dynamic CALL "
+                "target into an unresolved one, and an unresolved PROC hides every EXEC "
+                "PGM= step inside it. 'local' means the member was already on the "
+                "copybook search path and cost no round-trip; 'fetched' came from the "
+                "estate service and carries the library it came from; 'not-found' means "
+                "the service was asked and had nothing; 'error' means the request "
+                "failed, which is fixable and is NOT evidence the member is absent; "
+                "'no-service' means no estate client was reachable at all, so the "
+                "member was never actually looked for."
+            ),
+            "serviceAvailable": self.unavailable is None,
+            **({"serviceUnavailable": self.unavailable} if self.unavailable else {}),
+            "counts": self.counts,
+            "members": self.rows,
+        }
+
+
+class _Prefetcher:
+    """Shared machinery for the COBOL and JCL closures: one cache, one report."""
+
+    def __init__(self, fetcher: Optional[Callable], paths: Optional[List[str]] = None,
+                 dest: Optional[str] = None, unavailable: Optional[str] = None,
+                 result: Optional[PrefetchResult] = None):
+        self.fetcher = fetcher
+        self.paths = list(paths or [])
+        self.dest = dest
+        self.result = result or PrefetchResult()
+        self.result.unavailable = unavailable
+        self.seen: set = set()
+
+    # -- retrieval ----------------------------------------------------------
+    def _local(self, name: str) -> Optional[Tuple[str, str]]:
+        """A member already on the search path. Checked first, always: a member on disk
+        must never cost a network round-trip."""
+        for base in self.paths:
+            for ext in _LOCAL_EXTS:
+                candidate = os.path.join(base, name + ext)
+                if os.path.isfile(candidate):
+                    with open(candidate, "r", errors="replace") as fh:
+                        return fh.read(), candidate
+        return None
+
+    def obtain(self, raw: str, type_hint: Optional[str] = None,
+               why: str = "") -> Optional[str]:
+        """Retrieve one member, record a row, return its text (or ``None``).
+
+        Every distinct reason for coming back empty stays distinct - that separation is
+        the point of the report, because "the estate does not have it" and "we could not
+        ask" lead to completely different next actions."""
+        name = _key(raw)
+        if name in self.seen:
+            # Via the resolver, not the raw store: a name first seen as
+            # `PARM.LIB(SORTCRD)` is stored under the member it resolved to.
+            return self.result.resolver()(name)
+        self.seen.add(name)
+
+        row: dict = {"member": name, "status": "", "for": why} if why else \
+                    {"member": name, "status": ""}
+        if raw != name:
+            row["requested"] = str(raw)
+
+        member = name
+        dsn = _DSN_MEMBER.match(name)
+        if dsn:
+            # `PARM.LIB(SORTCRD)`: the retrievable identity is the MEMBER; the dataset
+            # is where it lives, which is the service's business, not ours.
+            member = dsn.group("member").upper()
+            row["member"] = member
+            row["dataset"] = name
+        elif not _MEMBER_NAME.match(name):
+            row["status"] = "skipped"
+            row["reason"] = (f"'{name}' is not a member name that can be requested - "
+                             f"it names something inside this job, not a stored member")
+            self.result.rows.append(row)
+            return None
+
+        local = self._local(member)
+        if local is not None:
+            row.update({"status": "local", "source": local[1], "bytes": len(local[0])})
+            self.result.rows.append(row)
+            self.result.store[member] = local
+            return local[0]
+
+        if self.fetcher is None:
+            row["status"] = "no-service"
+            row["reason"] = (self.result.unavailable
+                             or "no estate artifact service is configured, so this "
+                                "member was never looked for")
+            self.result.rows.append(row)
+            return None
+
+        try:
+            got = call_service(self.fetcher, member, type_hint, self.dest)
+        except ServiceUnavailable as exc:
+            row.update({"status": "error", "error": str(exc),
+                        "reason": "the request itself failed - this is fixable, and is "
+                                  "NOT evidence the member is absent from the estate"})
+            self.result.rows.append(row)
+            return None
+
+        if got is None:
+            row["status"] = "not-found"
+            row["reason"] = "the estate service was asked and had nothing under this name"
+            self.result.rows.append(row)
+            return None
+
+        got = collect(got, self.dest)
+        row["status"] = "fetched"
+        row.update(got.row())
+        self.result.rows.append(row)
+        self.result.fetched[member] = got
+        self.result.store[member] = (got.text, got.source)
+        return got.text
+
+    def store_text(self, name: str) -> Optional[str]:
+        hit = self.result.store.get(_key(name))
+        return hit[0] if hit else None
+
+
+def prefetch_cobol(source: str, fetcher: Optional[Callable],
+                   paths: Optional[List[str]] = None, dest: Optional[str] = None,
+                   fmt: Optional[SourceFormat] = None,
+                   source_name: str = "<source>",
+                   unavailable: Optional[str] = None,
+                   result: Optional[PrefetchResult] = None) -> PrefetchResult:
+    """Close over every ``COPY`` / ``EXEC SQL INCLUDE`` member the program needs.
+
+    Transitive: each retrieved member is scanned in turn, because a copybook that COPYs
+    another copybook has a hole in it exactly like the program did. Cycles terminate on
+    the seen-set, so a mutually-including pair costs one fetch each."""
+    pf = _Prefetcher(fetcher, paths, dest, unavailable, result)
+    pf.result.source_name = source_name
+
+    queue: List[Tuple[str, str]] = [(m, "COPY in the program") for m in
+                                    scan_copy_members(source, fmt)]
+    while queue:
+        member, why = queue.pop(0)
+        text = pf.obtain(member, "copybook", why)
+        if not text:
+            continue
+        for nested in scan_copy_members(text, fmt):
+            if _key(nested) not in pf.seen:
+                queue.append((nested, f"COPY inside {member}"))
+    return pf.result
+
+
+def prefetch_jcl(source: str, fetcher: Optional[Callable],
+                 paths: Optional[List[str]] = None, dest: Optional[str] = None,
+                 source_name: str = "<jcl>", max_rounds: int = 12,
+                 unavailable: Optional[str] = None,
+                 result: Optional[PrefetchResult] = None) -> PrefetchResult:
+    """Close over the cataloged PROCs, ``INCLUDE`` members and control-card datasets a
+    job needs, by replaying the parse until it stops asking for members it has not got.
+
+    No type hint is passed: the estate service auto-detects, and its ``detected_type`` is
+    a better answer than anything we could infer from the DD that referenced the member.
+    """
+    from .jcl import parse_jcl
+
+    pf = _Prefetcher(fetcher, paths, dest, unavailable, result)
+    pf.result.source_name = source_name
+
+    for _ in range(max_rounds):
+        asked: List[str] = []
+
+        def recording(name: str, _asked=asked) -> Optional[str]:
+            _asked.append(name)
+            return pf.store_text(name) or pf.result.resolver()(name)
+
+        parse_jcl(source, resolver=recording, source_name=source_name)
+        fresh = [n for n in asked if _key(n) not in pf.seen]
+        if not fresh:
+            break
+        for name in fresh:
+            pf.obtain(name, None, "referenced by the job (PROC / INCLUDE / control card)")
+    else:
+        # Bounded, and said so: a member set this deep is more likely a resolver loop
+        # than a real job, and silently stopping would look like a complete closure.
+        pf.result.rows.append({
+            "member": "<closure>", "status": "skipped",
+            "reason": (f"stopped after {max_rounds} resolution rounds - the job's "
+                       f"PROC/INCLUDE nesting is deeper than this bound, so members "
+                       f"beyond it were not retrieved"),
+        })
+    return pf.result
+
+
+def attribute_resolution(manifest: dict, program, store: Dict[str, Tuple[str, str]]
+                         ) -> dict:
+    """Mark the manifest rows that owe their resolution to stage 1.
+
+    A dynamic ``CALL`` row carries ``via`` - the data item the target was proved through.
+    When that item was declared in a member this run prefetched, the row exists *because*
+    prefetch ran, and says so. Without this the improvement is invisible: the row simply
+    looks like it was always resolvable, and no reader can tell that a member arriving
+    from the estate is what turned an unresolved runtime target into a named program."""
+    if not store:
+        return manifest
+    origins = {}
+    for item in getattr(program, "data_items", None) or []:
+        name = getattr(item, "name", None)
+        origin = getattr(item, "origin", None)
+        if name and origin:
+            origins.setdefault(str(name).upper(), str(origin).upper())
+    if not origins:
+        return manifest
+    for row in manifest.get("artifacts", []) or []:
+        via = row.get("via")
+        if not via:
+            continue
+        member = origins.get(str(via).upper())
+        if member and member in store:
+            row["resolvedBy"] = {
+                "stage": "prefetch", "member": member,
+                "note": (f"{via} is declared in {member}, retrieved before the parse; "
+                         f"without it this target would still be an unresolved "
+                         f"runtime name"),
+            }
+    return manifest

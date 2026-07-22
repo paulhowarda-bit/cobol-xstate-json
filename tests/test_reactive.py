@@ -424,10 +424,16 @@ def test_reactive_view_and_module_are_the_same_machine():
         emit_reactive_module(m), "machineConfig")
 
 
+def _run_dir(root):
+    """Where a run writes: --outdir itself, taken literally with nothing appended."""
+    return Path(root)
+
+
 def test_cli_reactive_writes_both_the_module_and_the_drawable_json(tmp_path):
     from cobol_xstate.cli import run
     src = EXAMPLES / "custrpt.cbl"
     assert run([str(src), "--target", "reactive", "--outdir", str(tmp_path)]) == 0
-    assert (tmp_path / "custrpt.reactive.mjs").exists()    # runnable
-    assert (tmp_path / "custrpt.reactive.json").exists()   # drawable
-    assert (tmp_path / "cobolRuntime.mjs").exists()
+    d = _run_dir(tmp_path)
+    assert (d / "custrpt.reactive.mjs").exists()    # runnable
+    assert (d / "custrpt.reactive.json").exists()   # drawable
+    assert (d / "cobolRuntime.mjs").exists()        # beside it, so the import resolves
