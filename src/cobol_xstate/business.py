@@ -23,6 +23,7 @@ need call/return contraction and are flagged, not faked.
 
 from __future__ import annotations
 
+import heapq
 from typing import Dict, List, Optional, Tuple
 
 from . import interface as _iface
@@ -48,6 +49,20 @@ def _is_control_guard(name: str, tree: Optional[dict]) -> bool:
     if isinstance(tree, dict) and tree.get("op") == "raw":
         return True
     return False
+
+
+def _chain(link) -> list:
+    """A ``(head, rest)`` cons chain back to the list it stands for, oldest first.
+
+    The collapse walk builds one of these per path instead of extending a list, so that
+    carrying a path costs nothing until something actually needs to read it.
+    """
+    out = []
+    while link is not None:
+        out.append(link[0])
+        link = link[1]
+    out.reverse()
+    return out
 
 
 def _guard_field(tree: Optional[dict]) -> Optional[str]:
@@ -102,6 +117,7 @@ class _BusinessView:
         self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
         self.flags: List[str] = []
+        self._business_memo: Dict[str, bool] = {}
 
     def _flag(self, msg: str) -> None:
         if msg not in self.flags:
@@ -131,7 +147,15 @@ class _BusinessView:
         return "technical"
 
     def _is_business(self, name: str) -> bool:
-        return self.role(name, self.states[name]) != "technical"
+        """Cached: the collapse walk asks this of every state it steps through, once per
+        path, and the answer re-derives the whole classification (perimeter lookup, a
+        control-guard test per outgoing edge, an action-kind lookup per entry action)
+        from data that cannot change after __init__."""
+        got = self._business_memo.get(name)
+        if got is None:
+            got = self._business_memo[name] = \
+                self.role(name, self.states[name]) != "technical"
+        return got
 
     # -- control-flow model (call/return aware) -----------------------------
     #
@@ -199,34 +223,105 @@ class _BusinessView:
             else:
                 yield (lab, (target, stack))
 
+    # A technical region can hold exponentially many distinct configurations even after
+    # the subsumption below - a paragraph that is both PERFORMed and fallen into gives
+    # every level two continuations - so unlike lineage's fixpoint bound this CANNOT be a
+    # proof. It is an admitted policy, and the honest part is the flag: it names the
+    # region and says how much it did recover, so a short list is never mistaken for a
+    # complete one. Costs about a second when fully spent; the largest example program
+    # needs 25 steps for its entire build, so the headroom is four orders of magnitude.
+    # A legitimately huge program could still be truncated here - it would also have more
+    # business edges than anyone can read, and it would be told so.
+    _WALK_STEPS = 100_000
+
     def _next_business(self, cfg: tuple) -> List[dict]:
         """From a business config, walk through technical configs (following calls/returns)
-        to the next business / terminal configs, accumulating guards, events, and via-states."""
-        results: List[dict] = []
-        seen: set = set()
+        to the next business / terminal configs, accumulating guards, events, and via-states.
 
-        def walk(c: tuple, guards: List[dict], events: List[str], via: List[str]) -> None:
-            state, stack = c
-            if ((state in self.finals) and not stack) or self._is_business(state):
-                results.append({"to": state, "to_config": c, "guards": guards,
-                                "events": events, "via": via})
-                return
-            key = (state, stack, tuple(g["name"] for g in guards), tuple(events))
-            if key in seen:
-                return
-            seen.add(key)
-            for lab, nxt in self._step(state, stack):
-                g2 = guards + [self._guard_dict(lab["guard"])] if lab.get("guard") else guards
-                e2 = events + [lab["event"]] if lab.get("event") else events
-                walk(nxt, g2, e2, via + [state])
+        Over an EXPLICIT worklist, not the interpreter's stack. As recursion this cost
+        about ten Python frames per technical state stepped through, so a chain of a
+        hundred nested PERFORMs - each body a MOVE, nothing exotic - overflowed the
+        default 1000-frame limit and raised RecursionError. That is not a poor business
+        view, it is no business view: the exception escaped `build_business_view`, and
+        because a default run writes this companion FIRST it took the lineage, reactive,
+        artifacts and dynamic-call companions down with it. The tool reported only the
+        machine, for a program it had parsed perfectly well.
+
+        A path is dropped when some earlier arrival at the same ``(state, stack, events)``
+        carried a SUBSET of its guards. Reaching a place under ``A and B`` says nothing
+        that reaching it under ``A`` alone has not already said, and reaching it under no
+        guard at all makes every guarded route to it redundant. Without this, sixteen
+        IF/ELSE diamonds that all reconverge - each guard independent of where control
+        ends up - produced 2^16 = 65,536 entry edges to ONE state, differing only in which
+        subset of the guards happened to be taken. Not merely slow: it asserts 65,536
+        business rules where there is not one. Genuine alternatives survive, because
+        neither of ``A`` and ``B`` contains the other: an EVALUATE's WHEN arms still fan
+        out, and a loop's exit still carries its UNTIL.
+
+        The order is smallest-guard-set-first, which is what makes the subsumption pay:
+        the cheapest way to reach somewhere is found before the expensive ones, so those
+        are recognised as redundant ON ARRIVAL instead of after they have been explored.
+        Depth-first found them in almost exactly the wrong order.
+        """
+        results: List[dict] = []
+        # (state, stack, events) -> the guard-name SETS already used to arrive there.
+        # Per call, deliberately: sharing it across calls would silence a config the walk
+        # from a LATER business state must also reach, and each of those is a real edge.
+        arrived: Dict[tuple, List[frozenset]] = {}
 
         src_state, src_stack = cfg
         if (src_state in self.finals) and not src_stack:
             return results
+
+        # `via` and `guards` ride as CONS CHAINS - (head, rest) - rather than lists.
+        # Extending a list copies it, so a walk whose paths grow long paid for the whole
+        # path again at every single step; on one pathological program that copying was
+        # 0.8 of the 1.0 seconds. Consing is O(1) and only the handful of chains that
+        # become results are ever flattened. `events` stays a tuple: it is short, and it
+        # is part of the visited key, which has to be hashable.
+        # (guard count, tie-break, config, guard names, guards, events, via). The
+        # tie-break is the insertion counter, which makes the walk breadth-first within a
+        # guard count and makes the heap entries comparable without ever having to order
+        # two configs against each other. Deepest-first was tried and is much worse: it
+        # follows a loop round and round - each pass appending another event, so the
+        # visited key keeps changing and the subsumption never fires - while
+        # breadth-first reaches the loop's exits immediately.
+        heap: List[tuple] = []
+        seq = 0
         for lab, nxt in self._step(src_state, src_stack):
-            g0 = [self._guard_dict(lab["guard"])] if lab.get("guard") else []
-            e0 = [lab["event"]] if lab.get("event") else []
-            walk(nxt, g0, e0, [])
+            g0 = (self._guard_dict(lab["guard"]), None) if lab.get("guard") else None
+            e0 = (lab["event"],) if lab.get("event") else ()
+            names = frozenset([lab["guard"]] if lab.get("guard") else [])
+            heapq.heappush(heap, (len(names), seq, nxt, names, g0, e0, None))
+            seq += 1
+
+        steps = 0
+        while heap:
+            steps += 1
+            if steps > self._WALK_STEPS:
+                self._flag(f"{src_state}: the collapsed region below it has more distinct "
+                           f"paths than this view enumerates; "
+                           f"{len(results) or 'NO'} outgoing business edge(s) recovered "
+                           f"before the budget ran out - INCOMPLETE, read the faithful "
+                           f"machine for this part of the program")
+                break
+            _, _, c, names, guards, events, via = heapq.heappop(heap)
+            state, stack = c
+            prior = arrived.setdefault((state, stack, events), [])
+            if any(p <= names for p in prior):
+                continue
+            prior.append(names)
+            if ((state in self.finals) and not stack) or self._is_business(state):
+                results.append({"to": state, "to_config": c, "guards": _chain(guards),
+                                "events": list(events), "via": _chain(via)})
+                continue
+            via2 = (state, via)
+            for lab, nxt in self._step(state, stack):
+                g2 = (self._guard_dict(lab["guard"]), guards) if lab.get("guard") else guards
+                e2 = events + (lab["event"],) if lab.get("event") else events
+                n2 = names | {lab["guard"]} if lab.get("guard") else names
+                heapq.heappush(heap, (len(n2), seq, nxt, n2, g2, e2, via2))
+                seq += 1
         return results
 
     def _build_flow(self) -> Tuple[List[dict], List[dict]]:

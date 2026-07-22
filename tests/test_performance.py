@@ -248,6 +248,115 @@ def test_condition_fixpoint_is_actually_a_fixpoint():
     assert not [f for f in lin.flags if "iteration bound" in f]
 
 
+# --------------------------------------------------------------------------- #
+# the business view's collapse walk
+#
+# It used to recurse, at roughly ten interpreter frames per technical state stepped
+# through, so a chain of a hundred nested PERFORMs raised RecursionError. That is not a
+# degraded business view, it is none at all - and since a default run writes this
+# companion FIRST, the lineage, reactive, artifacts and dynamic-call companions were lost
+# with it. It also enumerated one edge per distinct guard PATH, so sixteen IF/ELSE
+# diamonds that all reconverge produced 2^16 = 65,536 edges into a single state,
+# asserting 65,536 business rules where there was not one.
+# --------------------------------------------------------------------------- #
+
+BIZ_HEAD = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. BIZP.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 WS-A PIC X(10).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+)
+
+
+def _goto_chain(n: int):
+    """A LINEAR chain of n technical states - one walk step each, no branching."""
+    src = [BIZ_HEAD.rstrip("\n"), "           GO TO 0001-STEP."]
+    for i in range(1, n + 1):
+        src += [f"       {i:04d}-STEP.", "           MOVE 'X' TO WS-A"]
+        src.append(f"           GO TO {i + 1:04d}-STEP." if i < n else "           STOP RUN.")
+    return build_machine(parse_program("\n".join(src) + "\n"))
+
+
+def _reconverging_diamonds(n: int):
+    """n guarded branches that all rejoin, then one boundary state.
+
+    `FUNCTION NUMVAL` is an ordinary condition the parser does not model, so its guard is
+    {op:'raw'} and the branch counts as mechanical - which leaves the whole region
+    technical and lets the walk run straight through it, accumulating guards.
+    """
+    src = [BIZ_HEAD.rstrip("\n")]
+    for i in range(n):
+        src += [f"           IF FUNCTION NUMVAL(WS-A) > {i + 1}",
+                "               MOVE 'A' TO WS-A",
+                "           ELSE",
+                "               MOVE 'B' TO WS-A",
+                "           END-IF"]
+    src += ["           DISPLAY WS-A", "           STOP RUN."]
+    return build_machine(parse_program("\n".join(src) + "\n"))
+
+
+def test_collapse_walk_survives_a_chain_deeper_than_the_recursion_limit():
+    import sys
+    n = sys.getrecursionlimit() + 200        # unreachable for anything recursive
+    view = build_business_view(_goto_chain(n))
+    assert view["entry"], "a program with one straight path must have an entry edge"
+
+
+def test_reconverging_guards_do_not_multiply_into_one_edge_per_combination():
+    """Sixteen independent diamonds, one destination: one edge, not 65,536.
+
+    Reaching somewhere under `A and B` says nothing that reaching it unguarded has not
+    already said, so only the minimal guard sets survive.
+    """
+    view = build_business_view(_reconverging_diamonds(16))
+    assert len(view["entry"]) == 1
+    assert view["entry"][0]["guards"] == [], \
+        "no combination of these guards is needed to get there, so none should be claimed"
+    assert not view["flags"], "this must be solved outright, not truncated by the budget"
+
+
+def _view_of(name: str):
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "examples" / name).read_text()
+    return build_business_view(build_machine(parse_program(src), source_name=name))
+
+
+def test_alternative_routes_are_still_reported_separately():
+    """The other side of the subsumption: guard sets that do NOT contain one another are
+    genuine alternatives and must all survive. banktran's dispatcher fans out to four
+    paragraphs on four values of one field."""
+    view = _view_of("banktran.cbl")
+    outs = {(t["to"], tuple(g["name"] for g in t["guards"]))
+            for t in view["transitions"] if t["from"] == "2000-DISPATCH"}
+    tos = {to for to, _ in outs}
+    assert {"2100-DEPOSIT", "2200-WITHDRAW", "2300-INQUIRY"} <= tos
+    for to, guards in outs:
+        if to in ("2100-DEPOSIT", "2200-WITHDRAW", "2300-INQUIRY"):
+            assert guards, f"{to} is reached under a condition; it must still say which"
+
+
+def test_the_collapsed_path_survives_being_carried_as_a_cons_chain():
+    """Paths are consed, not copied, so extending one is O(1) instead of quadratic in the
+    walk's own depth. The risk that buys is the flattening: `via` must still come out
+    complete and in the order control took, not reversed or truncated."""
+    n = 300
+    view = build_business_view(_goto_chain(n))
+    via = view["entry"][0]["via"]
+    steps = [s for s in via if s.endswith("-STEP")]
+    assert steps == sorted(steps), "the collapsed path must read in execution order"
+    assert steps[0] == "0001-STEP" and steps[-1] == f"{n:04d}-STEP"
+    assert len(steps) == n, f"every state on the chain should appear, got {len(steps)}"
+
+
+def test_chain_flattens_a_cons_list_oldest_first():
+    from cobol_xstate.business import _chain
+    assert _chain(None) == []
+    assert _chain(("c", ("b", ("a", None)))) == ["a", "b", "c"]
+
+
 def test_condition_bitmasks_round_trip_to_the_conditions_they_stand_for():
     lin = _Lineage(_wide_machine(4))
     assert lin.cond_list == sorted(set(lin.cond_list)), "bit order must be deterministic"
