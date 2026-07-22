@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, List, Optional, Tuple
 
-from .artifact_service import normalize_fetched      # re-exported: see artifact_service
+from .artifact_service import (decode_member,
+                               normalize_fetched)  # re-exported: see artifact_service
 from .normalizer import CodeLine, SourceFormat, normalize
 
 __all__ = ["normalize_fetched", "CopybookResolver", "PreprocessResult", "preprocess",
@@ -75,20 +76,29 @@ class CopybookResolver:
 
     def resolve(self, name: str) -> Optional[Tuple[str, str]]:
         name = name.strip().strip("'\"")
-        hit = self.store.get(name.upper())
+        key = name.upper()
+        hit = self.store.get(key)
         if hit is not None:
             return hit
+        # Check the cache BEFORE the path sweep, and populate it from a local hit too.
+        # It used to cover only the fetcher branch, so a member COPYed 40 times was
+        # stat'd len(paths) x len(exts) times and re-read from disk on every site -
+        # the dominant cost of a parse when the copybook library is a network share,
+        # and contrary to the docstring's promise above.
+        if key in self._cache:
+            return self._cache[key]
         for base in self.paths or ["."]:
             for ext in self.exts:
                 candidate = os.path.join(base, name + ext)
                 if os.path.isfile(candidate):
-                    with open(candidate, "r", errors="replace") as f:
-                        return f.read(), candidate
+                    # Explicit decode - the platform default is cp1252 on
+                    # Windows, which mojibakes a UTF-8 copybook silently.
+                    with open(candidate, "rb") as f:
+                        got = (decode_member(f.read()), candidate)
+                    self._cache[key] = got
+                    return got
         if self.fetcher is None:
             return None
-        key = name.upper()
-        if key in self._cache:
-            return self._cache[key]
         try:
             got = self._normalize_fetched(self.fetcher(name), name)
         except Exception as exc:                      # a flaky service is not fatal

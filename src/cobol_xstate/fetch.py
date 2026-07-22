@@ -223,8 +223,18 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     where it came from, and what else carried the same name. Nothing is invented: a name
     that was never fetchable is reported as ``skipped`` with the reason, not dropped."""
     prefetched = prefetched or {}
-    program = manifest.get("program") or "?"
-    seen: set = {str(program).upper()}      # never fetch the program being analysed
+    # A COBOL manifest names its subject "program"; a JCL one names it "job" (see
+    # jcl_views.build_jcl_artifacts). Reading only the first labelled every JCL run's
+    # report `"program": "?"` and left the never-fetch-yourself guard holding "?", so a
+    # job was requested from the estate as a dependency of itself.
+    program = manifest.get("program") or manifest.get("job") or "?"
+    subject = str(program).upper()
+    # name -> the status the FIRST row for it actually reached. Recording the name
+    # BEFORE the fetch made every later row for it claim "already-fetched ... was
+    # already retrieved in this run" even when the first attempt came back not-found or
+    # errored - counting failures as successes in the very report that exists to say
+    # what was retrieved.
+    done: Dict[str, str] = {}
 
     rows: List[dict] = []
     errors: List[dict] = []
@@ -248,12 +258,25 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
         # names it as a called program produces two rows for one member, and asking the
         # estate twice for the same thing is waste that scales with the estate.
         key = name.upper()
-        if key in seen:
-            row.update({"status": "already-fetched",
-                        "reason": f"{name} was already retrieved in this run"})
+        if key == subject:
+            row.update({"status": "skipped",
+                        "reason": f"{name} is the artifact being analysed, not a "
+                                  f"dependency of it"})
             rows.append(row)
             continue
-        seen.add(key)
+        if key in done:
+            prior = done[key]
+            if prior in ("fetched", "prefetched"):
+                row.update({"status": "already-fetched",
+                            "reason": f"{name} was already retrieved in this run"})
+            else:
+                # Carry the real outcome forward: a second row must not upgrade a
+                # not-found or an error into a success.
+                row.update({"status": prior,
+                            "reason": f"{name} was already requested in this run and "
+                                      f"came back {prior}"})
+            rows.append(row)
+            continue
 
         hit = prefetched.get(name.upper())
         if hit is not None:
@@ -262,6 +285,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             row.update({"status": "prefetched", "source": hit[1], "bytes": len(hit[0]),
                         "reason": "retrieved by prefetch (stage 1), before the parse"})
             rows.append(row)
+            done[key] = row["status"]
             continue
 
         if fetcher is None:
@@ -269,6 +293,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
                         "reason": (unavailable or "no estate artifact service is "
                                    "configured, so this artifact was never looked for")})
             rows.append(row)
+            done[key] = row["status"]
             continue
 
         try:
@@ -277,11 +302,13 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             row.update({"status": "error", "error": str(exc)})
             errors.append({"artifact": name, "error": row["error"]})
             rows.append(row)
+            done[key] = row["status"]
             continue
 
         if got is None:
             row["status"] = "not-found"
             rows.append(row)
+            done[key] = row["status"]
             continue
 
         got = collect(got, dest)
@@ -290,6 +317,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
         # name - in preference to the kind we inferred from one program's usage.
         row.update(got.row())
         rows.append(row)
+        done[key] = row["status"]
 
     counts: Dict[str, int] = {}
     for r in rows:

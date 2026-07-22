@@ -42,7 +42,12 @@ from typing import Callable, List, Optional, Tuple
 DEFAULT_FETCHER = "cast_clients.mf_fetch:fetch_artifact"
 
 # Keys carrying member TEXT, and keys carrying a PATH, in the order clients use them.
-_TEXT_KEYS = ("text", "content", "source", "data", "body")
+# NOT "source": that is the member's ORIGIN everywhere else in this module (see
+# Fetched.source and _ORIGIN_KEYS). Reading it as text made a client that reports
+# {"source": "PROD.COPYLIB(DC01104)", "copied_to": ...} yield a one-line "copybook"
+# containing a library name - parsed, reported as fetched, and silently empty of
+# declarations, while the file that actually held the member was never opened.
+_TEXT_KEYS = ("text", "content", "data", "body")
 _PATH_KEYS = ("copied_to", "path", "source_path", "file")
 # Keys naming WHERE the member came from - its identity, preferred over a cache path.
 _ORIGIN_KEYS = ("source_location", "source_path", "path", "copied_to", "file")
@@ -136,17 +141,33 @@ def _origin(d: dict, name: str) -> str:
     return f"<fetched {name}>"
 
 
+def decode_member(raw: bytes) -> str:
+    """Bytes from the estate -> text. UTF-8 is what modern clients send; latin-1 is the
+    fallback because it cannot fail and preserves every byte value, so a member in an
+    unexpected codepage still reaches the parser intact rather than being refused."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
 def _text_from(d: dict) -> Optional[str]:
     for key in _TEXT_KEYS:
         val = d.get(key)
+        if isinstance(val, (bytes, bytearray)):
+            val = decode_member(bytes(val))
         if isinstance(val, str) and val.strip():
             return val
     # No inline text: a fetch-to-disk client that only reports where it landed.
     for key in _PATH_KEYS:
         path = d.get(key)
         if isinstance(path, str) and os.path.isfile(path):
-            with open(path, "r", errors="replace") as fh:
-                return fh.read()
+            # Explicit UTF-8: the platform default is cp1252 on Windows, which decodes
+            # almost every byte to SOMETHING, so a mis-set encoding is silent mojibake
+            # rather than an error - and in fixed-format COBOL one extra character
+            # shifts every column after it.
+            with open(path, "rb") as fh:
+                return decode_member(fh.read())
     return None
 
 
@@ -157,13 +178,26 @@ def coerce(got, name: str, requested_type: Optional[str] = None) -> Optional[Fet
     and never a stand-in for an error - a client that raised is handled by the caller."""
     if got is None or got is False:
         return None
+    if isinstance(got, (bytes, bytearray)):
+        got = decode_member(bytes(got))
+    if isinstance(got, os.PathLike):
+        got = os.fspath(got)
+        if os.path.isfile(got):
+            with open(got, "rb") as fh:
+                return coerce({"text": decode_member(fh.read()), "source_location": got},
+                              name, requested_type)
+        return None
     if isinstance(got, str):
         return (Fetched(name=name, text=got, source=f"<fetched {name}>",
                         requested_type=requested_type) if got.strip() else None)
     if isinstance(got, (tuple, list)):
         if not got:
             return None
-        text = str(got[0])
+        first = got[0]
+        # Decode rather than str(): str(b'01 REC PIC X.') is the literal "b'01 REC...'",
+        # which would be handed to the parser as the member's text.
+        text = (decode_member(bytes(first)) if isinstance(first, (bytes, bytearray))
+                else str(first))
         source = str(got[1]) if len(got) > 1 and got[1] else f"<fetched {name}>"
         return (Fetched(name=name, text=text, source=source,
                         requested_type=requested_type) if text.strip() else None)
@@ -186,7 +220,14 @@ def coerce(got, name: str, requested_type: Optional[str] = None) -> Optional[Fet
             copied_to=(str(got["copied_to"]) if got.get("copied_to") else None),
             alternatives=[str(a) for a in alts],
         )
-    return None
+    # Some object shape this module cannot read. That is a fact about the CLIENT, not
+    # about the estate, and `None` here would be reported to the operator as "the
+    # service was asked and had nothing under this name" - marking every member of the
+    # run absent and reading as an estate gap. Say what actually happened instead.
+    raise ServiceUnavailable(
+        f"the fetcher returned {type(got).__name__} for {name}, which is not a "
+        f"recognised member shape (expected str, bytes, a path, a (text, source) "
+        f"tuple, or a dict carrying one of {_TEXT_KEYS + _PATH_KEYS})")
 
 
 def call_service(fetcher: Callable, name: str, type_hint: Optional[str] = None,
