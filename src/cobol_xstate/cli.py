@@ -11,7 +11,7 @@ from typing import List, Optional
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
-from .artifact_service import DEFAULT_FETCHER, load_fetcher
+from .artifact_service import DEFAULT_FETCHER, decode_member, load_fetcher
 from .fetch import fetch_dependencies
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
 from .prefetch import attribute_resolution, prefetch_cobol, prefetch_jcl
@@ -37,7 +37,6 @@ def _format(name: Optional[str]) -> Optional[SourceFormat]:
 _TARGET_EXT = {"js": ".mjs", "reactive": ".reactive.mjs",
                "lineage": ".lineage.json", "business": ".business.json",
                "artifacts": ".artifacts.json"}
-_COMPANION_EXT = (".business.json", ".lineage.json", ".artifacts.json")
 
 
 def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
@@ -59,6 +58,21 @@ def _run_dir(args) -> Path:
     literally: the path you give is the path files appear in, with nothing appended.
     There is deliberately no second mechanism that can place a file somewhere else."""
     return Path(args.outdir)
+
+
+def _make_run_dir(run_dir: Path) -> Optional[str]:
+    """Create the run directory, or return the message explaining why we cannot.
+
+    ``exist_ok=True`` only forgives an existing DIRECTORY, so pointing --outdir at an
+    existing regular file raised FileExistsError out of main() as a raw traceback -
+    while the neighbouring bad-path cases all report cleanly and exit 2."""
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except (FileExistsError, NotADirectoryError):
+        return f"--outdir {run_dir} exists and is not a directory"
+    except OSError as exc:
+        return f"cannot create --outdir {run_dir}: {exc}"
+    return None
 
 
 def _resolve_out_path(args, base: str, run_dir: Path) -> Path:
@@ -159,7 +173,8 @@ def _looks_like_jcl(source_name: str, source: str) -> bool:
     return False
 
 
-def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str]) -> int:
+def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
+              paths: List[str]) -> int:
     """Parse a JCL job / PROC and emit its lineage + artifact manifest.
 
     Stage 1 runs first and must: a cataloged PROC, an INCLUDE member and a control-card
@@ -175,9 +190,16 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str]) -
     # so the directory's name must be known before anything is parsed. The JOB/PROC name
     # is on the first statement, so scan for it.
     run_dir = _run_dir(args)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    err = _make_run_dir(run_dir)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
     deps = str(run_dir / "deps")
-    pre = prefetch_jcl(source, fetcher, paths=list(args.copybook_path),
+    # `paths`, not args.copybook_path: run() already appended the JCL file's own parent,
+    # which is where a cataloged PROC or INCLUDE member most often sits. Passing only the
+    # -I list meant a PROC beside the job was never found locally, and every EXEC step and
+    # DD inside it silently vanished from the model.
+    pre = prefetch_jcl(source, fetcher, paths=list(paths),
                        dest=deps, source_name=source_name, unavailable=why)
 
     job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
@@ -261,13 +283,13 @@ def run(argv: Optional[List[str]] = None) -> int:
         if not path.exists():
             print(f"error: no such file: {path}", file=sys.stderr)
             return 2
-        source = path.read_text(errors="replace")
+        source = decode_member(path.read_bytes())
         source_name = path.name
         default_stem = path.stem  # <stem>.cbl -> <stem>.json by default
         search_paths.append(str(path.parent))  # look beside the source by default
 
     if args.jcl or _looks_like_jcl(source_name, source):
-        return _run_jcl(args, source, source_name, default_stem)
+        return _run_jcl(args, source, source_name, default_stem, search_paths)
 
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     fmt = _format(args.format)
@@ -291,7 +313,10 @@ def run(argv: Optional[List[str]] = None) -> int:
     # The run directory has to be settled BEFORE stage 1, because stage 1 writes into it.
     # Hence the PROGRAM-ID scan rather than machine.program_id, which does not exist yet.
     run_dir = _run_dir(args)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    err = _make_run_dir(run_dir)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
     deps = str(run_dir / "deps")
     pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
                          source_name=source_name, unavailable=why)
@@ -324,7 +349,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         if not jp.exists():
             print(f"error: no such file: {jp} (--bind-jcl)", file=sys.stderr)
             return 2
-        jtext = jp.read_text(errors="replace")
+        jtext = decode_member(jp.read_bytes())
         prefetch_jcl(jtext, fetcher, paths=search_paths, dest=deps,
                      source_name=jp.name, unavailable=why, result=pre)
         bind_jobs.append(parse_jcl(jtext, resolver=pre.resolver(),
@@ -341,15 +366,24 @@ def run(argv: Optional[List[str]] = None) -> int:
             dyn_report = build_dynamic_calls(machine, art)
         return dyn_report
 
+    art_report = None
+
     def _artifacts_obj():
-        art = build_artifacts(machine)
-        if bind_jobs:
-            art = bind_cobol_artifacts(art, bind_jobs)
-        # Name the rows that exist only because stage 1 ran, so the improvement is
-        # visible rather than implied.
-        art = attribute_resolution(art, program, pre.store)
-        # ...and tell the rows that CANNOT be resolved where their answer lives.
-        return annotate_artifacts(art, _dynamic_obj(art))
+        # Memoized like its sibling above: a default run reaches this three times (stage
+        # 2, the .artifacts.json companion, the .dynamic-calls.json companion) and each
+        # call re-ran build_artifacts + bind + attribute + annotate over the whole
+        # machine to produce the same object.
+        nonlocal art_report
+        if art_report is None:
+            art = build_artifacts(machine)
+            if bind_jobs:
+                art = bind_cobol_artifacts(art, bind_jobs)
+            # Name the rows that exist only because stage 1 ran, so the improvement is
+            # visible rather than implied.
+            art = attribute_resolution(art, program, pre.store)
+            # ...and tell the rows that CANNOT be resolved where their answer lives.
+            art_report = annotate_artifacts(art, _dynamic_obj(art))
+        return art_report
 
     base = _artifact_base(args, default_stem, machine.program_id)
     out_path = _resolve_out_path(args, base, run_dir)

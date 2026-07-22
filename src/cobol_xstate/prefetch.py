@@ -51,7 +51,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .artifact_service import Fetched, ServiceUnavailable, call_service, collect
+from .artifact_service import (Fetched, ServiceUnavailable, call_service,
+                               collect, decode_member)
 from .normalizer import SourceFormat
 from .preprocessor import scan_copy_members
 
@@ -149,8 +150,17 @@ class _Prefetcher:
         self.paths = list(paths or [])
         self.dest = dest
         self.result = result or PrefetchResult()
-        self.result.unavailable = unavailable
-        self.seen: set = set()
+        # Only ever RECORD an outage, never clear one. A second stage called with
+        # unavailable=None (the COBOL run's --bind-jcl loop does exactly this) was
+        # erasing a recorded outage, and report() then said serviceAvailable: true for
+        # a run in which the estate was never reachable - conflating "asked and had
+        # nothing" with "never asked", which this report exists to keep apart.
+        if unavailable:
+            self.result.unavailable = unavailable
+        # Seed from the shared result, not empty: when a caller passes an existing
+        # PrefetchResult (prefetch_jcl(..., result=pre)), members already in the store
+        # were paid for and must not be requested - or reported - a second time.
+        self.seen: set = set(self.result.store)
 
     # -- retrieval ----------------------------------------------------------
     def _local(self, name: str) -> Optional[Tuple[str, str]]:
@@ -160,8 +170,13 @@ class _Prefetcher:
             for ext in _LOCAL_EXTS:
                 candidate = os.path.join(base, name + ext)
                 if os.path.isfile(candidate):
-                    with open(candidate, "r", errors="replace") as fh:
-                        return fh.read(), candidate
+                    # Explicit decode: without encoding= this uses the platform default
+                    # (cp1252 on Windows), which maps almost every byte to SOMETHING, so
+                    # a member saved as UTF-8 by save_member reads back mojibaked with no
+                    # error - and one extra character shifts every column of a
+                    # fixed-format line.
+                    with open(candidate, "rb") as fh:
+                        return decode_member(fh.read()), candidate
         return None
 
     def obtain(self, raw: str, type_hint: Optional[str] = None,
@@ -253,7 +268,12 @@ def prefetch_cobol(source: str, fetcher: Optional[Callable],
     another copybook has a hole in it exactly like the program did. Cycles terminate on
     the seen-set, so a mutually-including pair costs one fetch each."""
     pf = _Prefetcher(fetcher, paths, dest, unavailable, result)
-    pf.result.source_name = source_name
+    # Name the source only if the shared result has not been named already. A COBOL run
+    # with --bind-jcl calls prefetch_jcl once per JCL file against the PROGRAM's result,
+    # and overwriting made the program's own prefetch report attribute its copybooks to
+    # the last JCL file on the command line.
+    if pf.result.source_name == "<source>":
+        pf.result.source_name = source_name
 
     queue: List[Tuple[str, str]] = [(m, "COPY in the program") for m in
                                     scan_copy_members(source, fmt)]
@@ -282,7 +302,12 @@ def prefetch_jcl(source: str, fetcher: Optional[Callable],
     from .jcl import parse_jcl
 
     pf = _Prefetcher(fetcher, paths, dest, unavailable, result)
-    pf.result.source_name = source_name
+    # Name the source only if the shared result has not been named already. A COBOL run
+    # with --bind-jcl calls prefetch_jcl once per JCL file against the PROGRAM's result,
+    # and overwriting made the program's own prefetch report attribute its copybooks to
+    # the last JCL file on the command line.
+    if pf.result.source_name == "<source>":
+        pf.result.source_name = source_name
 
     for _ in range(max_rounds):
         asked: List[str] = []
