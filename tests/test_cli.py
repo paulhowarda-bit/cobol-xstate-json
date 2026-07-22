@@ -1,4 +1,10 @@
-"""CLI output-destination behavior: default same-name file, --outdir, -o overrides."""
+"""CLI output destination: everything a run produces goes into --outdir, as given.
+
+There is exactly ONE placement mechanism, and it is literal - the path you pass is the
+path files appear in, with nothing appended. Bundle, all six views, both retrieval
+reports, and the artifacts fetched from the estate all land there. No second flag can put
+a file anywhere else, which is the property these tests exist to hold.
+"""
 
 import json
 import os
@@ -28,69 +34,62 @@ def _write_src(dir_: Path, name: str = "hello.cbl") -> Path:
     return p
 
 
-def test_default_writes_same_name_json_in_cwd(tmp_path, monkeypatch):
+def _run_dir(root):
+    """Where a run writes: --outdir itself, taken literally with nothing appended."""
+    return Path(root)
+
+
+def test_default_outdir_is_out(tmp_path, monkeypatch):
     src = _write_src(tmp_path)
     monkeypatch.chdir(tmp_path)
-    rc = run([src.name])
-    assert rc == 0
-    out = tmp_path / "hello.json"
+    assert run([src.name]) == 0
+    out = tmp_path / "out" / "hello.json"
     assert out.exists()
     json.loads(out.read_text())  # valid JSON
+
+
+def test_nothing_is_written_to_the_working_directory(tmp_path, monkeypatch):
+    """The reason the default is ./out and not '.': a bare run must never scatter files
+    into whatever directory it happened to be invoked from."""
+    src = _write_src(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert run([src.name]) == 0
+    assert {p.name for p in tmp_path.iterdir()} == {"hello.cbl", "out"}
 
 
 def test_outdir_relative_is_created(tmp_path, monkeypatch):
     src = _write_src(tmp_path)
     monkeypatch.chdir(tmp_path)
-    rc = run([src.name, "--outdir", "build/charts"])
-    assert rc == 0
-    out = tmp_path / "build" / "charts" / "hello.json"
-    assert out.exists()
+    assert run([src.name, "--outdir", "build/charts"]) == 0
+    assert (tmp_path / "build" / "charts" / "hello.json").exists()
 
 
-def test_outdir_dot_is_current_directory(tmp_path, monkeypatch):
+def test_outdir_is_taken_literally(tmp_path, monkeypatch):
+    """--outdir names the directory files appear in - nothing is appended to it, so
+    `--outdir .` writes into the current directory itself."""
     src = _write_src(tmp_path)
     monkeypatch.chdir(tmp_path)
-    rc = run([src.name, "--outdir", "."])
-    assert rc == 0
+    assert run([src.name, "--outdir", "."]) == 0
     assert (tmp_path / "hello.json").exists()
 
 
 def test_outdir_absolute_path_is_created(tmp_path):
     src = _write_src(tmp_path)
     target = tmp_path / "abs" / "out"
-    rc = run([str(src), "--outdir", str(target)])
-    assert rc == 0
+    assert run([str(src), "--outdir", str(target)]) == 0
     assert (target / "hello.json").exists()
 
 
-def test_outdir_names_output_after_source_not_cwd(tmp_path, monkeypatch):
-    # Running on a file in another directory still names the output after the source.
+def test_files_are_named_after_the_source_wherever_it_lives(tmp_path, monkeypatch):
+    """Running on a file in another directory still names the output after the source,
+    and still writes it into --outdir rather than beside the source."""
     srcdir = tmp_path / "src"
     srcdir.mkdir()
     src = _write_src(srcdir, "payroll.cbl")
     monkeypatch.chdir(tmp_path)
-    rc = run([str(src), "--outdir", "out"])
-    assert rc == 0
+    assert run([str(src), "--outdir", "out"]) == 0
     assert (tmp_path / "out" / "payroll.json").exists()
-
-
-def test_explicit_output_overrides_outdir(tmp_path):
-    src = _write_src(tmp_path)
-    exact = tmp_path / "somewhere" / "custom.json"
-    rc = run([str(src), "-o", str(exact), "--outdir", str(tmp_path / "ignored")])
-    assert rc == 0
-    assert exact.exists()
-    assert not (tmp_path / "ignored").exists()
-
-
-def test_dash_output_writes_stdout(tmp_path, capsys):
-    src = _write_src(tmp_path)
-    rc = run([str(src), "-o", "-"])
-    assert rc == 0
-    captured = capsys.readouterr()
-    json.loads(captured.out)  # machine JSON went to stdout
-    # No stray file created next to the source.
-    assert not (tmp_path / "hello.json").exists()
+    assert not (srcdir / "payroll.json").exists()
 
 
 def test_js_target_default_name_is_mjs_with_runtime(tmp_path, monkeypatch):
@@ -98,8 +97,11 @@ def test_js_target_default_name_is_mjs_with_runtime(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     rc = run([src.name, "--target", "js"])
     assert rc == 0
-    assert (tmp_path / "hello.mjs").exists()
-    assert (tmp_path / "cobolRuntime.mjs").exists()
+    run_dir = tmp_path / "out"
+    assert (run_dir / "hello.mjs").exists()
+    # The runtime lands in the SAME directory: the module imports './cobolRuntime.mjs',
+    # so a relative import that does not resolve on disk is a broken deliverable.
+    assert (run_dir / "cobolRuntime.mjs").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -127,10 +129,10 @@ def test_js_target_writes_runtime_next_to_module(tmp_path):
     """The emitted module's relative import must resolve on disk."""
     import re
     src = (Path(__file__).resolve().parents[1] / "examples" / "custrpt.cbl")
-    out = tmp_path / "m.mjs"
-    rc = run([str(src), "--target", "js", "-o", str(out)])
-    assert rc == 0
-    runtime = tmp_path / "cobolRuntime.mjs"
+    assert run([str(src), "--target", "js", "--outdir", str(tmp_path)]) == 0
+    run_dir = _run_dir(tmp_path)
+    out = run_dir / "custrpt.mjs"
+    runtime = run_dir / "cobolRuntime.mjs"
     assert runtime.exists(), "cobolRuntime.mjs must be written beside the module"
     # the module imports exactly that filename
     imported = re.search(r'from "(\./[^"]+\.mjs)"', out.read_text(encoding="utf-8"))
@@ -143,8 +145,63 @@ def test_js_target_writes_runtime_next_to_module(tmp_path):
 # the default run: three views of the same program
 # --------------------------------------------------------------------------- #
 
+# The two dependency-retrieval reports are written by EVERY run (see
+# test_every_run_writes_both_retrieval_reports) and are not views of the program, so the
+# view-naming tests below would otherwise all have to repeat them.
+_REPORTS = (".prefetch.json", ".fetch.json", ".jcl.prefetch.json", ".jcl.fetch.json")
+
+
 def _names(d):
-    return {f.name for f in d.iterdir()}
+    """View files inside the run directory under ``d`` (an --outdir root)."""
+    return {f.name for f in _run_dir(d).iterdir()
+            if not f.name.endswith(_REPORTS) and not f.is_dir()}
+
+
+def _all_names(d):
+    """Everything inside the run directory under ``d``, reports included."""
+    return {f.name for f in _run_dir(d).iterdir()}
+
+
+def test_every_run_writes_both_retrieval_reports(tmp_path):
+    """Prefetch and fetch are the pipeline, not a mode of it: no flag turns them on, and
+    a plain run accounts for both stages. A run that quietly skipped them would produce a
+    model with unexplained holes - an unresolved dynamic CALL looks identical to a
+    program that genuinely has none."""
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--outdir", str(tmp_path)]) == 0
+    names = _all_names(tmp_path)
+    assert "banktran.prefetch.json" in names
+    assert "banktran.fetch.json" in names
+
+    import json
+    d = _run_dir(tmp_path)
+    pre = json.loads((d / "banktran.prefetch.json").read_text(encoding="utf-8"))
+    fetched = json.loads((d / "banktran.fetch.json").read_text(encoding="utf-8"))
+    assert pre["format"] == "cobol-xstate-prefetch"
+    assert fetched["format"] == "cobol-xstate-fetch"
+    # No estate client on a test machine: that must be stated, never left to look like
+    # an estate that was asked and had nothing.
+    assert pre["serviceAvailable"] is False
+    assert "cast_clients" in pre["serviceUnavailable"]
+
+
+def test_there_is_no_second_way_to_place_output(tmp_path):
+    """--outdir is the only placement mechanism. The flags that used to compete with it
+    (-o for an exact path, --deps-dir for retrieved members) are gone, so nothing can
+    put a file outside the run directory."""
+    src = _write_src(tmp_path)
+    for flag in ("-o", "--output", "--deps-dir"):
+        with pytest.raises(SystemExit):
+            run([str(src), flag, str(tmp_path / "elsewhere")])
+
+
+def test_machine_only_still_retrieves_it_just_stops_reporting(tmp_path):
+    """--machine-only suppresses the reports, never the retrieval. What was fetched
+    decides whether the machine is right, so skipping it to save two files would change
+    the answer rather than the output format."""
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--machine-only", "--outdir", str(tmp_path)]) == 0
+    assert _all_names(tmp_path) == {"banktran.json"}
 
 
 def test_default_run_writes_all_views(tmp_path):
@@ -154,7 +211,8 @@ def test_default_run_writes_all_views(tmp_path):
                                 "banktran.business.json",    # the distillation
                                 "banktran.lineage.json",     # the field table
                                 "banktran.reactive.json",    # what replaces it
-                                "banktran.artifacts.json"}   # the related artifacts
+                                "banktran.artifacts.json",   # the related artifacts
+                                "banktran.dynamic-calls.json"}  # targets it cannot name
 
 
 def test_a_refused_reactive_view_does_not_take_the_run_down(tmp_path):
@@ -184,9 +242,10 @@ def test_the_three_views_are_each_well_formed(tmp_path):
     import json
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--outdir", str(tmp_path)]) == 0
-    faithful = json.loads((tmp_path / "banktran.json").read_text(encoding="utf-8"))
-    business = json.loads((tmp_path / "banktran.business.json").read_text(encoding="utf-8"))
-    lineage = json.loads((tmp_path / "banktran.lineage.json").read_text(encoding="utf-8"))
+    d = _run_dir(tmp_path)
+    faithful = json.loads((d / "banktran.json").read_text(encoding="utf-8"))
+    business = json.loads((d / "banktran.business.json").read_text(encoding="utf-8"))
+    lineage = json.loads((d / "banktran.lineage.json").read_text(encoding="utf-8"))
     assert faithful["format"] == "xstate-v5-config"
     assert faithful["metadata"].get("view") is None
     assert business["format"] == "xstate-v5-config"     # both are renderable machines
@@ -209,7 +268,8 @@ def test_no_business_opts_out_of_just_that_view(tmp_path):
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--no-business", "--outdir", str(tmp_path)]) == 0
     assert _names(tmp_path) == {"banktran.json", "banktran.lineage.json",
-                                "banktran.reactive.json", "banktran.artifacts.json"}
+                                "banktran.reactive.json", "banktran.artifacts.json",
+                                "banktran.dynamic-calls.json"}
 
 
 def test_no_artifacts_opts_out_of_just_that_view(tmp_path):
@@ -224,7 +284,7 @@ def test_no_artifacts_opts_out_of_just_that_view(tmp_path):
 def test_both_opt_outs_leave_only_the_bundle(tmp_path):
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--no-business", "--no-lineage", "--no-reactive",
-                "--no-artifacts", "--outdir", str(tmp_path)]) == 0
+                "--no-artifacts", "--no-dynamic-calls", "--outdir", str(tmp_path)]) == 0
     assert _names(tmp_path) == {"banktran.json"}
 
 
@@ -248,7 +308,7 @@ def test_dotted_source_name_keeps_companions_matched(tmp_path):
     assert run([str(src), "--outdir", str(out)]) == 0
     assert _names(out) == {"MY.PROG.json", "MY.PROG.business.json",
                            "MY.PROG.lineage.json", "MY.PROG.reactive.json",
-                           "MY.PROG.artifacts.json"}
+                           "MY.PROG.artifacts.json", "MY.PROG.dynamic-calls.json"}
 
 
 def test_companion_never_overwrites_the_bundle(tmp_path):
@@ -260,14 +320,7 @@ def test_companion_never_overwrites_the_bundle(tmp_path):
     out = tmp_path / "o"
     assert run([str(src), "--outdir", str(out)]) == 0
     names = _names(out)
-    assert len(names) == 5, f"an artifact was clobbered: {names}"
+    assert len(names) == 6, f"an artifact was clobbered: {names}"
     # the bundle survives and is still the FAITHFUL machine, not the distillation
-    bundle = json.loads((out / "ACCT.business.json").read_text(encoding="utf-8"))
+    bundle = json.loads((_run_dir(out) / "ACCT.business.json").read_text(encoding="utf-8"))
     assert bundle["metadata"].get("view") is None
-
-
-def test_explicit_output_path_carries_matched_companions(tmp_path):
-    assert run([str(EXAMPLES_CBL), "-o", str(tmp_path / "custom.json")]) == 0
-    assert _names(tmp_path) == {"custom.json", "custom.business.json",
-                                "custom.lineage.json", "custom.reactive.json",
-                                "custom.artifacts.json"}

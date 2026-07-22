@@ -30,3 +30,9 @@ package-lock.json
 *.machine.json
 *.machine.mjs
 out/
+
+# A run writes everything into <outdir>/<PROGRAM-ID>/, and --outdir defaults to ./out
+# (already ignored above). These cover a run pointed somewhere else - e.g. --outdir .
+*.prefetch.json
+*.fetch.json
+*.dynamic-calls.json

@@ -11,7 +11,10 @@ from typing import List, Optional
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
+from .artifact_service import DEFAULT_FETCHER, load_fetcher
 from .fetch import fetch_dependencies
+from .dynamic_calls import annotate_artifacts, build_dynamic_calls
+from .prefetch import attribute_resolution, prefetch_cobol, prefetch_jcl
 from .jcl import parse_jcl
 from .jcl_views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage
@@ -40,31 +43,27 @@ _COMPANION_EXT = (".business.json", ".lineage.json", ".artifacts.json")
 def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
     """The shared base name every artifact of this run is built from.
 
-    Derived from the SOURCE stem (or an explicit ``-o`` path), never by chopping a
-    written filename at its first dot - a source called ``MY.PROG.cbl`` would otherwise
-    yield companions named ``MY.*``, and one called ``X.business.cbl`` would have its
-    bundle silently overwritten by the business view landing on the same path.
+    Derived from the SOURCE stem, never by chopping a written filename at its first dot -
+    a source called ``MY.PROG.cbl`` would otherwise yield companions named ``MY.*``, and
+    one called ``X.business.cbl`` would have its bundle silently overwritten by the
+    business view landing on the same path.
     """
-    if args.output and args.output != "-":
-        name = Path(args.output).name
-        for suf in _COMPANION_EXT:          # -o out/prog.business.json -> base "prog"
-            if name.endswith(suf):
-                return name[: -len(suf)]
-        return Path(args.output).stem       # strips only the final extension
     return default_stem or program_id or "machine"
 
 
-def _resolve_out_path(args, base: str) -> Optional[Path]:
-    """Where to write this run's primary artifact, or ``None`` for stdout.
+def _run_dir(args) -> Path:
+    """The one directory this run writes into: exactly ``--outdir``, as given.
 
-    ``-o -`` -> stdout; ``-o PATH`` -> that exact path; otherwise ``<base><ext>`` in
-    ``--outdir``. ``Path`` handles relative-vs-absolute; ``.`` is the current directory.
-    """
-    if args.output == "-":
-        return None
-    if args.output:
-        return Path(args.output)
-    return Path(args.outdir) / f"{base}{_TARGET_EXT.get(args.target, '.json')}"
+    Everything lands here - the bundle, every companion view, both retrieval reports, the
+    retrieved artifacts (under ``deps/``), and the JS runtime. ``--outdir`` is taken
+    literally: the path you give is the path files appear in, with nothing appended.
+    There is deliberately no second mechanism that can place a file somewhere else."""
+    return Path(args.outdir)
+
+
+def _resolve_out_path(args, base: str, run_dir: Path) -> Path:
+    """Where this run's primary artifact goes."""
+    return run_dir / f"{base}{_TARGET_EXT.get(args.target, '.json')}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,14 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
                     "XState v5 JSON Harel statechart (a modernization rewrite contract).",
     )
     p.add_argument("source", help="path to a COBOL source file ('-' for stdin)")
-    p.add_argument("-o", "--output",
-                   help="exact output path, overriding --outdir and the default name; "
-                        "'-' writes to stdout")
-    p.add_argument("--outdir", default=".", metavar="DIR",
-                   help="directory for the auto-named output file (default: current "
-                        "directory). Relative paths resolve against the current "
-                        "directory; created (with parents) if it does not exist. The "
-                        "file is named after the source (or the PROGRAM-ID for stdin).")
+    p.add_argument("--outdir", default="out", metavar="DIR",
+                   help="directory for output (default: ./out). EVERY file this run "
+                        "produces goes here, exactly as given with nothing appended - "
+                        "the bundle, all six views, both retrieval reports, and the "
+                        "artifacts retrieved from the estate (under deps/). Created "
+                        "with parents if it does not exist.")
     p.add_argument("--target",
                    choices=["json", "js", "reactive", "business", "lineage",
                             "artifacts"],
@@ -103,9 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
                         ".proc or a source beginning with a // JOB/PROC statement). Emits "
                         "<name>.jcl.artifacts.json + <name>.jcl.lineage.json - the job's "
                         "dataset dataflow, control-card field lineage, and the related-"
-                        "artifact manifest (see docs/jcl-target.md). External PROCs / "
-                        "INCLUDE / control-card members are flagged unresolved from the "
-                        "CLI; pass a retrieval function to the Python API to resolve them.")
+                        "artifact manifest (see docs/jcl-target.md). Cataloged PROCs, "
+                        "INCLUDE members and control-card datasets are retrieved before "
+                        "the parse, so the steps inside them are in the model.")
     p.add_argument("--format", choices=["fixed", "free"],
                    help="source format (default: auto-detect)")
     p.add_argument("-I", "--copybook-path", action="append", default=[],
@@ -114,21 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
     p.add_argument("--copybook-fetcher", "--fetcher", dest="copybook_fetcher",
                    metavar="MODULE:FUNC",
-                   help="import MODULE and call FUNC(name) for any copybook not found "
-                        "locally - the hook for an estate artifact service "
-                        "(e.g. cast_clients.mf_fetch:fetch_artifact). It may return the "
-                        "member text, (text, source), or a dict with text/path/"
-                        "copied_to. Also used by --fetch-deps")
-    p.add_argument("--fetch-deps", nargs="?", const="", metavar="DIR",
-                   help="fetch EVERY dependent artifact through the fetcher - called "
-                        "programs, copybooks, ASM modules, CNTL/PARM members, Db2 DDL, "
-                        "BMS mapsets - and write <name>.fetch.json reporting each "
-                        "outcome. Give DIR to save the retrieved artifacts there "
-                        "(usable as a later -I path). Requires --copybook-fetcher")
-    p.add_argument("--fetch-depth", type=int, default=1, metavar="N",
-                   help="how many levels of the dependency tree --fetch-deps walks: 1 "
-                        "(default) = this program's direct dependencies; higher parses "
-                        "each fetched COBOL program and follows its dependencies too")
+                   help=f"override the estate artifact service. Every run retrieves its "
+                        f"dependencies through {DEFAULT_FETCHER} by default - only the "
+                        f"estate knows where its members live - so this is needed only "
+                        f"for a differently-named client. FUNC(name, type=, copy=) may "
+                        f"return the member text, (text, source), or a dict with "
+                        f"text/path/copied_to/detected_type/alternatives")
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--no-lineage", action="store_true",
@@ -143,6 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-artifacts", action="store_true",
                    help="skip the companion <name>.artifacts.json that the default run "
                         "writes alongside the bundle")
+    p.add_argument("--no-dynamic-calls", action="store_true",
+                   help="skip the companion <name>.dynamic-calls.json that the default "
+                        "run writes alongside the bundle")
     p.add_argument("--bind-jcl", action="append", default=[], metavar="FILE",
                    help="JCL/PROC file(s) whose DD statements bind this COBOL program's "
                         "file ddnames to datasets (repeatable). Each file row the JCL "
@@ -169,33 +160,41 @@ def _looks_like_jcl(source_name: str, source: str) -> bool:
 
 
 def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str]) -> int:
-    """Parse a JCL job / PROC and emit its lineage + artifact manifest. The CLI supplies no
-    member resolver, so external PROCs / INCLUDE / control-card datasets are flagged; the
-    Python API (parse_jcl(text, resolver=...)) is where a retrieval function is wired in."""
+    """Parse a JCL job / PROC and emit its lineage + artifact manifest.
+
+    Stage 1 runs first and must: a cataloged PROC, an INCLUDE member and a control-card
+    dataset each carry ``EXEC PGM=`` steps and DD statements that appear nowhere in the
+    JCL file itself. Parsed without them - as this path used to - those steps do not
+    show up as programs, as datasets, or at all, and the job reads as far simpler than
+    it is."""
     import json as _json
 
-    job = parse_jcl(source, resolver=None, source_name=source_name)
+    fetcher, why = _service(args, source_name)
+    base = _artifact_base(args, default_stem, "job")
+    # Same ordering constraint as the COBOL path: prefetch writes into the run directory,
+    # so the directory's name must be known before anything is parsed. The JOB/PROC name
+    # is on the first statement, so scan for it.
+    run_dir = _run_dir(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    deps = str(run_dir / "deps")
+    pre = prefetch_jcl(source, fetcher, paths=list(args.copybook_path),
+                       dest=deps, source_name=source_name, unavailable=why)
+
+    job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
     lineage = build_jcl_lineage(job)
     artifacts = build_jcl_artifacts(job)
     base = _artifact_base(args, default_stem, job.name or "job")
+    fetched = fetch_dependencies(artifacts, fetcher, dest=deps,
+                                 prefetched=pre.store, unavailable=why)
 
-    if args.output == "-":
-        # one stream, one document: the two views as a single bundle
-        print(_json.dumps({"format": "cobol-xstate-jcl", "job": job.name,
-                           "source": source_name, "artifacts": artifacts,
-                           "lineage": lineage}, indent=args.indent))
-        return 0
-
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-    art_path = Path(args.output) if args.output else outdir / f"{base}.jcl.artifacts.json"
-    lin_path = (art_path.with_name(base + ".jcl.lineage.json") if args.output
-                else outdir / f"{base}.jcl.lineage.json")
-    art_path.parent.mkdir(parents=True, exist_ok=True)
-    art_path.write_text(_json.dumps(artifacts, indent=args.indent) + "\n", encoding="utf-8")
-    lin_path.write_text(_json.dumps(lineage, indent=args.indent) + "\n", encoding="utf-8")
-    print(f"[{source_name}] wrote {art_path}", file=sys.stderr)
-    print(f"[{source_name}] wrote {lin_path}", file=sys.stderr)
+    for suffix, obj in ((".jcl.artifacts.json", artifacts),
+                        (".jcl.lineage.json", lineage),
+                        (".jcl.prefetch.json", pre.report()),
+                        (".jcl.fetch.json", fetched)):
+        path = run_dir / f"{base}{suffix}"
+        path.write_text(_json.dumps(obj, indent=args.indent) + "\n", encoding="utf-8")
+        print(f"[{source_name}] wrote {path}", file=sys.stderr)
+    _report_stages(source_name, pre, fetched)
 
     if args.summary:
         print(f"[{job.name or 'JOB'}] {len(job.steps)} step(s), "
@@ -208,22 +207,45 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str]) -
     return 0
 
 
-def _load_fetcher(spec: Optional[str]):
-    """``module:function`` (or ``module.function``) -> the callable, for
-    --copybook-fetcher. Raises with a readable message; the caller reports it."""
-    if not spec:
-        return None
-    import importlib
+def _report_stages(source_name: str, pre, fetched: dict) -> None:
+    """One line per stage on stderr, plus the holes named individually.
 
-    mod_name, sep, func_name = spec.partition(":")
-    if not sep:
-        mod_name, _, func_name = spec.rpartition(".")
-    if not mod_name or not func_name:
-        raise ValueError("expected MODULE:FUNC, e.g. cast_clients.mf_fetch:fetch_artifact")
-    fn = getattr(importlib.import_module(mod_name), func_name)
-    if not callable(fn):
-        raise TypeError(f"{spec} is not callable")
-    return fn
+    The holes get named rather than counted because every downstream view is read as if
+    it were complete. A member that did not arrive is the reason a dynamic CALL stayed
+    unresolved or a job looks like it has fewer steps than it runs, and a reader who
+    cannot see which member that was has no way to tell an accurate model from a short
+    one."""
+    pc, fc = pre.counts, fetched.get("counts", {})
+    print(f"[{source_name}] prefetch: "
+          f"{pc.get('fetched', 0)} fetched, {pc.get('local', 0)} local, "
+          f"{pc.get('not-found', 0)} not-found, {pc.get('error', 0)} error"
+          + (f", {pc.get('no-service', 0)} never looked for"
+             if pc.get("no-service") else ""), file=sys.stderr)
+    print(f"[{source_name}] fetch: "
+          f"{fc.get('fetched', 0)} fetched, {fc.get('prefetched', 0)} already in hand, "
+          f"{fc.get('not-found', 0)} not-found, {fc.get('error', 0)} error, "
+          f"{fc.get('skipped', 0)} not fetchable", file=sys.stderr)
+    for member in pre.missing:
+        print(f"  MISSING {member}: the source text is incomplete without it - data "
+              f"items or steps it defines are NOT in the model", file=sys.stderr)
+    for err in fetched.get("errors", []):
+        print(f"  FETCH ERROR {err['artifact']}: {err['error']}", file=sys.stderr)
+
+
+def _service(args, source_name: str):
+    """The estate artifact service for this run, and why it is missing if it is.
+
+    Never fatal. A run without the service still parses whatever is on the local search
+    path and still writes its reports - they simply say, per member, that nothing was
+    ever looked for. Failing the run instead would be worse: it would make the tool
+    unusable exactly where it is most often used first, on a laptop with a handful of
+    members and no estate connection."""
+    fetcher, why = load_fetcher(args.copybook_fetcher)
+    if fetcher is None:
+        print(f"[{source_name}] WARNING: {why}", file=sys.stderr)
+    return fetcher, why
+
+
 
 
 def run(argv: Optional[List[str]] = None) -> int:
@@ -248,17 +270,6 @@ def run(argv: Optional[List[str]] = None) -> int:
         return _run_jcl(args, source, source_name, default_stem)
 
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
-    try:
-        fetcher = _load_fetcher(args.copybook_fetcher)
-    except Exception as exc:
-        print(f"error: --copybook-fetcher {args.copybook_fetcher}: {exc}",
-              file=sys.stderr)
-        return 2
-    resolver = CopybookResolver(
-        paths=search_paths,
-        exts=tuple(args.copybook_ext) + default_exts,
-        fetcher=fetcher,
-    )
     fmt = _format(args.format)
     if fmt is None:
         det = detect_source_format(source)
@@ -272,6 +283,25 @@ def run(argv: Optional[List[str]] = None) -> int:
             print("  -> if the output looks corrupted, re-run with "
                   "--format fixed|free to override.", file=sys.stderr)
 
+    # STAGE 1. Before the parse, because the parse is what produces the dependency
+    # manifest: a copybook that does not arrive takes its VALUE clauses out of the
+    # model, and a dynamic CALL target proved by one of those clauses then stays an
+    # unresolved runtime name - so the program it calls is never even a row to fetch.
+    fetcher, why = _service(args, source_name)
+    # The run directory has to be settled BEFORE stage 1, because stage 1 writes into it.
+    # Hence the PROGRAM-ID scan rather than machine.program_id, which does not exist yet.
+    run_dir = _run_dir(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    deps = str(run_dir / "deps")
+    pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
+                         source_name=source_name, unavailable=why)
+
+    resolver = CopybookResolver(
+        paths=search_paths,
+        exts=tuple(args.copybook_ext) + default_exts,
+        fetcher=fetcher,
+        store=pre.store,        # everything stage 1 retrieved, already paid for
+    )
     program = parse_program(source, fmt, resolver=resolver)
     machine = build_machine(program, source_name=source_name)
 
@@ -283,24 +313,46 @@ def run(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
 
     # --bind-jcl: parse each JCL once; the artifacts view is then built through the
-    # binding join so its file rows carry the dataset their ddname resolves to.
+    # binding join so its file rows carry the dataset their ddname resolves to. Each is
+    # prefetched first, into the SAME store: a ddname the program opens is very often
+    # contributed by a PROC rather than by the JCL file itself, so an unresolved PROC
+    # here does not merely lose steps - it loses the ddname->DSN binding that is the
+    # entire reason for passing the JCL.
     bind_jobs = []
     for jf in args.bind_jcl:
         jp = Path(jf)
         if not jp.exists():
             print(f"error: no such file: {jp} (--bind-jcl)", file=sys.stderr)
             return 2
-        bind_jobs.append(parse_jcl(jp.read_text(errors="replace"), source_name=jp.name))
+        jtext = jp.read_text(errors="replace")
+        prefetch_jcl(jtext, fetcher, paths=search_paths, dest=deps,
+                     source_name=jp.name, unavailable=why, result=pre)
+        bind_jobs.append(parse_jcl(jtext, resolver=pre.resolver(),
+                                   source_name=jp.name))
+
+    # The true dynamic calls and where their targets are named. Built once: the artifact
+    # manifest is annotated FROM it (so the fetch plan inherits the pointer too), and it
+    # is written as its own view.
+    dyn_report = None
+
+    def _dynamic_obj(art):
+        nonlocal dyn_report
+        if dyn_report is None:
+            dyn_report = build_dynamic_calls(machine, art)
+        return dyn_report
 
     def _artifacts_obj():
         art = build_artifacts(machine)
-        return bind_cobol_artifacts(art, bind_jobs) if bind_jobs else art
+        if bind_jobs:
+            art = bind_cobol_artifacts(art, bind_jobs)
+        # Name the rows that exist only because stage 1 ran, so the improvement is
+        # visible rather than implied.
+        art = attribute_resolution(art, program, pre.store)
+        # ...and tell the rows that CANNOT be resolved where their answer lives.
+        return annotate_artifacts(art, _dynamic_obj(art))
 
     base = _artifact_base(args, default_stem, machine.program_id)
-    out_path = _resolve_out_path(args, base)
-    if out_path is not None:
-        # Create the destination directory (and parents) if it does not exist.
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = _resolve_out_path(args, base, run_dir)
 
     # Always write UTF-8 explicitly: the platform default (cp1252 on Windows) cannot
     # encode the runtime's non-ASCII text, and JSON/JS artifacts must be portable.
@@ -344,6 +396,15 @@ def run(argv: Optional[List[str]] = None) -> int:
             return
         _companion(beside, ".artifacts.json", _artifacts_obj())
 
+    def _write_dynamic_companion(beside: Path) -> None:
+        """The true dynamic calls: targets this program does NOT name, and the artifact
+        that does. Written even when empty - "this program has no unresolvable dynamic
+        calls" is a real and reassuring answer, and its absence would be ambiguous
+        between that and the view not having run."""
+        if args.machine_only or args.no_dynamic_calls:
+            return
+        _companion(beside, ".dynamic-calls.json", _dynamic_obj(_artifacts_obj()))
+
     def _write_reactive_companion(beside: Path) -> None:
         """The event-driven view: the machine the modernized system is built from.
 
@@ -361,42 +422,30 @@ def run(argv: Optional[List[str]] = None) -> int:
             return
         _companion(beside, ".reactive.json", view)
 
-    # --fetch-deps: retrieve every dependent artifact through the same fetcher. Done
-    # before the views are written so its report lands even when a later view refuses.
-    if args.fetch_deps is not None:
-        if fetcher is None:
-            print("error: --fetch-deps needs --copybook-fetcher MODULE:FUNC to know how "
-                  "to retrieve artifacts", file=sys.stderr)
-            return 2
-        report = fetch_dependencies(
-            _artifacts_obj(), fetcher,
-            dest=(args.fetch_deps or None), depth=max(1, args.fetch_depth),
-            copybook_paths=search_paths)
-        fetch_path = (out_path.with_name(base + ".fetch.json") if out_path is not None
-                      else Path(args.outdir) / f"{base}.fetch.json")
-        fetch_path.parent.mkdir(parents=True, exist_ok=True)
-        _write(fetch_path, _json.dumps(report, indent=args.indent) + "\n")
-        print(f"[{source_name}] wrote {fetch_path}", file=sys.stderr)
-        c = report["counts"]
-        print(f"[{source_name}] fetched {c.get('fetched', 0)}, "
-              f"not-found {c.get('not-found', 0)}, skipped {c.get('skipped', 0)}, "
-              f"errors {c.get('error', 0)}"
-              + (f" -> {args.fetch_deps}" if args.fetch_deps else ""), file=sys.stderr)
-        for e in report["errors"]:
-            print(f"  FETCH ERROR {e['artifact']}: {e['error']}", file=sys.stderr)
+    # STAGE 2. Unconditional: retrieving what this program depends on is not a mode of
+    # the tool, it is what the tool does. Run before the views are written so the two
+    # reports land even when a later view refuses.
+    _art = _artifacts_obj()
+    report = fetch_dependencies(_art, fetcher, dest=deps, prefetched=pre.store,
+                                unavailable=why, dynamic=_dynamic_obj(_art))
+    # --machine-only suppresses the REPORTS, never the retrieval: what was fetched
+    # decides whether the machine is right, so skipping it to save two files would be
+    # backwards.
+    if not args.machine_only:
+        for suffix, obj in ((".prefetch.json", pre.report()), (".fetch.json", report)):
+            path = out_path.with_name(f"{base}{suffix}")
+            _write(path, _json.dumps(obj, indent=args.indent) + "\n")
+            print(f"[{source_name}] wrote {path}", file=sys.stderr)
+    _report_stages(source_name, pre, report)
 
     if args.target in ("business", "lineage", "artifacts"):
         obj = (build_lineage(machine) if args.target == "lineage"
                else _artifacts_obj() if args.target == "artifacts"
                else build_business_view(machine))
-        text = _json.dumps(obj, indent=args.indent)
-        if out_path is None:
-            print(text)
-        else:
-            _write(out_path, text + "\n")
-            print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
-            if args.target == "business":
-                _write_lineage_companion(out_path)
+        _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
+        print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+        if args.target == "business":
+            _write_lineage_companion(out_path)
     elif args.target in ("js", "reactive"):
         try:
             text = (emit_reactive_module(machine) if args.target == "reactive"
@@ -406,42 +455,38 @@ def run(argv: Optional[List[str]] = None) -> int:
             # reason, not a traceback. The refusal is a fact about the program.
             print(f"error: {exc}", file=sys.stderr)
             return 3
-        if out_path is None:
-            print(text)
-        else:
-            _write(out_path, text)
-            # The emitted module imports ./cobolRuntime.mjs, so the runtime must land
-            # beside it. It ships as package data; a missing asset means a broken
-            # install and raises rather than emitting a dangling import.
-            runtime_dst = out_path.parent / "cobolRuntime.mjs"
-            _write(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
-            print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
-            print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
-            # The reactive machine is the one you most want to LOOK at - its waits and
-            # publishes are the new system's message contract - so it gets a drawable
-            # JSON beside the runnable module, like every other machine view.
-            if args.target == "reactive":
-                view = out_path.with_name(base + ".reactive.json")
-                _write(view, _json.dumps(build_reactive_view(machine),
-                                         indent=args.indent) + "\n")
-                print(f"[{source_name}] wrote {view}", file=sys.stderr)
+        _write(out_path, text)
+        # The emitted module imports ./cobolRuntime.mjs, so the runtime must land beside
+        # it. It ships as package data; a missing asset means a broken install and raises
+        # rather than emitting a dangling import.
+        runtime_dst = out_path.parent / "cobolRuntime.mjs"
+        _write(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
+        print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+        print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
+        # The reactive machine is the one you most want to LOOK at - its waits and
+        # publishes are the new system's message contract - so it gets a drawable JSON
+        # beside the runnable module, like every other machine view.
+        if args.target == "reactive":
+            view = out_path.with_name(base + ".reactive.json")
+            _write(view, _json.dumps(build_reactive_view(machine),
+                                     indent=args.indent) + "\n")
+            print(f"[{source_name}] wrote {view}", file=sys.stderr)
     else:
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
-        if out_path is None:
-            print(text)          # stdout carries the bundle only - one stream, one doc
-        else:
-            _write(out_path, text + "\n")
-            print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
-            # A plain run yields the four JSON views of one program, each answering a
-            # different question: the faithful machine (what it does), the business
-            # distillation (which steps matter), the lineage table (where each field's
-            # value came from), and the reactive machine (what replaces it). All four are
-            # things you READ or DRAW - the runnable modules stay behind their own
-            # --target. Each is opt-out-able.
-            _write_business_companion(out_path)
-            _write_lineage_companion(out_path)
-            _write_reactive_companion(out_path)
-            _write_artifacts_companion(out_path)
+        _write(out_path, text + "\n")
+        print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+        # A plain run yields the six JSON views of one program, each answering a
+        # different question: the faithful machine (what it does), the business
+        # distillation (which steps matter), the lineage table (where each field's value
+        # came from), the reactive machine (what replaces it), the related artifacts
+        # (what else it touches), and the dynamic calls (what it invokes but will not
+        # name). All are things you READ or DRAW - the runnable modules stay behind their
+        # own --target. Each is opt-out-able.
+        _write_business_companion(out_path)
+        _write_lineage_companion(out_path)
+        _write_reactive_companion(out_path)
+        _write_artifacts_companion(out_path)
+        _write_dynamic_companion(out_path)
 
     if args.summary:
         n_states = len(machine.config.get("states", {}))

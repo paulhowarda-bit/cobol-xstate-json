@@ -74,6 +74,14 @@ class DataItem:
     redefines: Optional[str] = None
     parent: Optional[str] = None
     is_group: bool = False
+    # Two clauses that change BYTE LAYOUT and nothing else, which is why they are kept
+    # even though no other stage reads them. SYNCHRONIZED inserts slack bytes so a COMP
+    # item starts on a halfword/fullword boundary; SIGN IS SEPARATE gives a signed
+    # DISPLAY number an extra byte for its sign. Without them, a computed field offset
+    # can be silently wrong - and a wrong offset looks exactly like a right one, which
+    # is the failure `storage.py` refuses to risk (see its `provable` contract).
+    sync: bool = False
+    sign_separate: bool = False
     condition_values: List[str] = field(default_factory=list)  # 88-level singleton VALUE(s)
     condition_ranges: List[List[str]] = field(default_factory=list)  # 88-level [lo, hi] THRU
     cond_parent: Optional[str] = None                          # 88-level's data item
@@ -228,6 +236,10 @@ def parse_data_division(lines: List[CodeLine]):
         rm = re.search(r"\bREDEFINES\b\s+([A-Z0-9-]+)", rest, re.I)
         if rm:
             item.redefines = rm.group(1).upper()
+        # Layout-only clauses. Matched on the whole-word abbreviations COBOL allows
+        # (SYNC / SYNCHRONIZED, and SIGN [IS] {LEADING|TRAILING} SEPARATE [CHARACTER]).
+        item.sync = bool(re.search(r"\bSYNC(?:HRONIZED)?\b", rest, re.I))
+        item.sign_separate = bool(re.search(r"\bSEPARATE\b(?:\s+CHARACTER)?", rest, re.I))
 
         if level == 88:
             # condition-name: collect its VALUE(s); parent is the last elementary item.

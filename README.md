@@ -38,27 +38,32 @@ Pure standard library — **no runtime dependencies**, no build step. Python ≥
 ## Usage
 
 ```bash
-cobol-xstate prog.cbl                              # -> 4 JSON views (see below)
+cobol-xstate prog.cbl                              # -> out/... (see below)
 cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir created)
 cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
-cobol-xstate prog.cbl -o out/custom.json           # exact path (overrides --outdir/name)
-cobol-xstate prog.cbl -o -                          # write the bundle to stdout instead
 cobol-xstate prog.cbl --no-business --no-lineage --no-reactive --no-artifacts  # bundle only
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
 cobol-xstate prog.cbl --format free                # force free-format source
-cobol-xstate prog.cbl --target js                  # -> ./prog.mjs (+ cobolRuntime.mjs)
+cobol-xstate prog.cbl --target js                  # -> out/prog.mjs (+ cobolRuntime.mjs)
 cobol-xstate prog.cbl --target lineage             # the lineage table on its own
-cobol-xstate prog.cbl --target business            # -> ./prog.business.json (+ lineage)
+cobol-xstate prog.cbl --target business            # -> out/prog.business.json (+ lineage)
 cobol-xstate prog.cbl --target artifacts           # the related-artifact manifest on its own
-cobol-xstate prog.cbl -I copybooks -I shared/cpy   # copybook search paths for COPY
-cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch   # ...or your artifact service
-cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch \
-             --fetch-deps deps --fetch-depth 3   # fetch EVERY dependency, transitively
+cobol-xstate prog.cbl -I copybooks -I shared/cpy   # extra local copybook search paths
+cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch   # override the estate client
 ```
 
-A default run writes **five JSON files** — five views of the same program, each answering
-a different question:
+**Every run retrieves its dependencies. There is no flag for it.** Before parsing, the
+tool pulls the copybooks and control members that complete the source text through your
+estate's artifact service (`cast_clients.mf_fetch` by default — only the estate knows
+where its members live); after parsing, it fetches the artifacts the program depends on.
+It works in that order because a copybook that does not arrive takes its `VALUE` clauses
+out of the model, which turns a resolvable dynamic `CALL` target into an unresolved
+runtime name — so the program it calls is never even a row to fetch. Nothing errors; the
+answer is just quietly short. See [docs/fetch-stages.md](docs/fetch-stages.md).
+
+A default run writes **eight JSON files** — six views of the same program, each answering
+a different question, plus an account of both retrieval stages:
 
 | File | Answers |
 |---|---|
@@ -67,17 +72,22 @@ a different question:
 | `prog.lineage.json` | **Where did each value come from, and under what condition?** One row per (external event, field): the event each value originates from, plus the guards that govern the write. |
 | `prog.reactive.json` | **What replaces it?** The event-driven machine: its `on` waits and `publish_*` effects are the new system's message contract. |
 | `prog.artifacts.json` | **What else does it touch?** The related-artifact manifest: the Db2 tables, files/datasets, called programs and queues it touches at run time, plus the copybooks (`COPY` / `EXEC SQL INCLUDE`) it is built from — each with the resolution chain (JCL, CSD, DDL, binder, SYSLIB) its program-local name still needs. See [docs/artifacts-target.md](docs/artifacts-target.md). |
-| `prog.fetch.json` | **Did we actually get them?** (`--fetch-deps`) One row per dependency with the outcome of retrieving it through your estate's artifact service — `fetched` / `not-found` / `error` / `skipped`, the last carrying the reason a row was never fetchable. |
+| `prog.dynamic-calls.json` | **What does it call that it won't name?** The true dynamic calls — targets decided at run time — and, for each, *which artifact the name is read from* and how it travels from there to the CALL: the verb, the field (or Db2 column), and every assignment in between. It never guesses the target; it names the control file/table where the real call graph is written down. See [docs/dynamic-calls.md](docs/dynamic-calls.md). |
+| `prog.prefetch.json` | **Could we see the whole program?** Stage 1: the copybooks and control members retrieved *before* the parse, each with the library it came from. Anything absent here is a hole in every view above it — so the holes are named, not counted. |
+| `prog.fetch.json` | **Did we actually get its dependencies?** Stage 2: one row per dependency with the outcome of retrieving it — `fetched` / `prefetched` / `not-found` / `error` / `no-service` / `skipped`. The distinctions are load-bearing: `error` is fixable and is *not* evidence the artifact is absent, and `skipped` carries the reason a row was never fetchable at all. |
 
-Four of the five are things you **read or draw** (all are renderable `xstate-v5-config`, bar
-the lineage and artifact tables). The **runnable** modules stay behind their own flag:
+Four of the six are things you **read or draw** (all are renderable `xstate-v5-config`, bar
+the lineage, artifact and dynamic-call tables). The **runnable** modules stay behind their own flag:
 `--target js` for the decimal-exact reference, `--target reactive` for the deployable module.
 
-Use `--outdir` to choose the directory (created if absent), `-o PATH` for an exact path
-(companions follow it), or `-o -` to stream the bundle to stdout. Opt out with
-`--no-business` / `--no-lineage` / `--no-reactive` / `--no-artifacts`; `--machine-only`
-emits the bare config alone. A program the reactive lowering refuses (CICS handler regions,
-recursive PERFORM) simply gets no `.reactive.json` and a note — the other four still land.
+**Every file a run produces goes into `--outdir`** — the bundle, all six views, both
+retrieval reports, and the artifacts fetched from the estate (under `deps/`). The path is
+taken literally, with nothing appended, and it is the *only* way to place output: nothing
+can write outside it. Default `./out`, created if absent. Opt out of individual views with
+`--no-business` / `--no-lineage` / `--no-reactive` / `--no-artifacts` /
+`--no-dynamic-calls`; `--machine-only` emits the bare config alone. A program the reactive
+lowering refuses (CICS handler regions, recursive PERFORM) simply gets no `.reactive.json`
+and a note — the other five still land.
 
 ### JCL / PROC
 
@@ -86,7 +96,7 @@ in the JCL. Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.p
 with `--jcl`) and it emits two views:
 
 ```bash
-cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl.lineage.json
+cobol-xstate acctunld.jcl        # -> out/acctunld.jcl.artifacts.json + .lineage.json
 ```
 
 - **`.jcl.lineage.json`** — the **dataflow across steps** (step 1 writes a dataset step 2

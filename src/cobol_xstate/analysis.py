@@ -34,6 +34,14 @@ class CallResolution:
     candidates: List[str] = field(default_factory=list)  # all literal possibilities
     has_variable_assignment: bool = False
     reason: str = ""
+    # HOW GOOD the candidates are, which is not the same question as how many there are:
+    #   "assigned"    - a MOVE or a VALUE clause provably stores this literal
+    #   "declared-88" - an 88-level names it as a possible value, but NO SET/MOVE in the
+    #                   visible source proves it is ever stored
+    # Collapsing the two lets a declared-but-never-stored name be reported with the same
+    # confidence as one the program demonstrably moves, which is an overclaim: the first
+    # is what the program was WRITTEN to allow, the second is what it DOES.
+    evidence: Optional[str] = None
 
 
 @dataclass
@@ -57,13 +65,16 @@ class CallAnalysis:
         var = name in self.var_assigns
         if len(lits) == 1 and not var:
             return CallResolution(True, lits[0], lits, False,
-                                  f"only literal reaching {name} is '{lits[0]}'")
+                                  f"only literal reaching {name} is '{lits[0]}'",
+                                  evidence="assigned")
         if lits and not var:
             return CallResolution(False, None, lits, False,
-                                  f"{name} may be one of {lits}; verify reaching definition")
+                                  f"{name} may be one of {lits}; verify reaching definition",
+                                  evidence="assigned")
         if lits and var:
             return CallResolution(False, None, lits, True,
-                                  f"{name} set to {lits} and also to a variable; runtime-determined")
+                                  f"{name} set to {lits} and also to a variable; runtime-determined",
+                                  evidence="assigned")
         if var:
             return CallResolution(False, None, [], True,
                                   f"{name} set only from variables; target runtime-determined")
@@ -72,7 +83,8 @@ class CallAnalysis:
             return CallResolution(False, None, c88, False,
                                   f"{name} carries 88-level condition value(s) {c88} "
                                   f"but no SET ... TO TRUE or MOVE in the visible "
-                                  f"source proves which reaches; verify")
+                                  f"source proves which reaches; verify",
+                                  evidence="declared-88")
         if name not in self.declared:
             hint = (f" - likely defined (with its VALUE) in a missing copybook "
                     f"({', '.join(self.missing_copybooks)})"

@@ -218,12 +218,18 @@ def test_report_shape_is_still_there_for_reading():
 # CLI: distinct names, and the lineage companion
 # --------------------------------------------------------------------------- #
 
+def _run_dir(root):
+    """Where a run writes: --outdir itself, taken literally with nothing appended."""
+    return Path(root)
+
+
 def test_business_target_writes_its_own_name_and_the_lineage_companion(tmp_path):
     from cobol_xstate.cli import run
     src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
     assert run([str(src), "--target", "business", "--outdir", str(tmp_path)]) == 0
-    assert (tmp_path / "banktran.business.json").exists()   # not banktran.json
-    assert (tmp_path / "banktran.lineage.json").exists()    # the companion travels too
+    d = _run_dir(tmp_path)
+    assert (d / "banktran.business.json").exists()   # not banktran.json
+    assert (d / "banktran.lineage.json").exists()    # the companion travels too
 
 
 def test_business_does_not_clobber_the_default_bundle(tmp_path):
@@ -232,8 +238,9 @@ def test_business_does_not_clobber_the_default_bundle(tmp_path):
     assert run([str(src), "--outdir", str(tmp_path)]) == 0
     assert run([str(src), "--target", "business", "--outdir", str(tmp_path)]) == 0
     import json
-    bundle = json.loads((tmp_path / "banktran.json").read_text(encoding="utf-8"))
-    view = json.loads((tmp_path / "banktran.business.json").read_text(encoding="utf-8"))
+    d = _run_dir(tmp_path)
+    bundle = json.loads((d / "banktran.json").read_text(encoding="utf-8"))
+    view = json.loads((d / "banktran.business.json").read_text(encoding="utf-8"))
     assert bundle["metadata"].get("view") is None          # the faithful bundle
     assert view["metadata"]["view"] == "business"          # the distillation
 

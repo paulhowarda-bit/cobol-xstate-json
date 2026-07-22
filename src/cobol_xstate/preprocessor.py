@@ -25,45 +25,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, List, Optional, Tuple
 
+from .artifact_service import normalize_fetched      # re-exported: see artifact_service
 from .normalizer import CodeLine, SourceFormat, normalize
 
-
-def normalize_fetched(got, name: str) -> Optional[Tuple[str, str]]:
-    """Coerce whatever an artifact fetcher returned into ``(text, source_label)``.
-
-    Shared by copybook resolution and the dependency-fetch stage so both accept the
-    same client shapes: text, ``(text, source)``, or a dict carrying text and/or a
-    path. ``None`` means "not retrievable" - never a guess."""
-    if got is None or got is False:
-        return None
-    if isinstance(got, str):
-        return (got, f"<fetched {name}>") if got.strip() else None
-    if isinstance(got, (tuple, list)):
-        if not got:
-            return None
-        text = got[0]
-        src = str(got[1]) if len(got) > 1 and got[1] else f"<fetched {name}>"
-        return (str(text), src) if str(text).strip() else None
-    if isinstance(got, dict):
-        if got.get("found") is False:
-            return None
-        src = next((str(got[k]) for k in
-                    ("source_path", "path", "copied_to", "source_location", "file")
-                    if got.get(k)), f"<fetched {name}>")
-        for k in ("text", "content", "source", "data", "body"):
-            v = got.get(k)
-            if isinstance(v, str) and v.strip():
-                return v, src
-        # No inline text: a fetch-to-disk client that only reports where it landed.
-        # Read the local copy, but label it with `src` - a local cache path is not
-        # the member's identity; the library it came FROM is.
-        for k in ("copied_to", "path", "source_path", "file"):
-            p = got.get(k)
-            if isinstance(p, str) and os.path.isfile(p):
-                with open(p, "r", errors="replace") as f:
-                    return f.read(), src
-        return None
-    return None
+__all__ = ["normalize_fetched", "CopybookResolver", "PreprocessResult", "preprocess",
+           "scan_copy_members"]
 
 
 @dataclass
@@ -88,12 +54,20 @@ class CopybookResolver:
     ``found: False`` dict is honored as "not found". Results are cached per name, so a
     member COPYed twice costs one fetch. An exception from the fetcher is swallowed
     into "not found" and noted - a flaky external service must not crash a batch run,
-    and the missing copybook is already flagged loudly downstream."""
+    and the missing copybook is already flagged loudly downstream.
+
+    ``store`` is the prefetch stage's result: members already retrieved from the estate
+    before the parse began (``prefetch.py``). It is consulted FIRST - ahead of the local
+    paths and the fetcher - because it is the same member, already paid for. This is
+    what makes the parse that drives the dependency manifest a parse with no holes in
+    it, which is the whole reason prefetch runs first."""
 
     paths: List[str] = field(default_factory=list)
     exts: Tuple[str, ...] = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     missing: str = "continue"  # 'continue' (stub + note) | 'error'
     fetcher: Optional[Callable[[str], object]] = None
+    # UPPERCASED member name -> (text, source), from the prefetch stage.
+    store: dict = field(default_factory=dict)
     # name -> (text, source) | None, so a repeated COPY does not re-hit the service.
     _cache: dict = field(default_factory=dict, repr=False)
     # Fetcher failures, surfaced by the caller if it wants them (name, message).
@@ -101,6 +75,9 @@ class CopybookResolver:
 
     def resolve(self, name: str) -> Optional[Tuple[str, str]]:
         name = name.strip().strip("'\"")
+        hit = self.store.get(name.upper())
+        if hit is not None:
+            return hit
         for base in self.paths or ["."]:
             for ext in self.exts:
                 candidate = os.path.join(base, name + ext)
@@ -197,6 +174,39 @@ def _gather_statement(lines: List[CodeLine], i: int):
         j += 1
         parts.append(lines[j].text)
     return " ".join(parts), j + 1
+
+
+def scan_copy_members(text: str, fmt: Optional[SourceFormat] = None) -> List[str]:
+    """Every member a ``COPY`` / ``EXEC SQL INCLUDE`` in ``text`` names, uppercased and
+    de-duplicated, in source order.
+
+    This is the prefetch stage's discovery pass, and it deliberately shares
+    :data:`_COPY_RE` / :data:`_SQL_INCLUDE_RE` and :func:`_gather_statement` with
+    :func:`preprocess` rather than re-implementing them. A second copy of this grammar
+    would drift, and the failure mode of drift here is the quiet one: a COPY form the
+    scanner misses is a member never prefetched, hence a data item never declared, hence
+    a dynamic CALL that silently does not resolve.
+
+    It resolves nothing and fetches nothing - it only reads the text it was given, which
+    is what lets it run BEFORE anything has been retrieved."""
+    lines = normalize(text, fmt)
+    found: List[str] = []
+    seen: set = set()
+    i = 0
+    while i < len(lines):
+        up = lines[i].text.upper()
+        if "COPY" in up or ("INCLUDE" in up and _SQL_INCLUDE_PROBE.search(up)):
+            stmt, nxt = _gather_statement(lines, i)
+            m = _COPY_RE.search(stmt) or _SQL_INCLUDE_RE.search(stmt)
+            if m:
+                member = m.group(1).strip().strip("'\"").upper()
+                if member and member not in seen:
+                    seen.add(member)
+                    found.append(member)
+                i = nxt
+                continue
+        i += 1
+    return found
 
 
 def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = None,

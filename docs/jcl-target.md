@@ -32,9 +32,15 @@ Cataloged PROCs, `INCLUDE` members, and control-card datasets
 (`//SYSIN DD DSN=PARM.LIB(SORTCRD)`) live outside the JCL file. This module does **not**
 fetch them - you pass ``resolver``, a function ``resolver(name) -> text | None``, and it
 substitutes what you return. Anything the resolver cannot return is **flagged, never
-guessed** - the same rule the COBOL side follows for a missing copybook. The CLI passes no
-resolver, so from the CLI those members are listed and flagged; wire the function in via the
-Python API to resolve them.
+guessed** - the same rule the COBOL side follows for a missing copybook.
+
+The CLI supplies this resolver from the prefetch stage, which retrieves those members
+through the estate's artifact service *before* the parse and re-parses until the job stops
+asking for members it has not got (see [fetch-stages.md](fetch-stages.md)). That ordering
+is what makes `EXEC PGM=` steps inside a cataloged PROC visible at all: parsed without the
+PROC, a job whose only statement is `EXEC PAYPROC` has no programs and no datasets, and
+says so without erroring. From the Python API, `parse_jcl(resolver=...)` remains yours to
+supply — `prefetch_jcl(...).resolver()` is what the CLI hands it.
 
 ## What the lineage view answers
 

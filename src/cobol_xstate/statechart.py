@@ -100,6 +100,12 @@ class Machine:
     # COPY / EXEC SQL INCLUDE dependencies (member/status/via/replacing) - a compile-time
     # source dependency the related-artifact manifest lists.
     copybooks: List[dict] = field(default_factory=list)
+    # Data item -> why its dynamic CALL target could not be resolved, and the literals
+    # that do reach it. The build already computes this (to decide whether to resolve the
+    # target at all) and used to discard it, leaving downstream views to re-derive - or,
+    # worse, to parse it back out of a prose flag. `dynamic_calls` reads it to say WHY a
+    # target is unresolvable, which is a different and more useful fact than THAT it is.
+    unresolved_calls: Dict[str, dict] = field(default_factory=dict)
     _iface_cache: Optional[dict] = field(default=None, repr=False, compare=False)
 
     def interface(self) -> dict:
@@ -186,6 +192,9 @@ class _BuildCtx:
     # altered-paragraph -> ordered candidate exit targets (orig GO TO + PROCEED-TOs)
     alter_targets: Dict[str, List[str]] = field(default_factory=dict)
     context: Dict[str, object] = field(default_factory=dict)
+    # Dynamic CALL/resource targets the analysis could NOT resolve: item -> the reason
+    # and the literals that do reach it. Recorded where the decision is actually made.
+    unresolved_calls: Dict[str, dict] = field(default_factory=dict)
     action_sem: Dict[str, dict] = field(default_factory=dict)  # action name -> operation
     guard_sem: Dict[str, dict] = field(default_factory=dict)   # guard name  -> condition tree
     flags: List[dict] = field(default_factory=list)
@@ -293,6 +302,12 @@ def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
             f"CALL {st.target} -> resolved '{res.resolved}' ({res.reason}){args}", st.line)
     # Unresolved or ambiguous: keep the identifier name and flag it.
     ctx.flag(para, st.line, f"dynamic CALL {st.target} - {res.reason}")
+    ctx.unresolved_calls.setdefault(st.target.upper(), {
+        "reason": res.reason,
+        "candidates": list(res.candidates or []),
+        "hasVariableAssignment": bool(res.has_variable_assignment),
+        "evidence": res.evidence,
+    })
     return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}{args}", st.line)
 
 
@@ -538,6 +553,12 @@ class _ParaCompiler:
                     self.ctx.flag(self.pname, st.line,
                                   f"dynamic CICS {st.verb} {opt}({operand}) - "
                                   f"{res.reason}")
+                    self.ctx.unresolved_calls.setdefault(operand.upper(), {
+                        "reason": res.reason,
+                        "candidates": list(res.candidates or []),
+                        "hasVariableAssignment": bool(res.has_variable_assignment),
+                        "evidence": res.evidence,
+                    })
         return out
 
     def _exec_action(self, st: ExecStmt) -> str:
@@ -1082,6 +1103,12 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
             entry["occurs"] = it.occurs
         if getattr(it, "occurs_depending", None):
             entry["occursDependingOn"] = it.occurs_depending
+        # Layout-only clauses, carried so `storage.py` can tell a provable byte offset
+        # from one it must withhold.
+        if getattr(it, "sync", False):
+            entry["sync"] = True
+        if getattr(it, "sign_separate", False):
+            entry["signSeparate"] = True
         if it.value is not None:
             entry["value"] = it.value
         if it.is_group:
@@ -1320,4 +1347,5 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         returning=program.returning,
         files=program.files,
         copybooks=program.copybooks,
+        unresolved_calls=ctx.unresolved_calls,
     )
