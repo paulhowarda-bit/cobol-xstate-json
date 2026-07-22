@@ -39,7 +39,6 @@ class CodeLine:
 
 
 # Area boundaries for fixed format (1-based, inclusive) translated to 0-based slices.
-_SEQ = slice(0, 6)        # cols 1-6  sequence number area
 _IND = 6                  # col 7     indicator area
 _CODE = slice(7, 72)      # cols 8-72 Area A (8-11) + Area B (12-72)
 
@@ -203,11 +202,6 @@ def detect_source_format(source: str) -> FormatDetection:
                                f"program text in column 7 on {violations}/{n} line(s)")
     return FormatDetection(SourceFormat.FIXED, 0.6 if violations else 0.7,
                            "no free-format signal; defaulted to fixed (z/OS norm)")
-
-
-def _detect_format(raw_lines: List[str]) -> SourceFormat:
-    """Back-compat shim: return just the format enum (see ``detect_source_format``)."""
-    return detect_source_format("\n".join(raw_lines)).format
 
 
 def _fixed_code(raw: str) -> Optional[str]:
