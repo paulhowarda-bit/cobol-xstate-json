@@ -41,7 +41,7 @@ reacting to a subsystem, not a second thing it touches - so they are dropped fro
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from .interface import build_interface
 from .statechart import Machine

@@ -59,10 +59,6 @@ def _dd_dataset(dd: DD) -> Optional[DDSegment]:
     return None
 
 
-def _generation(seg: DDSegment) -> Optional[str]:
-    return seg.gdg
-
-
 def _dd_rows(job: Job):
     """Yield (step, dd, seg_or_None, io) for every DD in the job."""
     for step in job.steps:

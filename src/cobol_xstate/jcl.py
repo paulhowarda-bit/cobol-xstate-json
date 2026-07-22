@@ -56,12 +56,6 @@ class DDSegment:
     unresolved_symbols: List[str] = field(default_factory=list)
     raw: str = ""
 
-    @property
-    def gdg_base(self) -> Optional[str]:
-        """The DSN with a relative generation stripped - the stable join identity."""
-        return self.dsn
-
-
 @dataclass
 class DD:
     ddname: str
@@ -396,7 +390,6 @@ def _classify_utility(pgm: Optional[str], lines: List[str]) -> Optional[str]:
     return None
 
 
-_POS_FIELD = re.compile(r"^(\d+),(\d+)")
 
 
 _INT = re.compile(r"^\d+$")
@@ -688,7 +681,7 @@ class _Parser:
                 self.job.name = log.name
                 idx += 1
                 continue
-            if op == "PROC" and log.name and not self._looks_like_exec_proc(log):
+            if op == "PROC" and log.name:
                 # //NAME PROC ... PEND  (definition). Capture defaults.
                 defaults, _ = _operand_map(log.operands)
                 pd = ProcDef(name=log.name, defaults={k: v for k, v in defaults.items()})
@@ -785,9 +778,6 @@ class _Parser:
                 st.cond_parsed = _parse_cond(st.cond)
 
     # -- helpers ------------------------------------------------------------
-    def _looks_like_exec_proc(self, log: _LogLine) -> bool:
-        return False   # PROC as an operation keyword is always a definition here
-
     def _last_dd(self, step: Optional[Step], log: _LogLine) -> Optional[DD]:
         if step is None or not step.dds:
             return None
@@ -971,22 +961,3 @@ def _parse_proc_member(text: str, procname: str) -> ProcDef:
 # --------------------------------------------------------------------------- #
 # after-parse enrichment: classify control cards on utility steps
 # --------------------------------------------------------------------------- #
-
-def attach_control_cards(job: Job) -> None:
-    """For each step, parse the control cards of a SYSIN-style DD into ``dd.control`` and
-    resolve a control-card DATASET (``//SYSIN DD DSN=PARM.LIB(SORTCRD)``) via the resolver
-    where one was supplied. Idempotent."""
-    for step in job.steps:
-        for dd in step.dds:
-            lines = list(dd.instream_lines)
-            if not lines and dd.segments:
-                seg = dd.segments[0]
-                if seg.dsn and dd.ddname in ("SYSIN", "SORTIN", "TOOLIN", "SYSTSIN"):
-                    # a control-card member; caller must have resolved it earlier, so this
-                    # only records the reference - resolution is done at parse via resolver
-                    # if wired; left as a note here.
-                    pass
-            if lines:
-                ctl = _parse_control_cards(step.pgm, lines)
-                if ctl:
-                    dd.control = ctl
