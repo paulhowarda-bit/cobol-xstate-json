@@ -683,7 +683,8 @@ def _cursor_columns(semantics: dict, provenance: dict) -> Dict[str, List[str]]:
 def build_interface(config: dict, semantics: dict, provenance: dict,
                     data: Optional[dict] = None, using: Optional[List[str]] = None,
                     returning: Optional[str] = None,
-                    files: Optional[Dict[str, dict]] = None) -> dict:
+                    files: Optional[Dict[str, dict]] = None,
+                    internal_programs: Optional[set] = None) -> dict:
     """Return the external-interface overlay: events, per-state get/create, endpoints,
     and the program's own parameter interface.
 
@@ -692,10 +693,16 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     fields crossing. The program entry's LINKAGE / ``PROCEDURE DIVISION USING`` /
     ``RETURNING`` (its COMMAREA / parameters) is the perimeter at the entry point and
     is surfaced under ``parameters``.
+
+    ``internal_programs`` names the programs CONTAINED in this source (nested
+    ``PROGRAM-ID``): a CALL / LINK / XCTL to one of them is an INTERNAL call, so the
+    program endpoint it produces is tagged ``internal`` rather than presented as an
+    external module dependency.
     """
     actions = (semantics or {}).get("actions", {})
     guards = (semantics or {}).get("guards", {})
     files = files or {}
+    internal_programs = {str(p).upper() for p in (internal_programs or ())}
     dv = _DataView(data)
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
@@ -735,7 +742,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
         # one came through, `candidates` the literals an ambiguous one may be.
-        for k in ("dynamic", "via", "candidates"):
+        for k in ("dynamic", "via", "candidates", "internal"):
             if hit.get(k):
                 entry[k] = hit[k]
         events.append(entry)
@@ -747,7 +754,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         ep = endpoints.setdefault(hit["endpoint"], {"type": hit["etype"], "directions": []})
         if hit["direction"] not in ep["directions"]:
             ep["directions"].append(hit["direction"])
-        for k in ("dynamic", "via", "candidates"):
+        for k in ("dynamic", "via", "candidates", "internal"):
             if hit.get(k):
                 ep.setdefault(k, hit[k])
         fc = files.get(hit["endpoint"])
@@ -763,6 +770,14 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             line = prov.get("line", 0)
             spec = actions.get(aname)
             hits = _classify(aname, cobol, spec, dv, files, cursors, cursor_cols)
+            if internal_programs:
+                # A CALL / LINK / XCTL to a program contained in this source is internal:
+                # tag its program endpoint so downstream views list it as an internal call,
+                # not chase it as a missing external module.
+                for hit in hits:
+                    if (hit.get("etype") == _PROGRAM
+                            and str(hit.get("endpoint", "")).upper() in internal_programs):
+                        hit["internal"] = True
             for hit in hits:
                 add(state, region, hit, line, cobol)
             if not hits:

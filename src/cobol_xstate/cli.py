@@ -587,6 +587,19 @@ def _run(args) -> int:
                 io.append("creates " + ", ".join(d["creates"]))
             _log.info(f"  PERIMETER {state} [{d['region']}] ({d.get('perimeter', '?')}): "
                   f"{'; '.join(io)}")
+        # Every called program, grouped by classification - which callees are contained
+        # here, which are IBM runtime, which resolved to real source, and which remain
+        # unresolved (not yet figured out). The roster a migration planner reads first.
+        progs = [r for r in report.get("artifacts", []) if r.get("kind") == "program"]
+        if progs:
+            groups = {}
+            for r in progs:
+                label = r.get("subsystem") or r.get("classification") or "unresolved"
+                groups.setdefault(label, []).append(str(r.get("artifact", "")))
+            _log.info("  called programs:")
+            for label in sorted(groups):
+                names = ", ".join(sorted(set(groups[label])))
+                _log.info(f"    {label:18} {names}")
         for f in machine.flags:
             _log.info(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}")
 

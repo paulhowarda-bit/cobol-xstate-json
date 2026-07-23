@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from .classify import CATEGORY_INTERNAL, NON_FETCHABLE, classify_call_target
 from .interface import build_interface
 from .statechart import Machine
 
@@ -239,6 +240,12 @@ def build_artifacts(machine: Machine) -> dict:
     missing_cbs = [str(cb.get("member", "")).upper()
                    for cb in (getattr(machine, "copybooks", None) or [])
                    if cb.get("status") == "missing"]
+    # Signals for classifying each called program (see classify.py): programs contained in
+    # this source (a CALL to one is internal), the program's copybooks (a CMQ* member
+    # corroborates MQ), and whether it uses EXEC SQL (corroborates a Db2 interface module).
+    internal_programs = getattr(machine, "nested_programs", None) or []
+    prog_copybooks = getattr(machine, "copybooks", None) or []
+    uses_sql = any(e.get("type") == "db2" for e in endpoints.values())
     for name, ep in endpoints.items():
         etype = ep["type"]
         if etype in _NON_ARTIFACT:
@@ -346,6 +353,29 @@ def build_artifacts(machine: Machine) -> dict:
                 row["resolvedBy"] = cls["resolver"]
             if cls["needs"] is not None:
                 row["needs"] = cls["needs"]
+
+        # Classify a called program (static). A dynamic target is a data item, not a
+        # program name, so it is not classified by name. `fetch` may later refine an
+        # `unresolved` static result to cobol-program / assembler-program.
+        if etype == "program" and not ep.get("dynamic"):
+            info = classify_call_target(
+                name, internal_programs=internal_programs,
+                copybooks=prog_copybooks, uses_sql=uses_sql)
+            row["classification"] = info["category"]
+            if info.get("subsystem"):
+                row["subsystem"] = info["subsystem"]
+            row["classificationReason"] = info["reason"]
+            if info["category"] in NON_FETCHABLE:
+                # A contained program or an IBM runtime API has no application source to
+                # retrieve - say so, rather than pointing at a binder/link-edit that will
+                # never produce it.
+                if info["category"] == CATEGORY_INTERNAL:
+                    row["identity"] = "internal"
+                    row["resolvedBy"] = "contained in this source (nested PROGRAM-ID)"
+                else:
+                    row["identity"] = "runtime"
+                    row["resolvedBy"] = "IBM subsystem runtime library"
+                row.pop("needs", None)
 
         artifacts.append(row)
 

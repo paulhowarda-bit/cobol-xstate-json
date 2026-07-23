@@ -253,6 +253,11 @@ class Program:
     # {member, status, via, replacing}. A compile-time source dependency, not a runtime
     # endpoint - carried so the related-artifact manifest can list copybooks.
     copybooks: List[dict] = field(default_factory=list)
+    # Names of programs CONTAINED in this source (nested `PROGRAM-ID ... END PROGRAM`,
+    # or a sibling compilation unit in the same member). A CALL to one of these is an
+    # INTERNAL call, not an external dependency - so the classifier can tell a contained
+    # program (e.g. USEMQ inside FBBMQPNT) apart from a missing external module.
+    nested_programs: List[str] = field(default_factory=list)
 
 
 def walk_statements(stmts: List[Stmt]):
