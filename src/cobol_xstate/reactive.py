@@ -444,17 +444,34 @@ class _Rewriter:
                                 self.dv, self.files, self.cursors)
         return any(h["direction"] == "create" for h in hits)
 
+    def _is_read(self, a: str) -> bool:
+        return _read_action(a, self.provenance, self.actions,
+                            self.dv, self.files, self.cursors)
+
     def _make_data_wait(self, states: dict, name: str, ev: dict) -> None:
         st = states[name]
-        # drop the synchronous read; keep other entry actions (MOVE, etc.)
-        st["entry"] = [a for a in (st.get("entry", []) or [])
-                       if not _read_action(a, self.provenance, self.actions,
-                                           self.dv, self.files, self.cursors)]
-        if not st["entry"]:
+        entry = st.get("entry", []) or []
+        # Split the folded run at the synchronous read. Actions BEFORE it run on the way
+        # IN, before the wait; actions AFTER it CONSUME the record just read, so they must
+        # run when it ARRIVES, not on entry. Leaving them on entry - as this did - ran the
+        # whole `READ; process; WRITE` body before any record existed: the classic
+        # read-process-write paragraph published stale, empty data every cycle, unflagged.
+        # (The reordered publish that _make_publish appended sits after the read too, so it
+        # rides into the handler with the rest.) Any further read in the tail is dropped;
+        # _split_multi_gets has already given it its own state.
+        read_pos = next((i for i, a in enumerate(entry) if self._is_read(a)), None)
+        if read_pos is None:
+            before, after = list(entry), []          # defensive: nothing to await here
+        else:
+            before = entry[:read_pos]
+            after = [a for a in entry[read_pos + 1:] if not self._is_read(a)]
+        if before:
+            st["entry"] = before
+        else:
             st.pop("entry", None)
         recv = self._recv_action(ev["event"], ev.get("fields", []))
         target = self._detach_outgoing(states, name)
-        st["on"] = {ev["event"]: {"actions": [recv], "target": target}}
+        st["on"] = {ev["event"]: {"actions": [recv, *after], "target": target}}
         self._add_inbound(ev["event"])
 
         # A sequential read's stream can END. COBOL learns that through AT END, which the
@@ -462,6 +479,8 @@ class _Rewriter:
         # flag. Under push there is no return code to inspect - end-of-stream has to
         # arrive as its own event, whose recv raises exactly that flag. It shares the
         # GET handler's target, so the parked AT END edges then branch as they always did.
+        # The post-read processing is deliberately NOT replayed here: at end-of-stream no
+        # record was delivered, so there is nothing to process.
         if ev["endpointType"] == "file" and _is_read_verb(ev.get("verb", "")):
             end_event = f"END.FILE.{ev['endpoint']}"
             end_recv = "recv_" + _event_slug(end_event)
