@@ -316,6 +316,61 @@ def call_service_probing(fetcher: Callable, name: str, type_order,
     return None
 
 
+def call_service_many(fetcher: Callable, requests, jobs: int = 1,
+                      copy_to: Optional[str] = None) -> List[object]:
+    """Ask the service for several members at once, and answer **in request order**.
+
+    A member is one network round-trip and the round-trips do not depend on each other,
+    so serializing them means the run costs the SUM of the estate's latencies when it
+    could cost the maximum. That is the whole of what this function changes: which calls
+    overlap. It decides nothing, records nothing, and writes no file.
+
+    ``requests`` is ``[(name, want), ...]`` where ``want`` is a type hint, ``None``, or a
+    sequence of types to probe in order (dispatching to :func:`call_service_probing`, so
+    a probe chain still runs sequentially *within* its own member and "the type that
+    retrieved it is the finding" is unchanged). Names must already be distinct - the
+    caller dedupes, because whether a repeated name is one round-trip is a question about
+    that caller's report, not about this call.
+
+    **Order is the request's, never completion's.** Every caller here turns these results
+    into a report whose row order is part of its output contract, so returning them in the
+    order they finished would make the bytes depend on the estate's timing. Results come
+    back positionally; the caller applies them in its own order afterwards.
+
+    Each result is a ``Fetched``, ``None`` (asked and had nothing), or a **captured**
+    ``ServiceUnavailable`` - captured rather than raised, because one member failing must
+    not discard the results of the members that succeeded. The caller re-raises it at that
+    member's own row, so each row still records its own distinct reason. Anything that is
+    not a service failure propagates: that would be a defect here, not a fact about the
+    estate.
+
+    ``jobs <= 1`` runs the identical calls in a plain loop and never imports, or starts,
+    a thread - so it is a genuine escape hatch for a client that is not thread-safe, not
+    a pool of one.
+    """
+    reqs = list(requests)
+
+    def one(req):
+        name, want = req
+        try:
+            if isinstance(want, (list, tuple, set, frozenset)):
+                return call_service_probing(fetcher, name, list(want), copy_to)
+            return call_service(fetcher, name, want, copy_to)
+        except ServiceUnavailable as exc:
+            return exc
+
+    if jobs <= 1 or len(reqs) <= 1:
+        return [one(r) for r in reqs]
+
+    # Imported here, not at module scope: the sequential path above is the fallback for a
+    # client that cannot take concurrency, and it should not so much as load the machinery.
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(jobs, len(reqs))) as pool:
+        # `map` yields positionally, which is the ordering guarantee above.
+        return list(pool.map(one, reqs))
+
+
 # Extension used when this tool saves a retrieved member locally, keyed by the estate's
 # own type vocabulary. Both stages save through here so a member retrieved as a copybook
 # in stage 1 and referenced as one in stage 2 lands under one name, not two.
