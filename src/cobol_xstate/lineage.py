@@ -195,6 +195,7 @@ class _Lineage:
         self.fold_dst: Dict[str, List[str]] = {}
         self.succs = self._successors()
         self.guards = machine.semantics.get("guards", {}) or {}
+        self.guard_kinds = machine.semantics.get("guardKinds", {}) or {}
         self.guard_line: Dict[str, int] = {}
         self.edge_cond = self._edge_conditions()
         self.entries = self._entries()
@@ -480,7 +481,8 @@ class _Lineage:
                 d["unrecoverable"] = True
             else:
                 d["expr"] = text
-                d["kind"] = "control" if _is_control_guard(name, tree) else "business"
+                d["kind"] = ("control" if _is_control_guard(name, tree, self.guard_kinds)
+                             else "business")
             if name in self.guard_line:
                 d["line"] = self.guard_line[name]
             out.append(d)

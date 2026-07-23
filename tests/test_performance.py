@@ -311,11 +311,13 @@ def _goto_chain(n: int):
 
 
 def _reconverging_diamonds(n: int):
-    """n guarded branches that all rejoin, then one boundary state.
+    """n guarded IF/ELSE diamonds that all rejoin, then a boundary.
 
-    `FUNCTION NUMVAL` is an ordinary condition the parser does not model, so its guard is
-    {op:'raw'} and the branch counts as mechanical - which leaves the whole region
-    technical and lets the walk run straight through it, accumulating guards.
+    `FUNCTION NUMVAL` is a real condition the parser does not model, so each guard is
+    {op:'raw'}. Two independent things must hold at once: J11 means a raw guard is a
+    business condition, so each diamond is surfaced as its own DECISION rather than
+    hidden as scaffolding; and the collapse walk must still not enumerate one edge per
+    guard COMBINATION - 2^n through a region that used to (wrongly) collapse into one.
     """
     src = [BIZ_HEAD.rstrip("\n")]
     for i in range(n):
@@ -335,17 +337,24 @@ def test_collapse_walk_survives_a_chain_deeper_than_the_recursion_limit():
     assert view["entry"], "a program with one straight path must have an entry edge"
 
 
-def test_reconverging_guards_do_not_multiply_into_one_edge_per_combination():
-    """Sixteen independent diamonds, one destination: one edge, not 65,536.
+def test_reconverging_diamonds_grow_linearly_not_exponentially():
+    """n independent diamonds must cost O(n) edges, never O(2^n).
 
-    Reaching somewhere under `A and B` says nothing that reaching it unguarded has not
-    already said, so only the minimal guard sets survive.
+    Before, an unparsed condition was misfiled as control, the whole region collapsed to
+    technical, and the walk enumerated every guard subset - 2^16 = 65,536 edges into one
+    state. Now each diamond is a decision the walk stops at (J11), and even a region that
+    did collapse is protected by guard-set subsumption. Either way the count is linear,
+    which two sizes prove and a single size never could: doubling n must not square the
+    edges. No budget flag - this is solved outright, not truncated.
     """
-    view = build_business_view(_reconverging_diamonds(16))
-    assert len(view["entry"]) == 1
-    assert view["entry"][0]["guards"] == [], \
-        "no combination of these guards is needed to get there, so none should be claimed"
-    assert not view["flags"], "this must be solved outright, not truncated by the budget"
+    small = build_business_view(_reconverging_diamonds(8))
+    large = build_business_view(_reconverging_diamonds(16))
+    assert not small["flags"] and not large["flags"]
+    e8, e16 = len(small["transitions"]), len(large["transitions"])
+    assert e16 < 4 * e8, f"edges grew faster than linear: {e8} -> {e16}"
+    # ...and the diamonds are visible as decisions, not collapsed away (J11)
+    decisions = [d for st in large["businessStates"].values() for d in st.get("decisions", [])]
+    assert len(decisions) >= 16, "the unparsed conditions must survive as decisions"
 
 
 def _view_of(name: str):
