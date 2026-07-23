@@ -22,6 +22,12 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Claude Code (personal, per-developer settings: permissions, model, MCP allows).
+# settings.json here carries a local bypassPermissions mode, so it stays out of the repo
+# rather than turning off prompts for everyone who clones.
+.claude/settings.json
+.claude/settings.local.json
+
 # Node (xstate runtime + emitted-machine smoke tests)
 node_modules/
 package-lock.json
