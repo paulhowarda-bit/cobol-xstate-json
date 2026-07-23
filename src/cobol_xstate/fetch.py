@@ -54,6 +54,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .artifact_service import (
     ServiceUnavailable, call_service, call_service_probing, canonical_type, collect)
+from .classify import CATEGORY_ASM, CATEGORY_COBOL, NON_FETCHABLE
 
 # A CALL names a load module but NOT its language: the callee may be COBOL, assembler,
 # PL/I, C, ... So a program dependency is not assumed to be COBOL - it is REQUESTED by
@@ -117,6 +118,13 @@ def _request_name(row: dict) -> tuple:
 
     if kind in _NEVER_FETCHABLE:
         return None, _NEVER_FETCHABLE[kind]
+    # A called program the classifier positively identified as contained-here or an IBM
+    # runtime API has no application source on the estate: skip it rather than probe for a
+    # member that does not exist (see classify.NON_FETCHABLE).
+    if row.get("classification") in NON_FETCHABLE:
+        return None, (row.get("classificationReason")
+                      or f"{name} is classified '{row.get('classification')}' - no "
+                         f"application source to retrieve")
     if row.get("dynamic"):
         why = (f"{name} is a data item whose run-time value names the artifact, "
                f"not the artifact name itself - fetching it would retrieve the "
@@ -169,6 +177,11 @@ def build_fetch_plan(manifest: dict) -> List[dict]:
             "kind": kind,
             "dependency": row.get("dependency"),
         }
+        # Carry the static classification forward so the report lists it and a successful
+        # probe can refine an `unresolved` program to cobol-program / assembler-program.
+        for k in ("classification", "subsystem", "classificationReason"):
+            if row.get(k):
+                entry[k] = row[k]
         if name is None:
             entry.update({"status": "skipped", "reason": reason})
         elif kind == "program":
@@ -360,6 +373,11 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
                     row["languageBasis"] = (
                         "retrieved as " + lang
                         + (f" ({', '.join(earlier)} not present)" if earlier else ""))
+                if row.get("kind") == "program" and lang in ("cobol", "asm"):
+                    # The estate resolved a formerly-`unresolved` program by producing its
+                    # source: it is now classified by the language that retrieved it.
+                    row["classification"] = (
+                        CATEGORY_COBOL if lang == "cobol" else CATEGORY_ASM)
         rows.append(row)
         done[key] = row["status"]
 

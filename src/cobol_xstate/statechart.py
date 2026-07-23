@@ -101,6 +101,9 @@ class Machine:
     # COPY / EXEC SQL INCLUDE dependencies (member/status/via/replacing) - a compile-time
     # source dependency the related-artifact manifest lists.
     copybooks: List[dict] = field(default_factory=list)
+    # Names of programs CONTAINED in this source (nested PROGRAM-ID). A CALL to one is an
+    # internal call, so the classifier tells it apart from a missing external module.
+    nested_programs: List[str] = field(default_factory=list)
     # Data item -> why its dynamic CALL target could not be resolved, and the literals
     # that do reach it. The build already computes this (to decide whether to resolve the
     # target at all) and used to discard it, leaving downstream views to re-derive - or,
@@ -127,7 +130,7 @@ class Machine:
             self._iface_cache = build_interface(
                 self.config, self.semantics, self.provenance,
                 data=self.data, using=self.using, returning=self.returning,
-                files=self.files)
+                files=self.files, internal_programs=set(self.nested_programs))
         return self._iface_cache
 
     def lineage(self):
@@ -1423,5 +1426,6 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         returning=program.returning,
         files=program.files,
         copybooks=program.copybooks,
+        nested_programs=program.nested_programs,
         unresolved_calls=ctx.unresolved_calls,
     )

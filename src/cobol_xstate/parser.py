@@ -103,6 +103,58 @@ def _find_program_id(lines: List[CodeLine]) -> str:
     return "RECOVERED"
 
 
+_PROGRAM_ID_RE = re.compile(r"\bPROGRAM-ID\b\s*\.?\s*([A-Z0-9][A-Z0-9-]*)", re.I)
+_END_PROGRAM_RE = re.compile(r"\bEND\s+PROGRAM\b(?:\s+([A-Z0-9][A-Z0-9-]*))?", re.I)
+
+
+def _split_program_units(lines: List[CodeLine]) -> Tuple[List[CodeLine], List[str]]:
+    """Separate the MAIN (first) program's own lines from any CONTAINED programs.
+
+    IBM COBOL allows nested/contained programs: ``PROGRAM-ID. OUTER.`` may contain
+    ``PROGRAM-ID. INNER. ... END PROGRAM INNER.`` before its own ``END PROGRAM OUTER.``.
+    The whole file is parsed as one program today, so a contained program's DATA/PROCEDURE
+    divisions fold into the outer one (corrupting its recovered logic) and a ``CALL 'INNER'``
+    looks like a missing external module.
+
+    Returns ``(main_lines, contained_names)``: the outer program's own lines with every
+    contained program's body removed, and the names of the contained programs. A source
+    with a single ``PROGRAM-ID`` (the overwhelmingly common case, and every existing
+    fixture) has no contained programs, so the lines are returned unchanged and the name
+    list is empty - this pass is then a no-op and output is byte-identical."""
+    n_ids = sum(1 for cl in lines if _PROGRAM_ID_RE.search(cl.text))
+    if n_ids <= 1:
+        return lines, []
+
+    main_lines: List[CodeLine] = []
+    contained: List[str] = []
+    depth = 0                       # 0 = outside; 1 = in the main program; >=2 = contained
+    for cl in lines:
+        mid = _PROGRAM_ID_RE.search(cl.text)
+        if mid:
+            depth += 1
+            if depth == 1:
+                main_lines.append(cl)           # the main program's own PROGRAM-ID
+            else:
+                contained.append(mid.group(1).upper())   # a contained program - excluded
+                # Its (optional) IDENTIFICATION DIVISION header sits on the line just
+                # before its PROGRAM-ID and was appended to the main program above -
+                # drop it too, so only the outer program's own lines remain.
+                if main_lines and re.search(
+                        r"\bIDENTIFICATION\s+DIVISION\b", main_lines[-1].text, re.I):
+                    main_lines.pop()
+            continue
+        if _END_PROGRAM_RE.search(cl.text):
+            if depth == 1:
+                main_lines.append(cl)           # the main program's own END PROGRAM
+            depth = max(0, depth - 1)
+            continue
+        if depth <= 1:
+            main_lines.append(cl)               # preamble (0) or main-program body (1)
+        # depth >= 2: inside a contained program - dropped from the main program's lines
+    # Preserve first-seen order, drop duplicates deterministically (no set iteration).
+    return main_lines, list(dict.fromkeys(contained))
+
+
 def _rest_line(cl: CodeLine, rest: str) -> CodeLine:
     """A synthetic Area-B line carrying the code that followed a same-line header."""
     return CodeLine(text=rest, line=cl.line, area_a=False, origin=cl.origin)
@@ -253,8 +305,16 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     lines = normalize(source, fmt)
     pre = preprocess(lines, resolver, fmt=fmt)
     lines = pre.lines
+    # Separate any CONTAINED (nested) programs so their bodies do not fold into the outer
+    # program, and so a CALL to one is recognised as internal rather than a missing module.
+    lines, contained = _split_program_units(lines)
     prog = Program(program_id=_find_program_id(lines))
+    prog.nested_programs = contained
     prog.copybooks = pre.copybooks
+    if contained:
+        prog.notes.append(
+            "Contained (nested) program(s): " + ", ".join(contained)
+            + " - parsed out of the main program; a CALL to one is an internal call")
     if pre.expanded:
         prog.notes.append("Expanded copybooks: " + ", ".join(sorted(set(pre.expanded))))
     for member in sorted(set(pre.missing)):
