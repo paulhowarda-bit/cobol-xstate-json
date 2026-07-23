@@ -60,6 +60,36 @@ def test_inbound_get_becomes_an_on_wait():
     assert handler["target"] == "0000-MAIN__if2"
 
 
+def test_post_read_processing_runs_when_the_record_arrives_not_on_entry():
+    """A read-process-write paragraph folds into one state whose entry is
+    ``[read, process..., write]``. The push rewrite dropped the read but LEFT the
+    processing and the write on ``entry`` - so they ran the moment the state was entered,
+    before any record existed, deriving output from an empty record every cycle. The
+    statements that consume the record must ride in the ``on`` handler, after ``recv``."""
+    mod = emit_reactive_module(_machine("readproc.cbl"))
+    cfg = _extract(mod, "machineConfig")
+    main = cfg["states"]["0000-MAIN"]
+    # nothing pre-read here, so entry is gone entirely - no processing runs early
+    assert "entry" not in main
+    handler = main["on"]["GET.DB2.CUST"]
+    acts = handler["actions"]
+    assert acts[0] == "recv_GET_DB2_CUST"               # the row is assigned first
+    # ...then everything that consumes it, in source order
+    assert acts[1:] == ["MOVE_WS-NAME_TO_OUT-NAME",
+                        "COMPUTE_OUT-DBL_eq_WS-AMT_2"]
+
+
+def test_pre_read_actions_stay_on_entry():
+    """Only the statements AFTER the read consume the record. Anything before it (a MOVE
+    that sets up the read) must still run on the way in, before the wait."""
+    mod = emit_reactive_module(_machine("sqlsel.cbl"))
+    cfg = _extract(mod, "machineConfig")
+    main = cfg["states"]["0000-MAIN"]
+    # the MOVE that precedes the SELECT is a pre-read action: it stays on entry
+    assert main.get("entry") == ["MOVE_12345_TO_WS-CUST-ID"]
+    assert main["on"]["GET.DB2.CUSTOMER"]["actions"] == ["recv_GET_DB2_CUSTOMER"]
+
+
 def test_response_branch_waits_then_evaluates_existing_guards():
     mod = emit_reactive_module(_machine("sqlsel.cbl"))
     cfg = _extract(mod, "machineConfig")
@@ -175,6 +205,39 @@ def test_reactive_slice_runs_by_sending_events(repo_tmp):
         "if (missing.status !== 'done') { console.error('missing status', missing.status); process.exit(1); }\n"
         "if (missing.context['WS-STATUS'] !== 'MISSING   ') "
         "{ console.error('missing', JSON.stringify(missing.context['WS-STATUS'])); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
+                       cwd=str(repo_tmp), timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_read_process_write_derives_from_the_arriving_record(repo_tmp):
+    """The end-to-end proof of the J8 fix: start the machine (no record yet), send the
+    record, and check the derived fields reflect THAT record - not the empty one that
+    entry-time processing would have used."""
+    (repo_tmp / "machine.mjs").write_text(emit_reactive_module(_machine("readproc.cbl")))
+    (repo_tmp / "cobolRuntime.mjs").write_text(RUNTIME.read_text())
+    driver = repo_tmp / "drive.mjs"
+    driver.write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n"
+        # before the row arrives, the derived outputs must be untouched (empty host vars)
+        "let s = a.getSnapshot();\n"
+        "if (s.context['OUT-NAME'] && s.context['OUT-NAME'].trim() !== '') "
+        "{ console.error('processed early:', JSON.stringify(s.context['OUT-NAME'])); "
+        "process.exit(1); }\n"
+        "a.send({ type: 'GET.DB2.CUST', 'WS-NAME': 'ACME', 'WS-AMT': '00021' });\n"
+        "s = a.getSnapshot();\n"
+        # WS-NAME is PIC X(20); moved to OUT-NAME (also X(20)), space-padded
+        "if (s.context['OUT-NAME'] !== 'ACME'.padEnd(20)) "
+        "{ console.error('OUT-NAME', JSON.stringify(s.context['OUT-NAME'])); process.exit(1); }\n"
+        # OUT-DBL holds the decimal VALUE 21*2 = 42 (the runtime stores values, not the
+        # PIC 9(6) display form); the point is it derived from the ARRIVING WS-AMT
+        "if (String(s.context['OUT-DBL']) !== '42') "
+        "{ console.error('OUT-DBL', JSON.stringify(s.context['OUT-DBL'])); process.exit(1); }\n"
         "process.exit(0);\n"
     )
     r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
