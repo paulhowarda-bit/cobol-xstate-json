@@ -467,3 +467,22 @@ def test_leaves_lists_every_field_of_a_wide_record():
     # all 80 present - not silently capped at 64
     assert len(leaves) == 80
     assert "CA-F079" in leaves and "CA-F064" in leaves
+
+
+# --------------------------------------------------------------------------- #
+# a cursor FETCH's host-var <-> Db2 column correlation (review finding J16 #4)
+# --------------------------------------------------------------------------- #
+
+def test_cursor_fetch_columns_reach_the_lineage_fills():
+    # only the interface build passed cursor_cols to _classify, so lineage saw every
+    # FETCH with an EMPTY column map - and the dynamic-call view, which reads it, lost
+    # the "this value comes from TABLE.COLUMN" fact for every cursor program.
+    from cobol_xstate.lineage import _Lineage
+    lin = _Lineage(build_machine(parse_program((EXAMPLES / "sqlcols.cbl").read_text()),
+                                 source_name="sqlcols.cbl"))
+    lin.run()
+    fetch = [f for f in lin.fills if f.get("verb") == "FETCH"]
+    assert fetch, "expected a cursor FETCH"
+    cols = fetch[0]["columns"]
+    assert {(c["hostVar"], c["column"]) for c in cols} == {("WS-ID", "ID"), ("WS-BAL", "BAL")}
+    assert all(c["table"] == "CUSTOMER" for c in cols)
