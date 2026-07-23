@@ -29,11 +29,26 @@ constructs a static pass cannot resolve (ALTER, computed GO TO, dynamic CALL, CI
 HANDLE) are flagged rather than smoothed over.
 """
 
+import logging as _logging
+
+from .errors import (
+    CobolXstateError,
+    CopybookError,
+    ParseError,
+    ReactiveLoweringError,
+    SourceFormatError,
+)
 from .normalizer import normalize, CodeLine, SourceFormat
 from .lexer import tokenize, Token
 from .parser import parse_program, Program, Paragraph
-from .runtime_assets import RUNTIME_FILES, read_runtime_asset, runtime_asset_path
+from .runtime_assets import RUNTIME_FILES, RuntimeAssetMissing, read_runtime_asset, runtime_asset_path
 from .statechart import build_machine, Machine
+
+# Library logging contract: attach a no-op handler to the package logger so importing
+# cobol_xstate never emits "No handlers could be found" and never writes to stderr on its
+# own. The application (see cobol_xstate.logging_setup, used by the CLI) decides what to
+# do with these records. Every module logs via logging.getLogger(__name__).
+_logging.getLogger(__name__).addHandler(_logging.NullHandler())
 
 __all__ = [
     "normalize",
@@ -49,6 +64,13 @@ __all__ = [
     "RUNTIME_FILES",
     "read_runtime_asset",
     "runtime_asset_path",
+    # Error hierarchy (see cobol_xstate.errors)
+    "CobolXstateError",
+    "SourceFormatError",
+    "ParseError",
+    "CopybookError",
+    "ReactiveLoweringError",
+    "RuntimeAssetMissing",
 ]
 
 __version__ = "0.1.0"

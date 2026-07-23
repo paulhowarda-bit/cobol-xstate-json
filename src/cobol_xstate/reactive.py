@@ -36,6 +36,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 from . import interface as _iface
+from .errors import ReactiveLoweringError
 from .emitter import (
     RUNTIME_IMPORT, _HELPERS, _build_guards, _build_ops, _collect_referenced,
     _emit_guard, _field_table, _invoke_transform, _js_context, _js_str,
@@ -202,7 +203,7 @@ def _flatten(config: dict, ordered: List[str], sections: Dict[str, List[str]],
 
     cycle = _find_cycle(_actor_call_graph(actor_configs))
     if cycle:
-        raise NotImplementedError(
+        raise ReactiveLoweringError(
             "reactive target: recursive PERFORM cycle "
             + " -> ".join(cycle)
             + " cannot be flattened - one return-address field per paragraph would be "
@@ -529,7 +530,7 @@ def _lower(machine: Machine) -> _Lowered:
     config = _strip_meta(copy.deepcopy(machine.config))
 
     if config.get("type") == "parallel":
-        raise NotImplementedError(
+        raise ReactiveLoweringError(
             "reactive target: type:parallel (CICS handler regions) not yet lowered")
 
     # 1. PERFORM -> one flat machine (see _flatten). Must precede the interface build:

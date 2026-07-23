@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from pathlib import Path
 from typing import List, Optional
 
+from .errors import CobolXstateError
+from .logging_setup import configure_logging
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
@@ -24,6 +27,11 @@ from .parser import parse_program
 from .preprocessor import CopybookResolver
 from .runtime_assets import read_runtime_asset
 from .statechart import build_machine
+
+# Explicit name, NOT __name__: this module is also run as `python -m cobol_xstate.cli`,
+# where __name__ == "__main__" would put the logger outside the cobol_xstate hierarchy and
+# out of configure_logging's reach (so INFO/progress would be silently dropped).
+_log = logging.getLogger("cobol_xstate.cli")
 
 
 def _format(name: Optional[str]) -> Optional[SourceFormat]:
@@ -157,6 +165,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
+    p.add_argument("-v", "--verbose", action="count", default=0,
+                   help="increase log detail: -v adds DEBUG (swallowed tracebacks and "
+                        "internal steps). Diagnostics go to stderr; stdout is unaffected.")
+    p.add_argument("-q", "--quiet", action="count", default=0,
+                   help="reduce log detail: -q shows only warnings and errors (hides "
+                        "progress), -qq shows only errors.")
+    p.add_argument("--debug", action="store_true",
+                   help="on an unexpected internal error, print the full Python traceback "
+                        "instead of a one-line message (for bug reports). Implies -v.")
     return p
 
 
@@ -192,7 +209,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     run_dir = _run_dir(args)
     err = _make_run_dir(run_dir)
     if err:
-        print(f"error: {err}", file=sys.stderr)
+        _log.error(f"error: {err}")
         return 2
     deps = str(run_dir / "deps")
     # `paths`, not args.copybook_path: run() already appended the JCL file's own parent,
@@ -215,17 +232,17 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
                         (".jcl.fetch.json", fetched)):
         path = run_dir / f"{base}{suffix}"
         path.write_text(_json.dumps(obj, indent=args.indent) + "\n", encoding="utf-8")
-        print(f"[{source_name}] wrote {path}", file=sys.stderr)
+        _log.info(f"[{source_name}] wrote {path}")
     _report_stages(source_name, pre, fetched)
 
     if args.summary:
-        print(f"[{job.name or 'JOB'}] {len(job.steps)} step(s), "
+        _log.info(f"[{job.name or 'JOB'}] {len(job.steps)} step(s), "
               f"{len(lineage['datasets'])} dataset(s), "
               f"{len(lineage['dataflow'])} dataflow edge(s), "
               f"{len(lineage['fieldLineage'])} field-lineage step(s), "
-              f"{len(job.flags)} flag(s)", file=sys.stderr)
+              f"{len(job.flags)} flag(s)")
         for f in job.flags:
-            print(f"  FLAG {f}", file=sys.stderr)
+            _log.info(f"  FLAG {f}")
     return 0
 
 
@@ -238,20 +255,20 @@ def _report_stages(source_name: str, pre, fetched: dict) -> None:
     cannot see which member that was has no way to tell an accurate model from a short
     one."""
     pc, fc = pre.counts, fetched.get("counts", {})
-    print(f"[{source_name}] prefetch: "
+    _log.info(f"[{source_name}] prefetch: "
           f"{pc.get('fetched', 0)} fetched, {pc.get('local', 0)} local, "
           f"{pc.get('not-found', 0)} not-found, {pc.get('error', 0)} error"
           + (f", {pc.get('no-service', 0)} never looked for"
-             if pc.get("no-service") else ""), file=sys.stderr)
-    print(f"[{source_name}] fetch: "
+             if pc.get("no-service") else ""))
+    _log.info(f"[{source_name}] fetch: "
           f"{fc.get('fetched', 0)} fetched, {fc.get('prefetched', 0)} already in hand, "
           f"{fc.get('not-found', 0)} not-found, {fc.get('error', 0)} error, "
-          f"{fc.get('skipped', 0)} not fetchable", file=sys.stderr)
+          f"{fc.get('skipped', 0)} not fetchable")
     for member in pre.missing:
-        print(f"  MISSING {member}: the source text is incomplete without it - data "
-              f"items or steps it defines are NOT in the model", file=sys.stderr)
+        _log.warning(f"  MISSING {member}: the source text is incomplete without it - data "
+              f"items or steps it defines are NOT in the model")
     for err in fetched.get("errors", []):
-        print(f"  FETCH ERROR {err['artifact']}: {err['error']}", file=sys.stderr)
+        _log.warning(f"  FETCH ERROR {err['artifact']}: {err['error']}")
 
 
 def _service(args, source_name: str):
@@ -264,15 +281,42 @@ def _service(args, source_name: str):
     members and no estate connection."""
     fetcher, why = load_fetcher(args.copybook_fetcher)
     if fetcher is None:
-        print(f"[{source_name}] WARNING: {why}", file=sys.stderr)
+        _log.warning(f"[{source_name}] WARNING: {why}")
     return fetcher, why
 
 
 
 
 def run(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    """Parse args, configure logging, and dispatch, behind the top-level error boundary.
 
+    An expected failure (any ``CobolXstateError``) becomes a one-line message + a non-zero
+    exit code; an UNEXPECTED exception is reported as an internal error (exit 1) with the
+    full traceback shown only under ``--debug`` - never leaked raw to the user."""
+    args = build_parser().parse_args(argv)
+    configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet)
+    try:
+        return _run(args)
+    except CobolXstateError as exc:
+        # An expected, named failure: str(exc) IS the user-facing explanation.
+        _log.error("%s", exc)
+        return 1
+    except BrokenPipeError:
+        # `cobol-xstate ... | head` closes the pipe early; not worth a traceback.
+        return 0
+    except KeyboardInterrupt:
+        _log.error("interrupted")
+        return 130
+    except Exception:
+        if args.debug:
+            raise  # the developer asked for the raw traceback
+        _log.critical("internal error while processing %r - re-run with --debug for the "
+                      "full traceback", args.source)
+        _log.debug("internal error traceback", exc_info=True)
+        return 1
+
+
+def _run(args) -> int:
     search_paths = list(args.copybook_path)
     if args.source == "-":
         source = sys.stdin.read()
@@ -281,7 +325,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     else:
         path = Path(args.source)
         if not path.exists():
-            print(f"error: no such file: {path}", file=sys.stderr)
+            _log.error(f"error: no such file: {path}")
             return 2
         source = decode_member(path.read_bytes())
         source_name = path.name
@@ -299,11 +343,11 @@ def run(argv: Optional[List[str]] = None) -> int:
         # A silent wrong guess corrupts every downstream stage, so surface it: state
         # what was picked, and warn (recommending --format) when confidence is low.
         level = "detected" if det.is_confident else "WARNING: low-confidence"
-        print(f"[{source_name}] {level} source format = {fmt.value} "
-              f"({det.confidence:.0%}: {det.reason})", file=sys.stderr)
+        _log.info(f"[{source_name}] {level} source format = {fmt.value} "
+              f"({det.confidence:.0%}: {det.reason})")
         if not det.is_confident:
-            print("  -> if the output looks corrupted, re-run with "
-                  "--format fixed|free to override.", file=sys.stderr)
+            _log.warning("  -> if the output looks corrupted, re-run with "
+                  "--format fixed|free to override.")
 
     # STAGE 1. Before the parse, because the parse is what produces the dependency
     # manifest: a copybook that does not arrive takes its VALUE clauses out of the
@@ -315,7 +359,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     run_dir = _run_dir(args)
     err = _make_run_dir(run_dir)
     if err:
-        print(f"error: {err}", file=sys.stderr)
+        _log.error(f"error: {err}")
         return 2
     deps = str(run_dir / "deps")
     pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
@@ -335,8 +379,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     # the model is missing logic for a fixable reason (bad credentials, service down),
     # so say so loudly rather than letting it read as "not on the estate".
     for member, err in getattr(resolver, "fetch_errors", []):
-        print(f"[{source_name}] WARNING: copybook fetcher failed for {member}: {err}",
-              file=sys.stderr)
+        _log.warning(f"[{source_name}] WARNING: copybook fetcher failed for {member}: {err}")
 
     # --bind-jcl: parse each JCL once; the artifacts view is then built through the
     # binding join so its file rows carry the dataset their ddname resolves to. Each is
@@ -348,7 +391,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     for jf in args.bind_jcl:
         jp = Path(jf)
         if not jp.exists():
-            print(f"error: no such file: {jp} (--bind-jcl)", file=sys.stderr)
+            _log.error(f"error: no such file: {jp} (--bind-jcl)")
             return 2
         jtext = decode_member(jp.read_bytes())
         prefetch_jcl(jtext, fetcher, paths=search_paths, dest=deps,
@@ -403,10 +446,10 @@ def run(argv: Optional[List[str]] = None) -> int:
             # only for a source whose own name ends in a companion suffix; losing the
             # bundle silently is far worse than an odd filename.
             path = beside.with_name(base + ".view" + suffix)
-            print(f"[{source_name}] note: companion would collide with {beside.name}; "
-                  f"writing {path.name} instead", file=sys.stderr)
+            _log.info(f"[{source_name}] note: companion would collide with {beside.name}; "
+                  f"writing {path.name} instead")
         _write(path, _json.dumps(obj, indent=args.indent) + "\n")
-        print(f"[{source_name}] wrote {path}", file=sys.stderr)
+        _log.info(f"[{source_name}] wrote {path}")
 
     def _write_lineage_companion(beside: Path) -> None:
         """The field-lineage table travels with any machine view: the rows reference the
@@ -453,7 +496,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         try:
             view = build_reactive_view(machine)
         except NotImplementedError as exc:
-            print(f"[{source_name}] note: no reactive view - {exc}", file=sys.stderr)
+            _log.info(f"[{source_name}] note: no reactive view - {exc}")
             return
         _companion(beside, ".reactive.json", view)
 
@@ -470,7 +513,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         for suffix, obj in ((".prefetch.json", pre.report()), (".fetch.json", report)):
             path = out_path.with_name(f"{base}{suffix}")
             _write(path, _json.dumps(obj, indent=args.indent) + "\n")
-            print(f"[{source_name}] wrote {path}", file=sys.stderr)
+            _log.info(f"[{source_name}] wrote {path}")
     _report_stages(source_name, pre, report)
 
     if args.target in ("business", "lineage", "artifacts"):
@@ -478,7 +521,7 @@ def run(argv: Optional[List[str]] = None) -> int:
                else _artifacts_obj() if args.target == "artifacts"
                else build_business_view(machine))
         _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
-        print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+        _log.info(f"[{source_name}] wrote {out_path}")
         if args.target == "business":
             _write_lineage_companion(out_path)
     elif args.target in ("js", "reactive"):
@@ -488,7 +531,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         except NotImplementedError as exc:
             # An explicit --target reactive on a program the lowering refuses: report the
             # reason, not a traceback. The refusal is a fact about the program.
-            print(f"error: {exc}", file=sys.stderr)
+            _log.error(f"error: {exc}")
             return 3
         _write(out_path, text)
         # The emitted module imports ./cobolRuntime.mjs, so the runtime must land beside
@@ -496,8 +539,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         # rather than emitting a dangling import.
         runtime_dst = out_path.parent / "cobolRuntime.mjs"
         _write(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
-        print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
-        print(f"[{source_name}] wrote {runtime_dst}", file=sys.stderr)
+        _log.info(f"[{source_name}] wrote {out_path}")
+        _log.info(f"[{source_name}] wrote {runtime_dst}")
         # The reactive machine is the one you most want to LOOK at - its waits and
         # publishes are the new system's message contract - so it gets a drawable JSON
         # beside the runnable module, like every other machine view.
@@ -505,11 +548,11 @@ def run(argv: Optional[List[str]] = None) -> int:
             view = out_path.with_name(base + ".reactive.json")
             _write(view, _json.dumps(build_reactive_view(machine),
                                      indent=args.indent) + "\n")
-            print(f"[{source_name}] wrote {view}", file=sys.stderr)
+            _log.info(f"[{source_name}] wrote {view}")
     else:
         text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
         _write(out_path, text + "\n")
-        print(f"[{source_name}] wrote {out_path}", file=sys.stderr)
+        _log.info(f"[{source_name}] wrote {out_path}")
         # A plain run yields the six JSON views of one program, each answering a
         # different question: the faithful machine (what it does), the business
         # distillation (which steps matter), the lineage table (where each field's value
@@ -526,28 +569,26 @@ def run(argv: Optional[List[str]] = None) -> int:
     if args.summary:
         n_states = len(machine.config.get("states", {}))
         iface = machine.bundle()["interface"]
-        print(
+        _log.info(
             f"[{machine.program_id}] {n_states} state(s), "
             f"{len(machine.provenance)} provenance entr(ies), "
             f"{len(machine.flags)} flag(s), "
-            f"{len(iface['perimeterStates'])} perimeter state(s)",
-            file=sys.stderr,
-        )
+            f"{len(iface['perimeterStates'])} perimeter state(s)")
         if iface["endpoints"]:
-            print("  external interface:", file=sys.stderr)
+            _log.info("  external interface:")
             for ep in iface["endpoints"]:
-                print(f"    {ep['type']:9} {ep['endpoint']:24} "
-                      f"({', '.join(ep['directions'])})", file=sys.stderr)
+                _log.info(f"    {ep['type']:9} {ep['endpoint']:24} "
+                      f"({', '.join(ep['directions'])})")
         for state, d in iface["perimeterStates"].items():
             io = []
             if d["gets"]:
                 io.append("gets " + ", ".join(d["gets"]))
             if d["creates"]:
                 io.append("creates " + ", ".join(d["creates"]))
-            print(f"  PERIMETER {state} [{d['region']}] ({d.get('perimeter', '?')}): "
-                  f"{'; '.join(io)}", file=sys.stderr)
+            _log.info(f"  PERIMETER {state} [{d['region']}] ({d.get('perimeter', '?')}): "
+                  f"{'; '.join(io)}")
         for f in machine.flags:
-            print(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}", file=sys.stderr)
+            _log.info(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}")
 
     return 0
 

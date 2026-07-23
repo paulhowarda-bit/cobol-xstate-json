@@ -32,9 +32,14 @@ with any of the usual text/path keys. The service contract is the caller's, not 
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
+
+from .errors import CobolXstateError
+
+logger = logging.getLogger(__name__)
 
 # The estate client this tool is built against. Imported lazily (and only once) so the
 # package still imports - and every non-fetching code path still runs - on a machine
@@ -92,7 +97,7 @@ class Fetched:
         return out
 
 
-class ServiceUnavailable(Exception):
+class ServiceUnavailable(CobolXstateError):
     """The estate client could not be imported or called at all - which is a different
     fact from a member being absent, and must never be reported as one."""
 
@@ -117,6 +122,7 @@ def load_fetcher(spec: Optional[str] = None) -> Tuple[Optional[Callable], Option
     try:
         mod = importlib.import_module(mod_name)
     except Exception as exc:
+        logger.debug("could not import artifact-service module %r", mod_name, exc_info=True)
         why = f"{type(exc).__name__}: {exc}"
         if spec is None:
             return None, (f"the estate artifact service ({DEFAULT_FETCHER}) is not "

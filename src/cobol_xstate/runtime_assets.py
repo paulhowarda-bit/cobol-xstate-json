@@ -19,6 +19,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Tuple
 
+from .errors import CobolXstateError
+
 _PACKAGE = "cobol_xstate"
 _DIR = "runtime"
 
@@ -26,9 +28,10 @@ _DIR = "runtime"
 RUNTIME_FILES: Tuple[str, ...] = ("cobolRuntime.mjs", "cobolDriver.mjs")
 
 
-class RuntimeAssetMissing(RuntimeError):
+class RuntimeAssetMissing(CobolXstateError, RuntimeError):
     """A runtime asset is absent - the install is broken, and staying silent about it
-    would emit a module with an unresolvable import."""
+    would emit a module with an unresolvable import. Also a ``RuntimeError`` for
+    backward compatibility with callers that caught it as one."""
 
 
 def _resource(name: str):

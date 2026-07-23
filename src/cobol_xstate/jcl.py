@@ -32,9 +32,12 @@ recorded.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 Resolver = Callable[[str], Optional[str]]
 
@@ -571,6 +574,7 @@ class _Parser:
             got = self.resolver(name)
         except Exception as exc:               # a bad resolver must not crash the parse
             self.job.flags.append(f"{what} {name}: resolver raised {exc!r}")
+            logger.debug("JCL resolver raised for %s %r", what, name, exc_info=True)
             return None
         if got is None:
             self.job.flags.append(
