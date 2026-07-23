@@ -39,7 +39,7 @@ from . import interface as _iface
 from .emitter import (
     RUNTIME_IMPORT, _HELPERS, _build_guards, _build_ops, _collect_referenced,
     _emit_guard, _field_table, _invoke_transform, _js_context, _js_str,
-    _negated_externals, _strip_meta,
+    _negated_externals, _strip_meta, segment_entry,
 )
 from .statechart import Machine
 
@@ -311,16 +311,9 @@ def _split_multi_gets(states: dict, machine: Machine) -> None:
         entry = st.get("entry", []) or []
         if sum(1 for a in entry if is_get(a)) < 2:
             continue
-        # segment the run so each segment ends on a get (the last may be trailing ops)
-        segs: List[List[str]] = []
-        cur: List[str] = []
-        for a in entry:
-            cur.append(a)
-            if is_get(a):
-                segs.append(cur)
-                cur = []
-        if cur:
-            segs.append(cur)
+        # Each get TERMINATES its segment (isolate=False), so the setup actions before it
+        # ride the same state, ahead of the wait; the last segment may be trailing ops.
+        segs = segment_entry(entry, is_get, isolate=False)
         control = {k: v for k, v in st.items() if k != "entry"}
         ids = [name] + [f"{name}__g{i}" for i in range(1, len(segs))]
         for i, seg in enumerate(segs):
