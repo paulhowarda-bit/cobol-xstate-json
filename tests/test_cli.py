@@ -436,3 +436,107 @@ def test_timing_sink_does_not_change_any_output_byte(tmp_path):
     assert run([EXAMPLES_CBL, "--outdir", str(tmp_path / "sunk")],
                timing_sink=lambda rows: None) == 0
     assert _all_files(tmp_path / "plain") == _all_files(tmp_path / "sunk")
+
+
+# --- --jobs: how many members are in flight, and that it reaches every stage ---
+
+
+_JOBS_ESTATE = {
+    "CPYA": "       01 A PIC X.\n",
+    "CPYB": "       01 B PIC X.\n       COPY CPYD.\n",
+    "CPYC": "       01 C PIC X.\n",
+    "CPYD": "       01 D PIC X.\n",
+    "SUBONE": "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SUBONE.\n",
+    "SUBTWO": "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SUBTWO.\n",
+    "SUBTRE": "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SUBTRE.\n",
+}
+_JOBS_PROG = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. JOBSPGM.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       COPY CPYA.\n"
+    "       COPY CPYB.\n"
+    "       COPY CPYC.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'SUBONE'\n"
+    "           CALL 'SUBTWO'\n"
+    "           CALL 'SUBTRE'\n"
+    "           STOP RUN.\n"
+)
+
+
+def _peak_probe(monkeypatch, peak):
+    """Install a fake estate client that reports the most requests ever in flight at
+    once, per stage. Sleeps, because without one nothing overlaps and a peak of 1 would
+    prove the flag was ignored when it was merely fast."""
+    import threading
+    import time
+
+    import cobol_xstate.cli as cli_mod
+    state = {"now": 0}
+    lock = threading.Lock()
+
+    def fetch_artifact(name, type=None, copy=None):
+        with lock:
+            state["now"] += 1
+            peak["all"] = max(peak["all"], state["now"])
+            # prefetch asks for copybooks; fetch asks for the called programs
+            slot = "prefetch" if str(type) == "copybook" else "fetch"
+            peak[slot] = max(peak.get(slot, 0), state["now"])
+        try:
+            time.sleep(0.01)
+            text = _JOBS_ESTATE.get(name.upper())
+            if text is None:
+                return {"artifact_name": name, "found": False}
+            return {"artifact_name": name, "found": True, "text": text,
+                    "detected_type": type or "cobol",
+                    "source_location": f"PROD.SYSLIB({name})"}
+        finally:
+            with lock:
+                state["now"] -= 1
+
+    monkeypatch.setattr(cli_mod, "load_fetcher", lambda spec: (fetch_artifact, None))
+
+
+def test_jobs_reaches_prefetch_and_fetch_alike(tmp_path, monkeypatch):
+    """A flag that got as far as one retrieval stage and not the other would leave half
+    the run sequential while the help text said otherwise - which is exactly how
+    --copybook-ext was wrong before it. So both stages are checked, separately."""
+    import shutil
+    src = tmp_path / "jobspgm.cbl"
+    src.write_text(_JOBS_PROG)
+    # The SAME --outdir for both runs, snapshotted between them: a report records where a
+    # retrieved member was copied to, so two directories would differ by that path alone
+    # and the comparison below would fail for a reason that has nothing to do with --jobs.
+    out = tmp_path / "out"
+
+    one = {"all": 0}
+    _peak_probe(monkeypatch, one)
+    assert run([str(src), "--jobs", "1", "--outdir", str(out)]) == 0
+    assert one["all"] == 1, "--jobs 1 must never start a second request"
+    sequential = _all_files(out)
+    shutil.rmtree(out)
+
+    many = {"all": 0}
+    _peak_probe(monkeypatch, many)
+    assert run([str(src), "--jobs", "4", "--outdir", str(out)]) == 0
+    assert many["prefetch"] > 1, "--jobs never reached prefetch"
+    assert many["fetch"] > 1, "--jobs never reached fetch"
+    assert many["all"] <= 4, f"--jobs 4 ran {many['all']} at once"
+
+    # ...and the whole run is byte-identical either way. This is the property that makes
+    # the flag safe to default on: it changes when requests happen, never what is written.
+    assert sequential == _all_files(out)
+
+
+def test_jobs_zero_means_do_not_overlap_rather_than_failing(tmp_path, monkeypatch):
+    """`--jobs 0` is a coherent request - don't overlap - so it is clamped to 1, not
+    rejected with a usage error."""
+    src = tmp_path / "jobspgm.cbl"
+    src.write_text(_JOBS_PROG)
+    peak = {"all": 0}
+    _peak_probe(monkeypatch, peak)
+    assert run([str(src), "--jobs", "0", "--outdir", str(tmp_path / "zero")]) == 0
+    assert peak["all"] == 1

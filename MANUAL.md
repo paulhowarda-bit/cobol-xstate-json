@@ -128,7 +128,7 @@ cobol-xstate [-h] [--outdir DIR]
              [--copybook-fetcher MODULE:FUNC]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
              [--no-dynamic-calls] [--bind-jcl FILE]
-             [--machine-only] [--indent N] [--summary]
+             [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
              source
 ```
 
@@ -356,9 +356,39 @@ Emit only the bare XState config — no provenance, flags, notes, data, semantic
 interface. Use when you want to feed `createMachine` directly and have already reviewed
 the contract.
 
+### `--jobs N`
+
+How many members may be requested from the estate service **at once**. Default 8.
+
+Retrieval is most of a run's wall clock — on one measured 19.5-second run, prefetch and
+fetch were 73% of it and the two analyses put together were 2%. Neither stage's requests
+depend on each other, so they overlap: prefetch retrieves a whole *level* of the copybook
+closure at a time (a level is all that can be known before any of it is read, since a
+copybook names its own `COPY`s only in its text), and fetch retrieves the whole plan,
+which `build_fetch_plan` computes before anything runs.
+
+**Output is byte-identical at any `N`.** Row order in `.prefetch.json` and `.fetch.json`
+follows the plan, never the order answers arrive; a name reached twice still costs one
+round-trip, decided when the plan is read rather than mid-flight; and files are written in
+report order. If two runs at different `--jobs` ever differ, that is a bug, not a
+tolerance.
+
+```bash
+cobol-xstate prog.cbl --jobs 1     # strictly sequential - no threads are started at all
+```
+
+Use `--jobs 1` if your estate client is not thread-safe, or if you must not put that much
+load on the service. `--jobs 0` means the same thing and is clamped rather than rejected.
+
 ### `--indent N`
 
 JSON indent. Default 2.
+
+### `--timing`
+
+Print a per-stage wall-clock breakdown to **stderr**. Diagnostic only — it touches no
+output file, and a run is byte-identical with and without it. Use it before optimizing
+anything: the stage that dominates is rarely the one that looks slow.
 
 ### `--summary`
 

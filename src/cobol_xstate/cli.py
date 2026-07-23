@@ -59,6 +59,17 @@ def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
     return default_stem or program_id or "machine"
 
 
+def _jobs(args) -> int:
+    """How many members may be in flight at once, floored at 1.
+
+    Clamped rather than rejected: ``--jobs 0`` means "do not overlap", which is a
+    coherent thing to ask for and is what 1 does. It reaches every retrieval call site in
+    both run paths - a flag that got as far as one stage and not the other would leave
+    half a run sequential while the help text said otherwise, which is how --copybook-ext
+    was wrong before it."""
+    return max(1, int(getattr(args, "jobs", 1) or 1))
+
+
 def _run_dir(args) -> Path:
     """The one directory this run writes into: exactly ``--outdir``, as given.
 
@@ -163,6 +174,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolves gains 'dataset' and 'boundBy' (job/step, with the "
                         "step's run conditions) in the artifacts view - the ddname->DSN "
                         "join closed.")
+    p.add_argument("--jobs", type=int, default=8, metavar="N",
+                   help="how many members to request from the estate service at once "
+                        "(default: 8). Retrieval is most of a run's wall clock and the "
+                        "requests do not depend on each other, so they overlap. The "
+                        "reports are byte-identical at any N - row order follows the "
+                        "plan, never the order answers arrive. Use --jobs 1 for a "
+                        "strictly sequential run (no threads at all) if your estate "
+                        "client is not thread-safe or you must not load it up.")
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
@@ -223,7 +242,8 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     # DD inside it silently vanished from the model.
     with timer.stage("prefetch"):
         pre = prefetch_jcl(source, fetcher, paths=list(paths),
-                           dest=deps, source_name=source_name, unavailable=why)
+                           dest=deps, source_name=source_name, unavailable=why,
+                           jobs=_jobs(args))
 
     with timer.stage("parse"):
         job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
@@ -234,7 +254,8 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     base = _artifact_base(args, default_stem, job.name or "job")
     with timer.stage("fetch"):
         fetched = fetch_dependencies(artifacts, fetcher, dest=deps,
-                                     prefetched=pre.store, unavailable=why)
+                                     prefetched=pre.store, unavailable=why,
+                                     jobs=_jobs(args))
 
     for suffix, obj in ((".jcl.artifacts.json", artifacts),
                         (".jcl.lineage.json", lineage),
@@ -384,7 +405,8 @@ def _run(args, timing_sink=None) -> int:
     with timer.stage("prefetch"):
         pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
                              source_name=source_name, unavailable=why,
-                             exts=tuple(args.copybook_ext) + default_exts)
+                             exts=tuple(args.copybook_ext) + default_exts,
+                             jobs=_jobs(args))
 
     resolver = CopybookResolver(
         paths=search_paths,
@@ -427,7 +449,8 @@ def _run(args, timing_sink=None) -> int:
             return 2
         jtext = decode_member(jp.read_bytes())
         prefetch_jcl(jtext, fetcher, paths=search_paths, dest=deps,
-                     source_name=jp.name, unavailable=why, result=pre)
+                     source_name=jp.name, unavailable=why, result=pre,
+                     jobs=_jobs(args))
         bind_jobs.append(parse_jcl(jtext, resolver=pre.resolver(),
                                    source_name=jp.name))
 
@@ -539,7 +562,8 @@ def _run(args, timing_sink=None) -> int:
         _art = _artifacts_obj()
     with timer.stage("fetch"):
         report = fetch_dependencies(_art, fetcher, dest=deps, prefetched=pre.store,
-                                    unavailable=why, dynamic=_dynamic_obj(_art))
+                                    unavailable=why, dynamic=_dynamic_obj(_art),
+                                    jobs=_jobs(args))
     # --machine-only suppresses the REPORTS, never the retrieval: what was fetched
     # decides whether the machine is right, so skipping it to save two files would be
     # backwards.
