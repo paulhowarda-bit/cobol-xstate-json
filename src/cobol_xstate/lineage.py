@@ -46,7 +46,9 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from . import interface as _iface
 from .business import _is_control_guard
-from .emitter import _para_of, _target_owner, perform_target as _perform_target
+from .emitter import (
+    _para_of, _target_owner, perform_target as _perform_target, segment_entry,
+)
 from .statechart import Machine
 
 # An origin: (event name, maybe?, program that would resolve a `maybe`).
@@ -230,23 +232,14 @@ class _Lineage:
         origin: Dict[str, str] = {}      # split node -> the real state it came from
         for name, st in raw.items():
             entry = list(st.get("entry", []) or [])
-            performs = [i for i, a in enumerate(entry) if a.startswith("perform_")]
             control = {k: v for k, v in st.items() if k != "entry"}
-            if not performs:
+            if not any(a.startswith("perform_") for a in entry):
                 out[name] = dict(st)
                 origin[name] = name
                 continue
-            segs: List[List[str]] = []
-            cur: List[str] = []
-            for a in entry:
-                if a.startswith("perform_"):
-                    segs.append(cur)
-                    segs.append([a])     # the call, alone
-                    cur = []
-                else:
-                    cur.append(a)
-            segs.append(cur)
-            segs = [s for s in segs if s]
+            # Isolate each PERFORM into its own segment (shared with the emitter's split);
+            # here each segment becomes an `__L{i}` node that keeps the PERFORM as an action.
+            segs = segment_entry(entry, lambda a: a.startswith("perform_"), isolate=True)
             ids = [name] + [f"{name}__L{i}" for i in range(1, len(segs))]
             for i, seg in enumerate(segs):
                 nid = ids[i]

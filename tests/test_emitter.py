@@ -17,6 +17,7 @@ from cobol_xstate.emitter import (
     _emit_guard,
     _emit_numeric_expr,
     emit_setup_module,
+    segment_entry,
 )
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
@@ -176,6 +177,30 @@ def test_module_strips_provenance_meta_from_config():
 # --------------------------------------------------------------------------- #
 # PERFORM -> invoke (call-return via actors)
 # --------------------------------------------------------------------------- #
+
+def test_segment_entry_isolate_puts_each_boundary_alone():
+    """isolate=True (emitter invoke nodes / lineage call nodes): a boundary is its own
+    segment, with the ops either side kept separate."""
+    bnd = {"P"}
+    assert segment_entry(["A", "P", "B"], lambda a: a in bnd, isolate=True) \
+        == [["A"], ["P"], ["B"]]
+    # back-to-back boundaries leave no empty segment; leading/trailing boundaries likewise
+    assert segment_entry(["P", "P", "B"], lambda a: a in bnd, isolate=True) \
+        == [["P"], ["P"], ["B"]]
+    assert segment_entry(["A", "P"], lambda a: a in bnd, isolate=True) \
+        == [["A"], ["P"]]
+
+
+def test_segment_entry_terminate_keeps_boundary_at_segment_tail():
+    """isolate=False (reactive per-get states): a boundary ends its segment, so the setup
+    actions preceding it stay on the same segment; a trailing ops run is its own segment."""
+    bnd = {"G"}
+    assert segment_entry(["A", "G", "B", "G", "C"], lambda a: a in bnd, isolate=False) \
+        == [["A", "G"], ["B", "G"], ["C"]]
+    # no boundary at all: one segment (the whole run) in either mode
+    assert segment_entry(["A", "B"], lambda a: a in bnd, isolate=False) == [["A", "B"]]
+    assert segment_entry(["A", "B"], lambda a: a in bnd, isolate=True) == [["A", "B"]]
+
 
 def test_perform_becomes_invoke_of_actor():
     mod = emit_setup_module(_machine("accum.cbl"))

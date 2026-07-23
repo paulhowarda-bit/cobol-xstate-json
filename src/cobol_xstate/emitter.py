@@ -595,6 +595,44 @@ def _transition_targets(state: dict) -> List[str]:
     return out
 
 
+def segment_entry(entry: List[str], is_boundary, isolate: bool) -> List[List[str]]:
+    """Split a folded ``entry`` run into segments at each boundary action.
+
+    A state's ``entry`` is a straight-line run of actions, and a *boundary* - a PERFORM to
+    resolve into a call, or an inbound read to lower into a wait - can sit in the MIDDLE of
+    it (``[MOVE, perform_X, WRITE]``). Analysing that as one node runs WRITE with the
+    pre-call state, so the run is chained into a state each so every boundary sits between
+    its neighbours. Only this segmentation is shared: the emitter (``__k`` invoke
+    sub-states), lineage (``__L`` origin chain) and the reactive splitter (``__g`` per-get
+    states) each build their own chain, with their own naming and control-riding, from it.
+
+    ``is_boundary(action)`` selects the actions to split at.
+    ``isolate=True``  - each boundary is its OWN segment (``[ops][bnd][ops]``): the emitter's
+                        invoke node and lineage's call node sit alone between their neighbours.
+    ``isolate=False`` - each boundary TERMINATES its segment (``[ops..bnd][ops..bnd][ops]``):
+                        the reactive get keeps the setup actions preceding it on one state,
+                        before the wait.
+    Empty segments are dropped, so back-to-back boundaries leave no gap.
+    """
+    segs: List[List[str]] = []
+    cur: List[str] = []
+    for a in entry:
+        if is_boundary(a):
+            if isolate:
+                if cur:
+                    segs.append(cur)
+                segs.append([a])
+            else:
+                cur.append(a)
+                segs.append(cur)
+            cur = []
+        else:
+            cur.append(a)
+    if cur:
+        segs.append(cur)
+    return segs
+
+
 def _emit_split(key: str, st: dict, out: dict, buildable: Dict[str, str],
                 needed: set) -> None:
     """Rewrite one state into a chain so each PERFORM of a buildable paragraph becomes an
@@ -606,19 +644,16 @@ def _emit_split(key: str, st: dict, out: dict, buildable: Dict[str, str],
         out[key] = st
         return
 
-    segments: List[Tuple[str, object]] = []
-    cur: List[str] = []
-    for a in entry:
-        para = buildable.get(a)
-        if para is not None:
-            segments.append(("ops", cur)); cur = []
-            segments.append(("perform", para))
+    # A buildable action is isolated into its own segment, so a lone buildable action is a
+    # PERFORM step (an invoke); every other segment is an ops run.
+    steps: List[Tuple[str, object]] = []
+    for seg in segment_entry(entry, lambda a: a in buildable, isolate=True):
+        if len(seg) == 1 and seg[0] in buildable:
+            para = buildable[seg[0]]
             needed.add(para)
+            steps.append(("perform", para))
         else:
-            cur.append(a)
-    segments.append(("ops", cur))
-
-    steps = [s for s in segments if s[0] == "perform" or (s[0] == "ops" and s[1])]
+            steps.append(("ops", seg))
     control = {k: v for k, v in st.items() if k != "entry"}
     if steps and steps[-1][0] == "ops":  # fold trailing ops into the control node
         control = {"entry": steps[-1][1], **control}
