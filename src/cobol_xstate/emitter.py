@@ -576,23 +576,60 @@ def _para_of(key: str) -> str:
     return key.split("__", 1)[0]
 
 
-def _transition_targets(state: dict) -> List[str]:
-    out: List[str] = []
+def edge_target(edge) -> Optional[str]:
+    """The target of one transition edge, or None. A handler edge can be a BARE STRING
+    (``statechart._build_handlers_region`` emits ``on: {EVENT: "__H_x"}``) as well as the
+    ``{target: ...}`` dict form; reading only the dict form silently dropped the bare one -
+    the code-review finding that hit two of these walkers."""
+    if isinstance(edge, str):
+        return edge
+    if isinstance(edge, dict):
+        return edge.get("target")
+    return None
+
+
+def iter_transitions(state: dict, invoke: bool = False):
+    """Yield ``(event, edge)`` for every outgoing transition of ``state``.
+
+    ``event`` is None for an ``always`` edge (and, with ``invoke=True``, the
+    ``invoke.onDone`` edge) and the event name for an ``on`` handler edge. ``edge`` is the
+    raw transition (a dict, or a bare-string handler target); read it with ``edge_target``.
+    This is the ONE place that knows the shapes a state's outgoing edges take, so every
+    collector over it stays in agreement on the handler forms."""
     for t in state.get("always", []) or []:
-        if "target" in t:
-            out.append(t["target"])
-    inv = state.get("invoke")
-    if inv and inv.get("onDone", {}).get("target"):
-        out.append(inv["onDone"]["target"])
-    on = state.get("on")
-    if isinstance(on, dict):  # event-driven handler edges (orthogonal HANDLERS region)
-        for v in on.values():
-            for item in (v if isinstance(v, list) else [v]):
-                if isinstance(item, str):
-                    out.append(item)
-                elif isinstance(item, dict) and item.get("target"):
-                    out.append(item["target"])
-    return out
+        yield None, t
+    if invoke:
+        inv = state.get("invoke")
+        if inv and isinstance(inv.get("onDone"), dict):
+            yield None, inv["onDone"]
+    for ev, handler in (state.get("on") or {}).items():
+        for h in (handler if isinstance(handler, list) else [handler]):
+            yield ev, h
+
+
+def retarget_on(on: dict, rewrite) -> None:
+    """Rewrite every handler target in an ``on`` block in place, via ``rewrite(target) ->
+    target``. A bare-string handler (``on: {EVENT: "x"}``) is promoted to ``{target:
+    rewrite("x")}``; a dict edge keeps its other keys; an action-only handler (no target)
+    is left as is. Shared by the two retargeters (harel #id refs, reactive namespacing) so
+    neither can drop the bare-string form again."""
+    for ev, v in list(on.items()):
+        items = v if isinstance(v, list) else [v]
+        out = []
+        for item in items:
+            if isinstance(item, str):
+                out.append({"target": rewrite(item)})
+            elif isinstance(item, dict) and item.get("target"):
+                item = dict(item)
+                item["target"] = rewrite(item["target"])
+                out.append(item)
+            else:
+                out.append(item)
+        on[ev] = out if isinstance(v, list) else out[0]
+
+
+def _transition_targets(state: dict) -> List[str]:
+    return [t for _ev, e in iter_transitions(state, invoke=True) if (t := edge_target(e))]
 
 
 def segment_entry(entry: List[str], is_boundary, isolate: bool) -> List[List[str]]:
