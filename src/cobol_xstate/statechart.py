@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Dict, List, Optional
 
 from .analysis import CallAnalysis, analyze_calls
@@ -1115,7 +1116,13 @@ def _initial_value(item) -> object:
         if up in ("SPACE", "SPACES"):
             return ""
         if re.match(r"^[+-]?\d+(\.\d+)?$", v):
-            return float(v) if "." in v else int(v)
+            # A fractional VALUE is kept as an EXACT decimal string, never a float. This
+            # is a fixed-point tool - `PIC V9(8) VALUE 0.00000001` through a float becomes
+            # 1e-08 and then, formatted, "0.000000": the value the whole runtime exists to
+            # preserve, lost before the runtime ever sees it. `format(Decimal, "f")` gives
+            # the exact digits with no scientific notation and keeps the written scale
+            # ("1.50" stays "1.50"). Integers stay ints - exact already, and unchanged.
+            return format(Decimal(v), "f") if "." in v else int(v)
         return v
     if t is not None and t.category.startswith("numeric"):
         return 0

@@ -442,3 +442,40 @@ def test_free_format_real_paragraph_header_after_a_period_is_recognized():
         "    CONTINUE.\n"
     )
     assert [p.name for p in prog.paragraphs] == ["0000-MAIN", "1000-SUB"]
+
+
+# --------------------------------------------------------------------------- #
+# fixed-point VALUEs stay exact - never a float (review finding J15)
+# --------------------------------------------------------------------------- #
+
+def test_fractional_value_is_kept_as_an_exact_decimal_string():
+    from cobol_xstate.statechart import _initial_value
+
+    class _Item:
+        def __init__(self, value):
+            self.value = value
+            self.type = type("T", (), {"category": "numeric-display"})()
+
+    # the value the whole decimal runtime exists to preserve must not pass through a float
+    assert _initial_value(_Item("0.00000001")) == "0.00000001"
+    assert _initial_value(_Item("1.50")) == "1.50"          # written scale preserved
+    assert _initial_value(_Item("-3.14")) == "-3.14"
+    # integers stay integers (exact already)
+    assert _initial_value(_Item("0")) == 0
+    assert _initial_value(_Item("5")) == 5
+
+
+def test_emitted_context_seeds_a_tiny_value_without_scientific_notation():
+    from cobol_xstate.emitter import emit_setup_module
+    mod = emit_setup_module(_machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TINY.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-RATE PIC V9(8) VALUE 0.00000001.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE WS-RATE TO WS-RATE\n"
+        "           STOP RUN.\n"))
+    assert '"WS-RATE": "0.00000001"' in mod
+    assert "1e-08" not in mod and "0.000000\"" not in mod
