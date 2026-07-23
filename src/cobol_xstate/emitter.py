@@ -587,23 +587,22 @@ def _transition_targets(state: dict) -> List[str]:
     return out
 
 
-def _emit_split(key: str, st: dict, out: dict, buildable: set, needed: set) -> None:
+def _emit_split(key: str, st: dict, out: dict, buildable: Dict[str, str],
+                needed: set) -> None:
     """Rewrite one state into a chain so each PERFORM of a buildable paragraph becomes an
     `invoke` sub-state. Non-PERFORM entry actions and PERFORMs of non-buildable targets
     stay as ordinary (no-op) actions. The state's control (always/type/...) rides on the
     last node so inbound transitions to `key` still land on the first executed node."""
     entry = st.get("entry", []) or []
-    has_invoke_perform = any(
-        a.startswith("perform_") and a[len("perform_"):] in buildable for a in entry)
-    if not has_invoke_perform:
+    if not any(a in buildable for a in entry):
         out[key] = st
         return
 
     segments: List[Tuple[str, object]] = []
     cur: List[str] = []
     for a in entry:
-        para = a[len("perform_"):] if a.startswith("perform_") else None
-        if para is not None and para in buildable:
+        para = buildable.get(a)
+        if para is not None:
             segments.append(("ops", cur)); cur = []
             segments.append(("perform", para))
             needed.add(para)
@@ -658,11 +657,56 @@ def _target_owner(target: str, ordered: List[str],
     return {target}, target
 
 
+_PERFORM = "perform_"
+# The name registry disambiguates a repeated base name by appending _2, _3, ...
+_REG_SUFFIX = re.compile(r"_\d+$")
+
+
+def perform_target(action: str, ordered: List[str],
+                   sections: Optional[Dict[str, List[str]]] = None) -> Optional[str]:
+    """The paragraph a ``perform_...`` action calls, or None if it is not one.
+
+    The target is carried IN the action's name, and the name registry appends ``_2``
+    when the same paragraph is performed by two statements whose text differs -
+    ``PERFORM 1000-INIT`` and ``PERFORM 1000-INIT 3 TIMES`` are one paragraph but two
+    statements. Every reader of these names used to slice off the prefix and take the
+    rest verbatim, so the second one resolved to a paragraph called ``1000-INIT_2``,
+    which does not exist: the emitter built no actor for it and the PERFORM became a
+    silent no-op - a whole paragraph's worth of behaviour absent from the runnable
+    machine, with no flag. It hits SORT INPUT/OUTPUT PROCEDURE by the same route.
+
+    The suffix is only stripped when doing so names a paragraph that EXISTS and the
+    unstripped form does not, so a paragraph legitimately ending in ``_2`` (COBOL
+    proper forbids the underscore, but dialects and preprocessors do not always agree)
+    still wins. Ambiguity resolves toward the name actually present in the program.
+    """
+    if not action.startswith(_PERFORM):
+        return None
+    rest = action[len(_PERFORM):]
+    if _target_owner(rest, ordered, sections)[0] is not None:
+        return rest
+    trimmed = _REG_SUFFIX.sub("", rest)
+    if trimmed != rest and _target_owner(trimmed, ordered, sections)[0] is not None:
+        return trimmed
+    return rest              # unresolvable either way: report it as written
+
+
 def _buildable_targets(pool: dict, ordered: List[str],
-                       sections: Optional[Dict[str, List[str]]] = None) -> set:
-    performed = {a[len("perform_"):] for st in pool.values()
-                 for a in (st.get("entry", []) or []) if a.startswith("perform_")}
-    return {t for t in performed if _target_owner(t, ordered, sections)[0] is not None}
+                       sections: Optional[Dict[str, List[str]]] = None) -> Dict[str, str]:
+    """``perform_...`` action name -> the paragraph it calls, for the calls that resolve.
+
+    A map rather than a set of paragraph names, because the action name is what the
+    states actually carry and it is not always the paragraph name plus a prefix.
+    """
+    out: Dict[str, str] = {}
+    for st in pool.values():
+        for a in (st.get("entry", []) or []):
+            if not a.startswith(_PERFORM) or a in out:
+                continue
+            target = perform_target(a, ordered, sections)
+            if _target_owner(target, ordered, sections)[0] is not None:
+                out[a] = target
+    return out
 
 
 def _reroute_to_return(states: dict, owner: set) -> None:
@@ -692,7 +736,7 @@ def _prune(states: dict, initial: str) -> dict:
     return {k: v for k, v in states.items() if k in seen}
 
 
-def _build_actors(pool: dict, buildable: set, seed: set, ordered: List[str],
+def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: List[str],
                   sections: Optional[Dict[str, List[str]]] = None) -> Dict[str, dict]:
     """Build an actor config for every PERFORM target reachable from `seed`, slicing the
     owned paragraph(s) out of the shared `pool` (so cross-region and THRU-range PERFORMs

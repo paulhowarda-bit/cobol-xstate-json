@@ -215,6 +215,10 @@ class Paragraph:
     name: str
     line: int
     section: Optional[str] = None
+    # The source spelling, when `name` had to be qualified to stay unique. COBOL allows
+    # one paragraph name in two SECTIONs; `name` is the machine's state id, this is what
+    # the program calls it. None when they are the same.
+    bare_name: Optional[str] = None
     origin: Optional[str] = None  # copybook member name if the header came from a COPY
     statements: List[Stmt] = field(default_factory=list)
     parse_error: Optional[str] = None  # set if the body failed to parse (corpus safety)

@@ -43,6 +43,8 @@ class ProvenanceEntry:
     cobol: str       # the exact COBOL text / condition / statement
     line: int
     member: Optional[str] = None  # copybook member, if this came from a COPY expansion
+    bare_name: Optional[str] = None  # source paragraph name, if `name` was qualified to
+                                     # break a cross-section duplicate (J4)
 
 
 # A quoted alphanumeric literal, kept out of the case-folding below.
@@ -108,12 +110,14 @@ class NameRegistry:
     def guard_named(self, base: str, cobol: str, line: int) -> str:
         return self.register("guard", _slug(base), cobol, line)
 
-    def state(self, name: str, cobol: str, line: int, member: Optional[str] = None) -> str:
+    def state(self, name: str, cobol: str, line: int, member: Optional[str] = None,
+              bare_name: Optional[str] = None) -> str:
         # State ids keep the COBOL paragraph/section name verbatim (XState keys may
         # contain hyphens); only register provenance.
         if name not in self.entries:
             self.entries[name] = ProvenanceEntry(name=name, kind="state", cobol=cobol,
-                                                 line=line, member=member)
+                                                 line=line, member=member,
+                                                 bare_name=bare_name)
         return name
 
     def provenance_dict(self) -> Dict[str, Dict[str, object]]:
@@ -122,6 +126,8 @@ class NameRegistry:
             entry: Dict[str, object] = {"kind": e.kind, "cobol": e.cobol, "line": e.line}
             if e.member:
                 entry["member"] = e.member
+            if e.bare_name:
+                entry["bareName"] = e.bare_name
             out[name] = entry
         return out
 

@@ -107,6 +107,7 @@ class Machine:
     # target is unresolvable, which is a different and more useful fact than THAT it is.
     unresolved_calls: Dict[str, dict] = field(default_factory=dict)
     _iface_cache: Optional[dict] = field(default=None, repr=False, compare=False)
+    _lineage_cache: object = field(default=None, repr=False, compare=False)
 
     def interface(self) -> dict:
         """The external-interface overlay over THIS machine's config, computed once.
@@ -127,6 +128,21 @@ class Machine:
                 data=self.data, using=self.using, returning=self.returning,
                 files=self.files)
         return self._iface_cache
+
+    def lineage(self):
+        """The reaching-origins analysis over THIS machine, solved once.
+
+        The lineage table and the dynamic-call view are two projections of the SAME
+        fixpoint - "which external event is responsible for this field's value" - and a
+        default run writes both, so each program used to build and solve it twice. It is
+        the most expensive analysis in the tool, so that was the single largest piece of
+        avoidable work in a run. Same reasoning, and same idempotence, as `interface`
+        above: a pure read of an unchanged machine, so one result serves both callers.
+        """
+        if self._lineage_cache is None:
+            from .lineage import _Lineage
+            self._lineage_cache = _Lineage(self)
+        return self._lineage_cache
 
     def bundle(self) -> dict:
         from .harel import to_harel
@@ -720,17 +736,30 @@ class _ParaCompiler:
     def compile_loop(self, st: PerformStmt, after: str, root: Optional[str]) -> str:
         varying = _parse_varying(st.control_text) if st.kind == "varying" else []
         until = _until_text(st.control_text)
+        times_ctr: Optional[str] = None
         if st.kind == "times" and not varying:
             # PERFORM n TIMES: the count is statically known - model it as a synthetic
             # counter stepped like a VARYING index (init 0, +1 each iteration, exit at n).
             m = re.match(r"\s*(\S+?)\s+TIMES\b", st.control_text or "", re.I)
             if m:
                 ctr = self.ctx.new_times_counter(st.line)
+                times_ctr = ctr
                 varying = [(ctr, "0", "1")]
                 until = f"{ctr} >= {m.group(1)}"
         # Name the guard from the full control clause (stable name); model its semantics
         # from the bounded UNTIL condition (so a VARYING ... AFTER doesn't over-capture).
-        g = self.reg.guard(st.control_text or f"{st.kind} clause", st.line)
+        base = st.control_text or f"{st.kind} clause"
+        if times_ctr:
+            # Two `PERFORM 5 TIMES` sites are the same TEXT but not the same TEST: each
+            # gets its own counter. The registry reuses one name per identical
+            # (kind, cobol), so on the shared text both loops ended up testing the FIRST
+            # loop's counter - already spent by the time the second ran, so the second
+            # body executed zero times, and with the loops the other way round it never
+            # ended at all. Neither was flagged. Naming the counter in the recorded COBOL
+            # keeps the sites distinct, and tells a reader which counter this one watches.
+            g = self.reg.guard_named(base, f"{base} [{times_ctr}]", st.line)
+        else:
+            g = self.reg.guard(base, st.line)
         if until:
             self.ctx.record_guard(g, until, self.pname, st.line)
 
@@ -1254,10 +1283,15 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
 
     for idx, para in enumerate(paras):
         # Register the paragraph name with its own provenance before compiling so the
-        # compiler's structural-state default does not overwrite it.
-        ctx.reg.state(para.name, f"paragraph {para.name}"
-                      + (f" (section {para.section})" if para.section else ""),
-                      para.line, member=para.origin)
+        # compiler's structural-state default does not overwrite it. When the name was
+        # qualified to break a cross-section collision, record the source spelling so a
+        # reader can still trace the state back to the COBOL it reads as.
+        bare = getattr(para, "bare_name", None)
+        cobol = (f"paragraph {bare} (section {para.section})" if bare
+                 else f"paragraph {para.name}"
+                 + (f" (section {para.section})" if para.section else ""))
+        ctx.reg.state(para.name, cobol, para.line, member=para.origin,
+                      bare_name=bare)
         if getattr(para, "parse_error", None):
             ctx.flag(para.name, para.line,
                      f"paragraph body did not parse ({para.parse_error}); recovered as one "

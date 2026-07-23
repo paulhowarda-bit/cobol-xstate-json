@@ -282,10 +282,74 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     prog.paragraphs = _group_paragraphs(main_lines)
     if decl_lines:
         prog.declaratives = _mark_use_handlers(_group_paragraphs(decl_lines))
+    _qualify_duplicate_paragraphs(prog.paragraphs + prog.declaratives)
 
     # Collect CICS HANDLE CONDITION registrations across all statements.
     prog.cics_handlers = _collect_cics_handlers(prog.paragraphs + prog.declaratives)
     return prog
+
+
+# Fields naming a PARAGRAPH (never a data item or a program), by statement type. A
+# `str` field holds one name, a `List[str]` field holds several.
+_PARA_REF_FIELDS = {
+    "PerformStmt": ("target", "thru"),
+    "GoToStmt": ("targets",),
+    "SortStmt": ("input_proc", "input_thru", "output_proc", "output_thru"),
+}
+
+
+def _qualify_duplicate_paragraphs(paras: List[Paragraph]) -> None:
+    """Make paragraph names unique, in place, when the same one is used in two SECTIONs.
+
+    COBOL requires a paragraph name to be unique only WITHIN its section, and the
+    `COMMON-EXIT.` per-section-exit idiom leans on that. The statechart uses the
+    paragraph name as the state id, so the second definition simply overwrote the first:
+    one state, carrying the LAST body, and every PERFORM of that name - from either
+    section - ran it. Section A's exit routine executed section B's, with no flag, and
+    the fall-through chain merged there too.
+
+    Each clashing definition becomes `NAME_OF_SECTION`, and references are re-pointed at
+    the definition in the REFERRING paragraph's own section, which is how COBOL resolves
+    an unqualified reference. A reference from outside any section that owns the name is
+    genuinely ambiguous - COBOL rejects it - so it is left alone for the statechart's
+    unknown-target check to flag rather than being silently pointed at a guess.
+    """
+    counts: Dict[str, int] = {}
+    for p in paras:
+        counts[p.name] = counts.get(p.name, 0) + 1
+    dupes = {n for n, c in counts.items() if c > 1}
+    if not dupes:
+        return
+
+    taken = {p.name for p in paras}
+    # bare name -> {section: unique id}
+    resolve: Dict[str, Dict[Optional[str], str]] = {}
+    for p in paras:
+        if p.name not in dupes:
+            continue
+        bare = p.name
+        # `_OF_` rather than `__OF__`: a double underscore is how a structural state id
+        # separates a paragraph from its suffix, so `_para_of` would read it back as a
+        # different paragraph entirely.
+        qualified = f"{bare}_OF_{p.section}" if p.section else bare
+        while qualified in taken and qualified != bare:
+            qualified += "_"
+        taken.add(qualified)
+        p.bare_name = bare
+        p.name = qualified
+        resolve.setdefault(bare, {})[p.section] = qualified
+
+    for p in paras:
+        for st in walk_statements(p.statements):
+            for f in _PARA_REF_FIELDS.get(type(st).__name__, ()):
+                v = getattr(st, f, None)
+                if isinstance(v, str):
+                    setattr(st, f, resolve.get(v, {}).get(p.section, v))
+                elif isinstance(v, list):
+                    setattr(st, f, [resolve.get(t, {}).get(p.section, t) for t in v])
+            if isinstance(st, AlterStmt):
+                st.pairs = [(resolve.get(a, {}).get(p.section, a),
+                             resolve.get(b, {}).get(p.section, b)) for a, b in st.pairs]
 
 
 def _split_declaratives(body: List[CodeLine]):
@@ -775,11 +839,28 @@ class StmtParser:
         line = self._next().line  # PERFORM
         t = self._peek()
         control_words = {"UNTIL", "VARYING", "WITH", "TEST", "TIMES", "FOREVER"}
-        # Inline PERFORM: PERFORM [control] ... END-PERFORM (no procedure target).
+        # `PERFORM 5 TIMES` and `PERFORM WS-N TIMES` name no procedure: the operand in
+        # front of TIMES is the repeat COUNT. Deciding that on the first token alone got
+        # both spellings wrong, and silently:
+        #   * a numeric count is not a `word`, so the statement looked out-of-line and
+        #     the inline body was never parsed - it stayed in the token stream and became
+        #     the paragraph's NEXT statements, so the body ran ONCE, after the loop, and
+        #     the loop itself spun n times doing nothing. Verified under real XState:
+        #     `PERFORM 5 TIMES ADD 1 TO WS-A END-PERFORM` left WS-A = 1.
+        #   * an identifier count was taken as the procedure name, inventing a PERFORM of
+        #     a paragraph called WS-N and leaving the control clause as a bare "TIMES"
+        #     with no count in it at all.
+        # One token of lookahead settles it. `PERFORM P 5 TIMES` still parses as a
+        # procedure plus a count, because the token after P is the count, not TIMES.
+        nxt = self._peek(1)
+        count_first = nxt is not None and nxt.is_word("TIMES")
         is_inline = (
             t is None
             or t.kind == "period"
-            or (t.kind == "word" and (t.up in control_words or t.up in STARTERS))
+            or t.kind != "word"
+            or t.up in control_words
+            or t.up in STARTERS
+            or count_first
         )
         target = None
         thru = None

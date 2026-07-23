@@ -76,6 +76,36 @@ def test_interface_returns_the_same_object_on_repeat_calls():
     assert m.interface() is m.interface()
 
 
+def test_lineage_analysis_is_built_once_per_machine(monkeypatch):
+    """The lineage table and the dynamic-call view are two projections of the same
+    reaching-origins fixpoint - the most expensive analysis in the tool - and a default
+    run writes both. Building it once for both is the single largest saving in a run."""
+    import cobol_xstate.lineage as lineage_mod
+    calls = []
+    real = lineage_mod._Lineage
+
+    def counting(machine):
+        calls.append(1)
+        return real(machine)
+
+    monkeypatch.setattr(lineage_mod, "_Lineage", counting)
+    m = _machine()
+    build_lineage(m)
+    from cobol_xstate.artifacts import build_artifacts
+    from cobol_xstate.dynamic_calls import build_dynamic_calls
+    build_dynamic_calls(m, build_artifacts(m))
+    assert len(calls) == 1
+
+
+def test_lineage_returns_the_same_object_on_repeat_calls():
+    m = _machine()
+    assert m.lineage() is m.lineage()
+    # ...and solving it twice does not append its flags twice.
+    first = m.lineage().run()
+    again = m.lineage().run()
+    assert again is first
+
+
 def test_reactive_is_not_served_the_cached_overlay():
     """The reactive view builds its overlay over a FLATTENED, rewritten config - a
     different input - so it must not be handed the machine's cached one."""

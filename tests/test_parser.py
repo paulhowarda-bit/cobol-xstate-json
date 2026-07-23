@@ -423,3 +423,55 @@ def test_goto_unknown_target_is_flagged_and_rerouted():
             yield from targets(st.get("states", {}))
     known = set(machine.config["states"])
     assert all(t in known for t in targets(machine.config["states"]))
+
+
+def test_perform_literal_times_keeps_its_inline_body():
+    """`PERFORM 5 TIMES ... END-PERFORM`: the count is not a `word`, so the statement
+    looked out-of-line and the inline body was never taken - it stayed in the stream and
+    became the paragraph's next statements, so the body ran once, AFTER the empty loop."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           PERFORM 5 TIMES\n"
+        "               ADD 1 TO WS-A\n"
+        "           END-PERFORM\n"
+        "           STOP RUN.\n"
+    ))
+    main = prog.paragraphs[0]
+    perform = main.statements[0]
+    assert isinstance(perform, PerformStmt)
+    assert perform.kind == "times"
+    assert perform.target is None
+    assert len(perform.inline_body) == 1               # the ADD is INSIDE the loop
+    assert perform.inline_body[0].__class__.__name__ == "Action"
+    assert isinstance(main.statements[1], TerminateStmt)  # STOP RUN, not the ADD
+
+
+def test_perform_variable_times_is_not_a_procedure_call():
+    """`PERFORM WS-N TIMES`: the identifier before TIMES is the COUNT, not a paragraph.
+    Taking it as a target invented a PERFORM of a paragraph WS-N and dropped the count."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           PERFORM WS-N TIMES\n"
+        "               ADD 1 TO WS-A\n"
+        "           END-PERFORM\n"
+        "           STOP RUN.\n"
+    ))
+    perform = prog.paragraphs[0].statements[0]
+    assert perform.target is None
+    assert "WS-N" in perform.control_text.upper()      # count survives in the clause
+    assert len(perform.inline_body) == 1
+
+
+def test_perform_procedure_then_times_still_parses_both():
+    """`PERFORM P n TIMES` (out-of-line with a count) must keep BOTH: the token after P
+    is the count, not TIMES, so the one-token lookahead does not misfire."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           PERFORM 1000-BUMP 3 TIMES\n"
+        "           STOP RUN.\n"
+    ))
+    perform = prog.paragraphs[0].statements[0]
+    assert perform.target == "1000-BUMP"
+    assert perform.kind == "times"
+    assert "3 TIMES" in perform.control_text.upper()
+    assert not perform.inline_body
