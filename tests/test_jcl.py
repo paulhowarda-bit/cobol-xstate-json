@@ -372,3 +372,58 @@ def test_cli_jcl_detection_does_not_misfire_on_cobol():
     cobol = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
     assert _looks_like_jcl("t.cbl", cobol) is False
     assert _looks_like_jcl("t.jcl", "//J JOB\n//S EXEC PGM=P\n") is True
+
+
+# --------------------------------------------------------------------------- #
+# instream DLM and PROC-step DD overrides (review finding J9)
+# --------------------------------------------------------------------------- #
+
+def test_custom_dlm_delimiter_ends_the_instream_data():
+    # DLM='$$' is quoted syntax; the delimiter is $$. Keeping the quotes meant the parser
+    # never found the end and the instream ran to EOF, swallowing every later step.
+    job = parse_jcl(
+        "//J        JOB (A),'T'\n"
+        "//STEP01   EXEC PGM=READER\n"
+        "//SYSIN    DD DATA,DLM='$$'\n"
+        "FIRST DATA LINE\n"
+        "//LOOKS LIKE JCL BUT IS DATA\n"
+        "$$\n"
+        "//STEP02   EXEC PGM=WRITER\n"
+        "//OUT      DD DSN=PROD.OUT,DISP=(NEW,CATLG)\n"
+    )
+    assert [s.name for s in job.steps] == ["STEP01", "STEP02"], "instream swallowed a step"
+    sysin = next(dd for s in job.steps for dd in s.dds if dd.ddname == "SYSIN")
+    assert sysin.instream_lines == ["FIRST DATA LINE", "//LOOKS LIKE JCL BUT IS DATA"]
+
+
+_TWICE = {"MYPROC": "//PS   EXEC PGM=UTIL\n//OUT  DD DSN=&&TEMP,DISP=(NEW,PASS)\n"}
+
+
+def test_proc_dd_override_binds_to_its_own_invocation():
+    # the same PROC run twice; each //PS.OUT override applies to the EXEC it follows,
+    # not to the first invocation for both (which clobbered one and skipped the other).
+    job = parse_jcl(
+        "//J     JOB (A),'T'\n"
+        "//RUN1  EXEC MYPROC\n"
+        "//PS.OUT DD DSN=PROD.FIRST.OUT\n"
+        "//RUN2  EXEC MYPROC\n"
+        "//PS.OUT DD DSN=PROD.SECOND.OUT\n",
+        resolver=_TWICE.get)
+    outs = {s.name: next(dd.segments[0].dsn for dd in s.dds if dd.ddname == "OUT")
+            for s in job.steps}
+    assert outs == {"RUN1.PS": "PROD.FIRST.OUT", "RUN2.PS": "PROD.SECOND.OUT"}
+
+
+def test_proc_dd_override_merges_and_keeps_the_disp_direction():
+    from cobol_xstate.jcl import _dd_direction
+    # the override names only DSN, so the PROC DD's DISP (and its output direction) must
+    # survive - replacing the whole DD nulled it and the dataflow edge disappeared.
+    job = parse_jcl(
+        "//J    JOB (A),'T'\n"
+        "//RUN  EXEC MYPROC\n"
+        "//PS.OUT DD DSN=PROD.REAL.OUT\n",
+        resolver=_TWICE.get)
+    out = next(dd for s in job.steps for dd in s.dds if dd.ddname == "OUT")
+    assert out.segments[0].dsn == "PROD.REAL.OUT"          # override's DSN wins
+    assert out.segments[0].disp == ["NEW", "PASS"]         # PROC DD's DISP kept
+    assert _dd_direction(out.segments[0]) == "output"      # ...so direction survives
