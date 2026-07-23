@@ -319,7 +319,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         return 2
     deps = str(run_dir / "deps")
     pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
-                         source_name=source_name, unavailable=why)
+                         source_name=source_name, unavailable=why,
+                         exts=tuple(args.copybook_ext) + default_exts)
 
     resolver = CopybookResolver(
         paths=search_paths,
