@@ -176,3 +176,44 @@ def test_fetch_keeps_unresolved_when_estate_has_nothing():
                if r["artifact"] == "ABENDL")
     assert row["status"] == "not-found"
     assert row["classification"] == CATEGORY_UNRESOLVED   # honest, not guessed
+
+
+# --------------------------------------------------------------------------- #
+# regression: multiple PROGRAM-IDs that are NOT well-formed nested programs
+# (concatenated separate units, or a unit missing its END PROGRAM) must not have
+# a whole unit's body - and its CALLs - silently dropped from the manifest.
+# --------------------------------------------------------------------------- #
+
+# Two separate compilation units in one member, with NO END PROGRAM. These are not
+# nested programs; each CALLs a different external subprogram.
+TWO_UNITS = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. PROGA.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS PIC 9(4) VALUE 0.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-A.\n"
+    "           CALL 'EXTX' USING WS\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. PROGB.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS PIC 9(4) VALUE 0.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-B.\n"
+    "           CALL 'EXTY' USING WS\n"
+    "           GOBACK.\n"
+)
+
+
+def test_unbalanced_program_units_do_not_drop_a_units_calls():
+    """Splitting on PROGRAM-ID count treated the 2nd unit as 'contained' and dropped its
+    body when END PROGRAM was absent, deleting its CALL from the dependency manifest. The
+    unit-splitter must fall back to one program when nesting is not well-formed."""
+    prog = parse_program(TWO_UNITS)
+    assert prog.nested_programs == []          # not mistaken for nesting; nothing stripped
+    called = {r["artifact"] for r in build_artifacts(_machine(TWO_UNITS))["artifacts"]
+              if r["kind"] == "program"}
+    assert {"EXTX", "EXTY"} <= called, f"a unit's CALL was dropped: {called}"

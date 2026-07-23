@@ -151,6 +151,15 @@ def _split_program_units(lines: List[CodeLine]) -> Tuple[List[CodeLine], List[st
         if depth <= 1:
             main_lines.append(cl)               # preamble (0) or main-program body (1)
         # depth >= 2: inside a contained program - dropped from the main program's lines
+    # A contained program is ALWAYS delimited by END PROGRAM (IBM requires every unit to
+    # carry one once any nesting is present). If the walk did not cleanly close (depth != 0),
+    # these are NOT well-formed nested programs but concatenated separate compilation units
+    # (or a nested unit missing its END PROGRAM) - and the loop has just dropped a whole
+    # unit's body, taking its CALLs out of the dependency manifest. That silent loss is worse
+    # than not splitting, so fall back to the pre-nesting behaviour: one program, nothing
+    # removed, no contained names. Well-formed nesting (depth returns to 0) is unaffected.
+    if depth != 0:
+        return lines, []
     # Preserve first-seen order, drop duplicates deterministically (no set iteration).
     return main_lines, list(dict.fromkeys(contained))
 
