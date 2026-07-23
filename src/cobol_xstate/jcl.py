@@ -286,6 +286,30 @@ def _parse_dd_segment(operands: str, symbols: Dict[str, str]) -> DDSegment:
     return seg
 
 
+def _merge_dd_segment(base: DDSegment, ov: DDSegment) -> DDSegment:
+    """A PROC-DD override overlaid on the PROC's DD: every parameter the override names
+    wins; every one it omits is inherited from the base. This is JCL's rule, and it is
+    why a `//STEP.OUT DD DSN=REAL.NAME` override keeps the PROC DD's DISP (and therefore
+    its input/output direction) instead of nulling it.
+
+    DUMMY and instream are treated as dataset REPLACEMENTS: naming either on the override
+    supersedes the base dataset outright.
+    """
+    if ov.dummy or ov.instream:
+        return ov
+    return DDSegment(
+        dsn=ov.dsn if ov.dsn is not None else base.dsn,
+        disp=ov.disp if ov.disp else base.disp,
+        sysout=ov.sysout if ov.sysout is not None else base.sysout,
+        instream=base.instream,
+        dummy=base.dummy,
+        member=ov.member if ov.member is not None else base.member,
+        gdg=ov.gdg if ov.gdg is not None else base.gdg,
+        unresolved_symbols=ov.unresolved_symbols or base.unresolved_symbols,
+        raw=f"{base.raw} | override: {ov.raw}",
+    )
+
+
 def _dd_direction(seg: DDSegment) -> Optional[str]:
     """'input' / 'output' / 'inout' / None for a single segment, from DISP / SYSOUT /
     instream. DISP status is the primary signal; OLD/I-O are ambiguous and noted by the
@@ -531,6 +555,11 @@ class _Parser:
         # The open IF/THEN/ELSE nesting at the current point of the member; every step
         # created gets a snapshot (a step inside ELSE carries the expr negated).
         self._ifstack: List[dict] = []
+        # The steps of the PROC invocation currently in scope. A `//procstep.dd DD`
+        # override applies to THIS invocation's step of that name - not, as it once did,
+        # to the first step anywhere in the job with a matching proc-step name, which
+        # sent the override to the wrong copy when a PROC was invoked more than once.
+        self._invocation: List[Step] = []
 
     # -- resolver plumbing --------------------------------------------------
     def _resolve(self, name: str, what: str) -> Optional[str]:
@@ -560,7 +589,10 @@ class _Parser:
         while i < len(self.physical):
             ln = self.physical[i]
             s = ln.rstrip()
-            if s == dlm:
+            # The delimiter is recognized in columns 1-2; anything after it on the line is
+            # ignored. Matching the WHOLE line missed a delimiter that carried a trailing
+            # comment or blanks, so equality is too strict - anchor at the start instead.
+            if s[:len(dlm)] == dlm and (dlm != "/*" or s == "/*"):
                 return data, i + 1
             if not data_mode and s.startswith("//") and not s.startswith("//*"):
                 return data, i          # DD *: the next // statement ends the stream
@@ -646,7 +678,12 @@ class _Parser:
                 posu = [p.upper() for p in pos]
                 if "*" in posu or "DATA" in posu:
                     data_mode = "DATA" in posu
-                    dlm = kw.get("DLM") or "/*"
+                    # DLM names a 2-character delimiter and is nearly always quoted
+                    # (`DLM='$$'`); the quotes are JCL syntax, not part of the delimiter.
+                    # Keeping them meant the parser looked for a line equal to `'$$'` and
+                    # never found it, so the instream ran to end-of-file and swallowed
+                    # every step after this one.
+                    dlm = (kw.get("DLM") or "/*").strip("'")
                     data, nxt = self._collect_instream(i + 1, dlm, data_mode)
                     items.append({"kind": "data", "ddname": name, "lines": data})
                     i = nxt
@@ -734,6 +771,7 @@ class _Parser:
                 new_steps = self._make_steps(log)
                 self._attach_step_context(new_steps)
                 self.job.steps.extend(new_steps)
+                self._invocation = new_steps    # overrides bind to THIS invocation
                 cur_step = new_steps[-1] if new_steps else None
                 cur_dd = None
                 idx += 1
@@ -881,6 +919,7 @@ class _Parser:
                 steps = self._make_steps(log)
                 self._attach_step_context(steps)
                 self.job.steps.extend(steps)
+                self._invocation = steps
                 step = steps[-1] if steps else step
             elif op == "DD":
                 self._handle_dd(log, step)
@@ -908,18 +947,25 @@ class _Parser:
     def _apply_override(self, dotted: str, log: _LogLine) -> None:
         procstep, ddname = dotted.split(".", 1)
         seg = _parse_dd_segment(log.operands, self.job.symbols)
-        target = None
-        for st in self.job.steps:
-            if st.proc_step == procstep or st.name.endswith("." + procstep):
-                target = st
-                break
+        # Bind to the invocation this override follows, not to the first step in the whole
+        # job with a matching proc-step name (which was wrong whenever a PROC ran twice).
+        scope = self._invocation or self.job.steps
+        target = next((st for st in scope
+                       if st.proc_step == procstep or st.name.endswith("." + procstep)),
+                      None)
         if target is None:
             self.job.flags.append(
                 f"DD override {dotted}: no PROC step {procstep} to apply it to")
             return
         for dd in target.dds:
             if dd.ddname == ddname:
-                dd.segments = [seg]        # override replaces
+                # An override MERGES: the parameters it names replace the PROC DD's, and
+                # the ones it omits are kept. Replacing the whole DD (as this did) dropped
+                # the PROC DD's DISP whenever the override only changed the DSN, and DISP
+                # is what the lineage reads for input-vs-output - so the direction went
+                # null and the dataflow edge vanished.
+                dd.segments = [_merge_dd_segment(dd.segments[0], seg)] if dd.segments \
+                    else [seg]
                 dd.override = True
                 return
         newdd = DD(ddname=ddname, override=True)
