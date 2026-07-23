@@ -315,7 +315,7 @@ Writes `<name>.prefetch.json` and `<name>.fetch.json`, one row per member/artifa
 
 | `status` | Meaning |
 |---|---|
-| `fetched` | retrieved; carries the library it came from, plus `alternatives` when the same name exists in more than one, and `typeNote` when the service's `detected_type` disagrees with the kind we inferred |
+| `fetched` | retrieved; carries the library it came from, `alternatives` when the same name exists in more than one, the callee's `language`/`languageBasis` for a called program (see below), and `typeNote` when the service's `detected_type` disagrees with what we requested |
 | `local` | already on an `-I` path — no round-trip |
 | `prefetched` | *(stage 2)* stage 1 already retrieved it; reported, not re-requested |
 | `not-found` | the service was asked and had nothing — a real gap on the estate |
@@ -323,6 +323,17 @@ Writes `<name>.prefetch.json` and `<name>.fetch.json`, one row per member/artifa
 | `no-service` | no estate client was reachable, so it was never looked for |
 | `already-fetched` | another row in this manifest reached the same member |
 | `skipped` | the row never named a retrievable artifact, with the reason |
+
+**A called program's language is proven, not assumed.** A `CALL` names a load module but
+not its language — the callee may be COBOL, assembler, PL/I, or C. So a program dependency
+is requested by trying each language in likelihood order (`cobol`, then `asm`; extend for
+an estate that also holds others) and the request that retrieves it is the finding: COBOL
+and assembler source live in different libraries, so a member found only as `asm` *is* an
+assembler module. The `fetched` row records `language` and a `languageBasis` — either
+`estate detected_type` when the service names the type itself (`assembler`/`HLASM` fold to
+`asm`), or e.g. `retrieved as asm (cobol not present)`. The fetch plan shows the order as
+`probeTypes` and never pre-labels a program `cobol`; the member is saved under the matching
+extension (`.cbl`, `.asm`, …).
 
 The `skipped` rows are the honest part. Three cases, and each would produce the wrong
 file if fetched blindly:

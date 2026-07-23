@@ -57,6 +57,24 @@ _PATH_KEYS = ("copied_to", "path", "source_path", "file")
 # Keys naming WHERE the member came from - its identity, preferred over a cache path.
 _ORIGIN_KEYS = ("source_location", "source_path", "path", "copied_to", "file")
 
+# Estate vocabularies differ; fold synonyms onto the canonical type this tool uses, so a
+# member the estate calls "assembler" / "HLASM" is treated, saved, and labelled as "asm"
+# rather than falling through to a neutral ".txt" and reading as an unknown kind.
+_TYPE_SYNONYMS = {
+    "assembler": "asm", "hlasm": "asm", "alc": "asm", "bal": "asm",
+    "cob": "cobol", "cbl": "cobol",
+    "pl1": "pli", "pl/1": "pli", "pl/i": "pli",
+}
+
+
+def canonical_type(type_name: Optional[str]) -> Optional[str]:
+    """Fold an estate's type/language name onto this tool's canonical vocabulary
+    (``assembler`` -> ``asm``, ``cbl`` -> ``cobol``, ...). ``None`` stays ``None``."""
+    if not type_name:
+        return type_name
+    t = str(type_name).strip().lower()
+    return _TYPE_SYNONYMS.get(t, t)
+
 
 @dataclass
 class Fetched:
@@ -75,7 +93,7 @@ class Fetched:
         """Set when we asked for one kind and the service found another - a finding
         about the estate, so it is reported rather than quietly resolved either way."""
         if (self.requested_type and self.detected_type
-                and self.requested_type.lower() != self.detected_type.lower()):
+                and canonical_type(self.requested_type) != canonical_type(self.detected_type)):
             return (f"requested as {self.requested_type}, but the service reports "
                     f"{self.detected_type}")
         return None
@@ -276,17 +294,42 @@ def call_service(fetcher: Callable, name: str, type_hint: Optional[str] = None,
         f"{type(last_type_error).__name__}: {last_type_error}")
 
 
+def call_service_probing(fetcher: Callable, name: str, type_order,
+                         copy_to: Optional[str] = None) -> Optional[Fetched]:
+    """Ask the estate for ``name`` as each type in ``type_order`` (most-likely first) and
+    return the FIRST that produces the member.
+
+    The type that retrieves it identifies its language: on a mainframe COBOL and assembler
+    source live in different libraries, so a member found only when asked for as ``asm`` is
+    an assembler module - proven by where it lives, not guessed from the caller. Stops at
+    the first hit (a COBOL callee costs one call). A ``ServiceUnavailable`` from any probe
+    propagates - it is a real failure, not a miss. Returns ``None`` only if EVERY type came
+    back empty. When the estate returns its own ``detected_type``, that remains authoritative
+    downstream (see ``Fetched.type_disagreement``)."""
+    order = [t for t in (type_order or []) if t]
+    if not order:
+        return call_service(fetcher, name, None, copy_to)
+    for type_hint in order:
+        got = call_service(fetcher, name, type_hint, copy_to)
+        if got is not None:
+            return got
+    return None
+
+
 # Extension used when this tool saves a retrieved member locally, keyed by the estate's
 # own type vocabulary. Both stages save through here so a member retrieved as a copybook
 # in stage 1 and referenced as one in stage 2 lands under one name, not two.
 EXT_FOR_TYPE = {
     "cobol": ".cbl", "copybook": ".cpy", "ddl": ".sql", "cntl": ".txt",
     "bms": ".bms", "csd": ".txt", "jcl": ".jcl", "proc": ".prc", "asm": ".asm",
+    "pli": ".pli", "c": ".c",
 }
 
 
 def save_ext(type_name: Optional[str]) -> str:
-    return EXT_FOR_TYPE.get((type_name or "").lower(), ".txt")
+    """Local extension for a retrieved member, keyed by its canonical type - so an
+    estate that answers ``assembler`` still lands the member under ``.asm``."""
+    return EXT_FOR_TYPE.get(canonical_type(type_name) or "", ".txt")
 
 
 def save_member(dest: str, name: str, type_name: Optional[str], text: str) -> str:

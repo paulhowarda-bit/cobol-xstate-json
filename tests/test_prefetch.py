@@ -114,10 +114,12 @@ def test_a_dynamic_call_resolves_only_once_its_copybook_has_been_prefetched():
     targets = {r["artifact"] for r in seeing["artifacts"] if r["kind"] == "program"}
     assert "POSTLOG" in targets
 
-    # ...and it is now a real row in the fetch plan, requested as a program.
+    # ...and it is now a real row in the fetch plan, requested as a program - probed by
+    # language (cobol -> asm), not assumed to be cobol.
     plan = {p["artifact"]: p for p in build_fetch_plan(seeing)}
     assert plan["POSTLOG"]["status"] == "planned"
-    assert plan["POSTLOG"]["type"] == "cobol"
+    assert plan["POSTLOG"]["type"] is None
+    assert plan["POSTLOG"]["probeTypes"] == ["cobol", "asm"]
 
 
 def test_the_manifest_says_which_rows_it_owes_to_prefetch():
