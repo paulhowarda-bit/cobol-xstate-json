@@ -213,6 +213,14 @@ class _BuildCtx:
     unresolved_calls: Dict[str, dict] = field(default_factory=dict)
     action_sem: Dict[str, dict] = field(default_factory=dict)  # action name -> operation
     guard_sem: Dict[str, dict] = field(default_factory=dict)   # guard name  -> condition tree
+    # guard name -> 'control' for a guard the COMPILER synthesized from control-flow
+    # mechanics (a loop's exit test, a file's end-of-stream / INVALID KEY, an ON SIZE
+    # ERROR / EXCEPTION handler, SEARCH AT END). Recorded HERE, where the kind is known
+    # for certain, so no downstream view has to guess it back from the guard's NAME - a
+    # guess that was wrong in both directions (it read INVALID KEY / ON SIZE ERROR as
+    # business decisions, and hid genuine but unparsed conditions as scaffolding). A
+    # guard absent from this map is an ordinary data condition (business).
+    guard_kind: Dict[str, str] = field(default_factory=dict)
     flags: List[dict] = field(default_factory=list)
     _seen_flags: set = field(default_factory=set)
     # Synthetic data items the compiler introduces (PERFORM n TIMES loop counters):
@@ -269,6 +277,11 @@ class _BuildCtx:
                 self.flag(para, line,
                           f"{spec['verb']} ON SIZE ERROR - the overflow path must be "
                           f"replicated in the rewrite")
+
+    def mark_control_guard(self, name: Optional[str]) -> None:
+        """Tag a guard the compiler produced from control-flow mechanics, not data."""
+        if name:
+            self.guard_kind[name] = "control"
 
     def record_guard(self, name: str, cond_text: str, para: str = "", line: int = 0) -> None:
         if name in self.guard_sem or not cond_text.strip():
@@ -760,6 +773,9 @@ class _ParaCompiler:
             g = self.reg.guard_named(base, f"{base} [{times_ctr}]", st.line)
         else:
             g = self.reg.guard(base, st.line)
+        # A loop's exit test is control-flow mechanics, not a business decision, whether
+        # it spells UNTIL or counts down a PERFORM n TIMES.
+        self.ctx.mark_control_guard(g)
         if until:
             self.ctx.record_guard(g, until, self.pname, st.line)
 
@@ -926,6 +942,7 @@ class _ParaCompiler:
             gend = self.reg.guard_named(
                 f"{_slug(st.table)}_searchAtEnd",
                 f"{verb} {st.table} exhausted (AT END) - runtime", st.line)
+            self.ctx.mark_control_guard(gend)   # table-exhausted: mechanical
             tgt = self.compile_block(st.at_end_body, after)
             edges.append(self._edge(tgt, "search-at-end", st.line, guard=gend))
         edges.append(self._edge(after, "search-continue", st.line,
@@ -951,6 +968,7 @@ class _ParaCompiler:
             g = self.reg.guard_named(
                 f"{base}_{stem}", f"{key.replace('_', ' ')} raised at runtime "
                 f"by {base} - runtime condition", st.line)
+            self.ctx.mark_control_guard(g)     # ON SIZE ERROR / EXCEPTION: mechanical
             tgt = self.compile_block(body, after) if body else after
             edges.append(self._edge(tgt, "on-condition", st.line, guard=g, note=key))
         edges.append(self._edge(after, "on-continue", st.line,
@@ -969,6 +987,7 @@ class _ParaCompiler:
         edges = []
         for key, body in st.handlers.items():
             g = _io_guard(st, key, self.reg)
+            self.ctx.mark_control_guard(g)     # AT END / INVALID KEY / EOP: mechanical
             tgt = self.compile_block(body, after) if body else after
             edges.append(self._edge(tgt, "io-handler", st.line, guard=g, note=key))
         edges.append(self._edge(after, "io-continue", st.line, note="normal (no condition)"))
@@ -1377,7 +1396,8 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         program_id=program.program_id,
         source_name=source_name,
         data={**_data_dictionary(program), **ctx.synthetic_data},
-        semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem},
+        semantics={"actions": ctx.action_sem, "guards": ctx.guard_sem,
+                   "guardKinds": ctx.guard_kind},
         paragraph_order=[p.name for p in program.paragraphs]
         + [p.name for p in program.declaratives],
         sections=_section_map(program),

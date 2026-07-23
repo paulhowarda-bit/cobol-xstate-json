@@ -35,20 +35,29 @@ from .statechart import Machine
 # guard / action classification
 # --------------------------------------------------------------------------- #
 
-def _is_control_guard(name: str, tree: Optional[dict]) -> bool:
-    """A guard that rides on control-flow mechanics, not a business condition: a loop's
-    ``UNTIL_...`` test, a file ``..._atEnd`` end-of-stream, or an unmodeled ``{op:'raw'}``.
+def _is_control_guard(name: str, tree: Optional[dict],
+                      kinds: Optional[Dict[str, str]] = None) -> bool:
+    """Does this guard ride on control-flow mechanics rather than a business condition?
 
-    The end-of-stream test matches the ``notAtEnd`` sense too. Anchoring on ``_atEnd``
-    missed it - ``IN-FILE_notAtEnd`` does not end in ``_atEnd`` - so the NOT AT END arm of
-    a READ was reported as a *business* decision, which is exactly backwards: it is the
-    most mechanical branch in the language.
+    The answer is now RECORDED, not guessed: the compiler tags every guard it synthesizes
+    from a loop's exit test, a file's end-of-stream / INVALID KEY, an ON SIZE ERROR /
+    EXCEPTION handler, or SEARCH AT END as ``control`` in ``semantics['guardKinds']`` -
+    at the one point where the kind is known for certain. When the tag is present it is
+    authoritative.
+
+    The old name/tree heuristic that stood in for it was wrong in BOTH directions, and
+    the tag exists to end that. It missed every mechanical guard whose name did not end
+    in ``atend`` (``INVALID KEY``, ``AT END-OF-PAGE``, ``ON SIZE ERROR`` all read as
+    *business decisions*), and it treated every unparsed ``{op:'raw'}`` condition as
+    control, silently deleting real business branches the parser simply could not model
+    yet. Both are removed. The residual name test survives only as a fallback for guards
+    that carry no tag - guards minted by another producer (the reactive lowering) or by
+    data predating the tag - and it deliberately no longer folds ``raw`` into control.
     """
-    if name.startswith("UNTIL_") or name.lower().endswith("atend"):
-        return True
-    if isinstance(tree, dict) and tree.get("op") == "raw":
-        return True
-    return False
+    tag = (kinds or {}).get(name)
+    if tag is not None:
+        return tag == "control"
+    return name.startswith("UNTIL_") or name.lower().endswith("atend")
 
 
 def _chain(link) -> list:
@@ -105,6 +114,7 @@ class _BusinessView:
         self.config = machine.config
         self.states: Dict[str, dict] = self.config.get("states", {})
         self.guards: Dict[str, dict] = machine.semantics.get("guards", {})
+        self.guard_kinds: Dict[str, str] = machine.semantics.get("guardKinds", {})
         self.actions: Dict[str, dict] = machine.semantics.get("actions", {})
         self.provenance = machine.provenance
         iface = machine.interface()
@@ -129,7 +139,7 @@ class _BusinessView:
             return "terminal"
         boundary = name in self.perimeter
         decision = any(
-            e.get("guard") and not _is_control_guard(e["guard"], self.guards.get(e["guard"]))
+            e.get("guard") and not self._control_guard(e["guard"])
             for e in (st.get("always", []) or [])
         )
         if boundary and decision:
@@ -145,6 +155,9 @@ class _BusinessView:
                for a in (st.get("entry", []) or [])):
             return "calculation"
         return "technical"
+
+    def _control_guard(self, name: str) -> bool:
+        return _is_control_guard(name, self.guards.get(name), self.guard_kinds)
 
     def _is_business(self, name: str) -> bool:
         """Cached: the collapse walk asks this of every state it steps through, once per
@@ -182,7 +195,7 @@ class _BusinessView:
     def _guard_dict(self, name: str) -> dict:
         tree = self.guards.get(name)
         return {"name": name, "condition": tree, "field": _guard_field(tree),
-                "kind": "control" if _is_control_guard(name, tree) else "business"}
+                "kind": "control" if self._control_guard(name) else "business"}
 
     def _step(self, state: str, stack: tuple):
         """Yield ``(label, (next_state, next_stack))`` for one control step from a config."""
@@ -407,7 +420,7 @@ class _BusinessView:
         decisions = []
         for e in (st.get("always", []) or []):
             g = e.get("guard")
-            if g and not _is_control_guard(g, self.guards.get(g)):
+            if g and not self._control_guard(g):
                 tree = self.guards.get(g)
                 decisions.append({"guard": g, "field": _guard_field(tree), "condition": tree})
         if primary_prov is None and internal_steps:

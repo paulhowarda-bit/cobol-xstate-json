@@ -27,10 +27,29 @@ def _tx(view, frm, to):
 # guard classification
 # --------------------------------------------------------------------------- #
 
-def test_loop_and_atend_guards_are_control():
+def test_a_recorded_control_tag_is_authoritative():
+    # the compiler tags every guard it synthesizes from control-flow mechanics; the tag
+    # wins over any name/tree guess. INVALID KEY, ON SIZE ERROR, AT END-OF-PAGE all carry
+    # names that no heuristic would have recognised as mechanical.
+    kinds = {"IX-FILE_invalidKey": "control", "C_sizeError": "control"}
+    assert _is_control_guard("IX-FILE_invalidKey", None, kinds)
+    assert _is_control_guard("C_sizeError", None, kinds)
+
+
+def test_an_unparsed_condition_is_not_treated_as_control():
+    # A {op:'raw'} guard is a business condition the parser could not model yet, NOT
+    # scaffolding. The old heuristic folded it into control and the business view then
+    # collapsed the branch away entirely - deleting a real decision. It must survive.
+    assert not _is_control_guard("FUNCTION_NUMVAL_X_gt_5", {"op": "raw", "text": "?"})
+    assert not _is_control_guard("FUNCTION_NUMVAL_X_gt_5", {"op": "raw"}, {})
+
+
+def test_name_fallback_only_applies_without_a_tag():
+    # untagged guards (another producer, or data predating the tag) still fall back to the
+    # name test, which recognises the loop and end-of-stream spellings.
     assert _is_control_guard("UNTIL_WS-EOF_eq_Y", None)
     assert _is_control_guard("TRAN-FILE_atEnd", None)
-    assert _is_control_guard("X", {"op": "raw", "text": "?"})
+    assert _is_control_guard("IN-FILE_notAtEnd", None)      # the NOT arm is mechanical too
 
 
 def test_business_relational_guard_is_not_control():
@@ -303,3 +322,87 @@ def test_every_interface_event_anchors_to_a_state_that_exists():
         states = set(v["machine"]["states"])
         for e in v["interface"]["events"]:
             assert e["state"] in states, f"{name}: {e['event']} anchors to {e['state']}"
+
+
+# --------------------------------------------------------------------------- #
+# guard classification is recorded, not guessed (review finding J11)
+# --------------------------------------------------------------------------- #
+
+def _guardp_view():
+    """A program exercising every mechanical guard family plus one unparsed condition."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. GUARDP.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT IX-FILE ASSIGN TO IXDD\n"
+        "               ORGANIZATION IS INDEXED ACCESS IS RANDOM\n"
+        "               RECORD KEY IS IX-KEY FILE STATUS IS WS-FS.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD IX-FILE.\n"
+        "       01 IX-REC.\n"
+        "          05 IX-KEY PIC X(8).\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-FS PIC XX.\n"
+        "       01 WS-A  PIC 9(5) VALUE 0.\n"
+        "       01 WS-K  PIC X(8).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           READ IX-FILE\n"
+        "               INVALID KEY MOVE 1 TO WS-A\n"
+        "               NOT INVALID KEY MOVE 2 TO WS-A\n"
+        "           END-READ\n"
+        "           COMPUTE WS-A = WS-A * 2\n"
+        "               ON SIZE ERROR MOVE 9 TO WS-A\n"
+        "           END-COMPUTE\n"
+        "           IF FUNCTION NUMVAL(WS-K) > 5\n"
+        "               MOVE 4 TO WS-A\n"
+        "           ELSE\n"
+        "               MOVE 5 TO WS-A\n"
+        "           END-IF\n"
+        "           STOP RUN.\n"
+    )
+    return build_business_view(build_machine(parse_program(src), source_name="guardp.cbl"))
+
+
+def test_the_compiler_tags_mechanical_guards_as_control():
+    m = build_machine(parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. G.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-A PIC 9(5) VALUE 0.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           COMPUTE WS-A = WS-A * 2\n"
+        "               ON SIZE ERROR MOVE 9 TO WS-A\n"
+        "           END-COMPUTE\n"
+        "           PERFORM 5 TIMES\n"
+        "               ADD 1 TO WS-A\n"
+        "           END-PERFORM\n"
+        "           STOP RUN.\n"))
+    kinds = m.semantics["guardKinds"]
+    assert any(k.endswith("sizeError") and v == "control" for k, v in kinds.items())
+    # the PERFORM n TIMES exit is loop mechanics
+    assert any("TIMES" in k and v == "control" for k, v in kinds.items())
+
+
+def test_invalid_key_and_size_error_are_not_business_decisions():
+    v = _guardp_view()
+    # The READ state's boundary role must not be inflated to boundary+decision by its
+    # mechanical INVALID KEY arms; the COMPUTE must not become a decision at all.
+    for name, st in v["businessStates"].items():
+        for d in st.get("decisions", []):
+            assert "invalidKey" not in d["guard"], f"{name}: INVALID KEY read as a decision"
+            assert "sizeError" not in d["guard"], f"{name}: ON SIZE ERROR read as a decision"
+
+
+def test_an_unparsed_condition_survives_as_a_business_decision():
+    # `IF FUNCTION NUMVAL(...) > 5` is not modeled, so its guard is raw - but it is a real
+    # branch on data and must appear as a decision, not be collapsed as scaffolding.
+    v = _guardp_view()
+    raw_decisions = [d for st in v["businessStates"].values()
+                     for d in st.get("decisions", []) if "FUNCTION" in d["guard"]]
+    assert raw_decisions, "the unparsed business condition was hidden as scaffolding"
