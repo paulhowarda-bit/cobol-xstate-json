@@ -375,8 +375,16 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
     section: Optional[str] = None
     buckets: List[Paragraph] = [current]
     bucket_lines: List[List[CodeLine]] = [[]]
+    # A paragraph/section header can only begin at a sentence boundary - after the
+    # previous sentence's terminating period. Free format has no Area A, so the
+    # normalizer marks EVERY line an Area-A candidate; without this gate a statement
+    # continued onto a line that is just `NAME.` (a bare data-name plus period) matched
+    # the header shape and became a phantom paragraph, stealing the rest of the real one.
+    # (In fixed format the header is already column-gated, and a real header always sits
+    # at a boundary, so the gate is a safe no-op there.)
+    at_boundary = True
     for cl in body:
-        split = _split_header(cl)
+        split = _split_header(cl) if at_boundary else None
         if split is not None:
             name, is_section, rest = split
             section = name if is_section else section
@@ -387,8 +395,10 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
             bucket_lines.append([])
             if rest:  # PARA-1. MOVE ... - code on the header line belongs to the body
                 bucket_lines[-1].append(_rest_line(cl, rest))
+            at_boundary = (not rest) or rest.rstrip().endswith(".")
         else:
             bucket_lines[-1].append(cl)
+            at_boundary = cl.text.rstrip().endswith(".")
 
     for para, plines in zip(buckets, bucket_lines):
         # Robustness at scale: an unparseable paragraph must not abort the whole program
