@@ -406,3 +406,25 @@ def test_an_unparsed_condition_survives_as_a_business_decision():
     raw_decisions = [d for st in v["businessStates"].values()
                      for d in st.get("decisions", []) if "FUNCTION" in d["guard"]]
     assert raw_decisions, "the unparsed business condition was hidden as scaffolding"
+
+
+def test_cursor_fetch_boundary_action_carries_its_column_map():
+    # the business view classified without cursor_cols, so a FETCH boundary action showed
+    # its host variables but not which Db2 column each came from.
+    v = _view("sqlcols.cbl")
+    fetch = next(a for s in v["businessStates"].values()
+                 for a in s["boundaryActions"] if a["verb"] == "FETCH")
+    cols = fetch.get("columns")
+    assert cols, "the FETCH's host-var <-> column correlation is missing"
+    assert {(c["hostVar"], c["column"]) for c in cols} == {("WS-ID", "ID"), ("WS-BAL", "BAL")}
+
+
+def test_successors_follows_a_bare_string_handler_target():
+    # a handler region emits `on: {EVENT: "__H_x"}` - a bare string, not a {target: ...}
+    # dict. The iterator dropped those, unlike lineage's; fixed so the edge survives.
+    from cobol_xstate.business import _successors
+    st = {"on": {"IO.ERROR.F": "__H_HANDLER",
+                 "CICS.NOTFND": {"target": "__H_OTHER"}}}
+    out = _successors(st)
+    targets = {t for _, t in out}
+    assert "__H_HANDLER" in targets and "__H_OTHER" in targets

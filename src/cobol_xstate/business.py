@@ -103,7 +103,13 @@ def _successors(st: dict) -> List[Tuple[dict, str]]:
             out.append((lab, e["target"]))
     for ev, handler in (st.get("on", {}) or {}).items():
         for h in (handler if isinstance(handler, list) else [handler]):
-            if isinstance(h, dict) and h.get("target"):
+            # A handler target can be a BARE STRING, not only a {target: ...} dict -
+            # `statechart._build_handlers_region` emits `on: {EVENT: "__H_x"}` exactly so.
+            # Handling only the dict form silently dropped every watch->handler edge, the
+            # way lineage._edges (which does handle both) does not.
+            if isinstance(h, str):
+                out.append(({"event": ev}, h))
+            elif isinstance(h, dict) and h.get("target"):
                 out.append(({"event": ev}, h["target"]))
     return out
 
@@ -123,6 +129,9 @@ class _BusinessView:
         self.files = getattr(machine, "files", {}) or {}
         self._dv = _iface._DataView(machine.data)
         self._cursors = _iface._cursor_tables(machine.provenance)
+        # host-var <-> Db2 column correlation for a cursor FETCH; without it a FETCH's
+        # boundary action carried no columns (only the interface build passed this).
+        self._cursor_cols = _iface._cursor_columns(machine.semantics, machine.provenance)
         self.ordered: List[str] = machine.paragraph_order
         self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
@@ -393,7 +402,7 @@ class _BusinessView:
             prov = self.provenance.get(aname, {})
             hits = _iface._classify(aname, prov.get("cobol", ""),
                                     self.actions.get(aname), self._dv,
-                                    self.files, self._cursors)
+                                    self.files, self._cursors, self._cursor_cols)
             if hits:
                 for hit in hits:
                     # The FIELDS crossing here are the point of a boundary state: an
@@ -410,6 +419,8 @@ class _BusinessView:
                     if hit.get("params"):     # data flowing the other way (keys, WHERE)
                         ba["params"] = [{"name": f, "pic": self._pic(f)}
                                         for f in hit["params"]]
+                    if hit.get("columns"):    # a cursor FETCH's host-var <-> Db2 column map
+                        ba["columns"] = hit["columns"]
                     if prov.get("line"):
                         ba["line"] = prov["line"]
                     boundary_actions.append(ba)

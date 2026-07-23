@@ -178,6 +178,11 @@ class _Lineage:
         self.files = getattr(machine, "files", {}) or {}
         self.dv = _iface._DataView(self.data)
         self.cursors = _iface._cursor_tables(self.provenance)
+        # A FETCH's host-variable <-> Db2 COLUMN correlation, recovered from the cursor's
+        # DECLARE. Only the interface build passed this to `_classify`, so every FETCH row
+        # here carried an EMPTY `columns` map - the dynamic-call view, which reads it to
+        # say a value comes from `TABLE.COLUMN`, lost that entirely for cursor programs.
+        self.cursor_cols = _iface._cursor_columns(machine.semantics, self.provenance)
         self.flags: List[str] = []
         # Primitive provenance facts, recorded during the final (row-emitting) pass so a
         # backward query can answer "where did THIS item's value come from" for an item
@@ -584,7 +589,7 @@ class _Lineage:
             line = prov.get("line", 0)
             spec = self.actions.get(aname)
             hits = _iface._classify(aname, cobol, spec, self.dv, self.files,
-                                    self.cursors)
+                                    self.cursors, self.cursor_cols)
             got = [h for h in hits if h["direction"] == "get"]
             made = [h for h in hits if h["direction"] == "create"]
             # A MOVE / COMPUTE / SET into a LINKAGE (COMMAREA) field or RETURN-CODE is the
