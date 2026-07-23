@@ -391,3 +391,48 @@ def test_timing_prints_a_per_stage_breakdown_to_stderr(tmp_path, capsys):
     for stage in ("prefetch", "parse", "build_machine", "lineage-fixpoint",
                   "fetch", "views", "measured"):
         assert stage in err, f"missing stage {stage!r} in stderr:\n{err}"
+
+
+# --- timing_sink: an embedding program routing timings into its own log ---
+
+
+def test_timing_sink_receives_structured_rows_without_the_flag(tmp_path, capsys):
+    """An embedding program supplies a sink to route timings into its own timing log: it
+    gets the data WITHOUT --timing, and stderr stays quiet."""
+    got = []
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path)], timing_sink=got.append) == 0
+    assert len(got) == 1, "the sink is called exactly once, on a completed run"
+    rows = got[0]
+    assert rows and all(set(r) == {"stage", "ms"} for r in rows)
+    assert all(isinstance(r["ms"], float) for r in rows)
+    names = [r["stage"] for r in rows]
+    # A sink-only caller measures the same stages the flag reports - including the two
+    # pre-warmed analyses, which are the numbers worth logging.
+    for stage in ("prefetch", "parse", "build_machine", "interface",
+                  "lineage-fixpoint", "fetch", "views"):
+        assert stage in names, f"missing stage {stage!r} in {names}"
+    assert "timing (ms)" not in capsys.readouterr().err
+
+
+def test_timing_sink_and_flag_work_together(tmp_path, capsys):
+    got = []
+    assert run([EXAMPLES_CBL, "--timing", "--outdir", str(tmp_path)],
+               timing_sink=got.append) == 0
+    assert len(got) == 1 and got[0]
+    assert "timing (ms)" in capsys.readouterr().err
+
+
+def test_a_raising_timing_sink_never_fails_the_run(tmp_path, capsys):
+    """The sink is a diagnostic hook: a bug in the caller's own log must not fail a
+    conversion whose output files are already written."""
+    def boom(rows):
+        raise ValueError("caller bug")
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path)], timing_sink=boom) == 0
+    assert "timing sink raised" in capsys.readouterr().err
+
+
+def test_timing_sink_does_not_change_any_output_byte(tmp_path):
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path / "plain")]) == 0
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path / "sunk")],
+               timing_sink=lambda rows: None) == 0
+    assert _all_files(tmp_path / "plain") == _all_files(tmp_path / "sunk")

@@ -195,7 +195,7 @@ def _looks_like_jcl(source_name: str, source: str) -> bool:
 
 
 def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
-              paths: List[str]) -> int:
+              paths: List[str], timing_sink=None) -> int:
     """Parse a JCL job / PROC and emit its lineage + artifact manifest.
 
     Stage 1 runs first and must: a cataloged PROC, an INCLUDE member and a control-card
@@ -205,7 +205,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     it is."""
     import json as _json
 
-    timer = StageTimer(_log, args.timing, source_name)
+    timer = StageTimer(_log, args.timing, source_name, sink=timing_sink)
     fetcher, why = _service(args, source_name)
     base = _artifact_base(args, default_stem, "job")
     # Same ordering constraint as the COBOL path: prefetch writes into the run directory,
@@ -298,8 +298,14 @@ def _service(args, source_name: str):
 
 
 
-def run(argv: Optional[List[str]] = None) -> int:
+def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     """Parse args, configure logging, and dispatch, behind the top-level error boundary.
+
+    ``timing_sink`` lets an embedding Python program collect this run's per-stage
+    timings: it is called once, on a completed run, with
+    ``[{"stage": ..., "ms": ...}, ...]`` in call order, so the caller can route them
+    into its own timing log. Supplying it turns collection on without ``--timing``;
+    nothing reaches stderr unless ``--timing`` is also passed.
 
     An expected failure (any ``CobolXstateError``) becomes a one-line message + a non-zero
     exit code; an UNEXPECTED exception is reported as an internal error (exit 1) with the
@@ -307,7 +313,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet)
     try:
-        return _run(args)
+        return _run(args, timing_sink=timing_sink)
     except CobolXstateError as exc:
         # An expected, named failure: str(exc) IS the user-facing explanation.
         _log.error("%s", exc)
@@ -327,7 +333,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         return 1
 
 
-def _run(args) -> int:
+def _run(args, timing_sink=None) -> int:
     search_paths = list(args.copybook_path)
     if args.source == "-":
         source = sys.stdin.read()
@@ -344,9 +350,10 @@ def _run(args) -> int:
         search_paths.append(str(path.parent))  # look beside the source by default
 
     if args.jcl or _looks_like_jcl(source_name, source):
-        return _run_jcl(args, source, source_name, default_stem, search_paths)
+        return _run_jcl(args, source, source_name, default_stem, search_paths,
+                        timing_sink=timing_sink)
 
-    timer = StageTimer(_log, args.timing, source_name)
+    timer = StageTimer(_log, args.timing, source_name, sink=timing_sink)
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     fmt = _format(args.format)
     if fmt is None:
@@ -389,12 +396,12 @@ def _run(args) -> int:
         program = parse_program(source, fmt, resolver=resolver)
     with timer.stage("build_machine"):
         machine = build_machine(program, source_name=source_name)
-    # Under --timing, force the two memoized analyses now so each is attributed to its
-    # own line instead of to whichever companion writer happens to touch it first. Both
-    # run unconditionally later anyway (stage 2 builds the interface via build_artifacts
-    # and the lineage fixpoint via the dynamic-calls view), so pre-warming changes total
-    # work and emitted bytes by nothing.
-    if args.timing:
+    # When timings are being collected, force the two memoized analyses now so each is
+    # attributed to its own line instead of to whichever companion writer happens to touch
+    # it first. Both run unconditionally later anyway (stage 2 builds the interface via
+    # build_artifacts and the lineage fixpoint via the dynamic-calls view), so pre-warming
+    # changes total work and emitted bytes by nothing.
+    if timer.enabled:
         with timer.stage("interface"):
             machine.interface()
         with timer.stage("lineage-fixpoint"):
