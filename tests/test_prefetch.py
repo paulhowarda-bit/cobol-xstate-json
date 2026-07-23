@@ -274,3 +274,36 @@ def test_stage_two_does_not_re_request_what_stage_one_retrieved():
     assert "SUBPGMS" not in [n for n, _ in log]
     # ...while the program the prefetch made visible IS fetched, in stage 2
     assert "POSTLOG" in [n for n, _ in log]
+
+
+# --------------------------------------------------------------------------- #
+# --copybook-ext must reach stage 1, not only the parse (review finding J14)
+# --------------------------------------------------------------------------- #
+
+def test_prefetch_honors_a_custom_copybook_extension_on_disk(tmp_path):
+    """Stage 1 tried only its built-in extensions, so a member saved under a custom
+    --copybook-ext was reported MISSING (and, with a live service, fetched from the
+    estate, shadowing the local file) even though the parse then resolved it fine."""
+    cpy = tmp_path / "cpy"
+    cpy.mkdir()
+    (cpy / "CUSTREC.xyz").write_text(
+        "           05 CUST-ID  PIC X(8).\n"
+        "           05 CUST-BAL PIC 9(7)V99.\n")
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. USESCPY.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-CUST.\n"
+        "       COPY CUSTREC.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 0 TO CUST-BAL\n"
+        "           STOP RUN.\n"
+    )
+    # no fetcher: the member exists ONLY as the local .xyz file. With the extension
+    # threaded through, stage 1 finds it locally; without it, it is never looked for.
+    pre = prefetch_cobol(src, None, paths=[str(cpy)], exts=(".xyz",))
+    row = _row(pre, "CUSTREC")
+    assert row["status"] == "local"
+    assert row["source"].endswith("CUSTREC.xyz")

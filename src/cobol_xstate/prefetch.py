@@ -145,10 +145,20 @@ class _Prefetcher:
 
     def __init__(self, fetcher: Optional[Callable], paths: Optional[List[str]] = None,
                  dest: Optional[str] = None, unavailable: Optional[str] = None,
-                 result: Optional[PrefetchResult] = None):
+                 result: Optional[PrefetchResult] = None,
+                 exts: Optional[Tuple[str, ...]] = None):
         self.fetcher = fetcher
         self.paths = list(paths or [])
         self.dest = dest
+        # The extensions to try on disk. The caller's `--copybook-ext` values come FIRST,
+        # then the built-in list. Without threading them here, stage 1 tried only the
+        # defaults, reported a member saved under a custom extension as MISSING, and - with
+        # a live service - fetched the estate's copy instead, shadowing the very local file
+        # the flag pointed at. The parse (stage 2) resolved it fine, so the two disagreed.
+        seen_ext: dict = {}
+        for e in (*(exts or ()), *_LOCAL_EXTS):
+            seen_ext.setdefault(e, None)
+        self.exts: Tuple[str, ...] = tuple(seen_ext)
         self.result = result or PrefetchResult()
         # Only ever RECORD an outage, never clear one. A second stage called with
         # unavailable=None (the COBOL run's --bind-jcl loop does exactly this) was
@@ -167,7 +177,7 @@ class _Prefetcher:
         """A member already on the search path. Checked first, always: a member on disk
         must never cost a network round-trip."""
         for base in self.paths:
-            for ext in _LOCAL_EXTS:
+            for ext in self.exts:
                 candidate = os.path.join(base, name + ext)
                 if os.path.isfile(candidate):
                     # Explicit decode: without encoding= this uses the platform default
@@ -261,13 +271,14 @@ def prefetch_cobol(source: str, fetcher: Optional[Callable],
                    fmt: Optional[SourceFormat] = None,
                    source_name: str = "<source>",
                    unavailable: Optional[str] = None,
-                   result: Optional[PrefetchResult] = None) -> PrefetchResult:
+                   result: Optional[PrefetchResult] = None,
+                   exts: Optional[Tuple[str, ...]] = None) -> PrefetchResult:
     """Close over every ``COPY`` / ``EXEC SQL INCLUDE`` member the program needs.
 
     Transitive: each retrieved member is scanned in turn, because a copybook that COPYs
     another copybook has a hole in it exactly like the program did. Cycles terminate on
     the seen-set, so a mutually-including pair costs one fetch each."""
-    pf = _Prefetcher(fetcher, paths, dest, unavailable, result)
+    pf = _Prefetcher(fetcher, paths, dest, unavailable, result, exts)
     # Name the source only if the shared result has not been named already. A COBOL run
     # with --bind-jcl calls prefetch_jcl once per JCL file against the PROGRAM's result,
     # and overwriting made the program's own prefetch report attribute its copybooks to
