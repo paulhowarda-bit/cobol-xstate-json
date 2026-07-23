@@ -327,6 +327,38 @@ def test_emitted_money_accumulation_is_exact_decimal(repo_tmp):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_a_tiny_fractional_value_seeds_exactly_under_xstate(repo_tmp):
+    """A `PIC V9(8) VALUE 0.00000001` must reach the running machine as that exact value.
+    Through the old float path it seeded 1e-08 and emitted "0.000000" - eight orders of
+    magnitude of error in the seed, in a tool whose whole premise is fixed-point decimal."""
+    tmp_path = repo_tmp
+    m = build_machine(parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TINY.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-RATE PIC V9(8) VALUE 0.00000001.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE WS-RATE TO WS-RATE\n"
+        "           STOP RUN.\n"), source_name="tiny")
+    (tmp_path / "machine.mjs").write_text(emit_setup_module(m))
+    (tmp_path / "cobolRuntime.mjs").write_text(RUNTIME.read_text())
+    driver = tmp_path / "tiny.mjs"
+    driver.write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n"
+        "const v = String(a.getSnapshot().context['WS-RATE']);\n"
+        "if (v !== '0.00000001') { console.error('WS-RATE', v); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
+                       cwd=str(tmp_path), timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def _run_to_done(tmp_path, name, expect):
     """Emit `name`, run it under *stock* createActor (no reference driver), and assert the
     final context equals `expect`. This is the end-to-end proof of PERFORM call-return."""

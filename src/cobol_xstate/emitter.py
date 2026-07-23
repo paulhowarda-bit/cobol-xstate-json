@@ -36,6 +36,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 from .data_division import expand_pic
@@ -513,7 +514,14 @@ def _strip_meta(obj):
 
 def _js_context(config: dict, fields: Dict[str, dict]) -> dict:
     def _num_str(x):
-        return format(x, "f") if isinstance(x, float) else str(x)
+        # A float here would already have lost precision upstream, but never truncate it
+        # to format()'s 6-place default on the way out: route it through Decimal so the
+        # emitted seed is the exact value, plain-decimal (no 1e-08). Fractional VALUEs now
+        # arrive as exact strings (see statechart._initial_value) and pass straight
+        # through; this stays as a defensive net for any float that reaches here.
+        if isinstance(x, float):
+            return format(Decimal(str(x)), "f")
+        return str(x)
 
     ctx = dict(config.get("context", {}))
     for k, v in list(ctx.items()):
