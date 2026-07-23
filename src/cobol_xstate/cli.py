@@ -27,6 +27,7 @@ from .parser import parse_program
 from .preprocessor import CopybookResolver
 from .runtime_assets import read_runtime_asset
 from .statechart import build_machine
+from .profiling import StageTimer
 
 # Explicit name, NOT __name__: this module is also run as `python -m cobol_xstate.cli`,
 # where __name__ == "__main__" would put the logger outside the cobol_xstate hierarchy and
@@ -165,6 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
     p.add_argument("--summary", action="store_true",
                    help="print a human-readable summary to stderr")
+    p.add_argument("--timing", action="store_true",
+                   help="print per-stage wall-clock timings to stderr (diagnostic; "
+                        "does not affect any output file)")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="increase log detail: -v adds DEBUG (swallowed tracebacks and "
                         "internal steps). Diagnostics go to stderr; stdout is unaffected.")
@@ -201,6 +205,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     it is."""
     import json as _json
 
+    timer = StageTimer(_log, args.timing, source_name)
     fetcher, why = _service(args, source_name)
     base = _artifact_base(args, default_stem, "job")
     # Same ordering constraint as the COBOL path: prefetch writes into the run directory,
@@ -216,15 +221,20 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     # which is where a cataloged PROC or INCLUDE member most often sits. Passing only the
     # -I list meant a PROC beside the job was never found locally, and every EXEC step and
     # DD inside it silently vanished from the model.
-    pre = prefetch_jcl(source, fetcher, paths=list(paths),
-                       dest=deps, source_name=source_name, unavailable=why)
+    with timer.stage("prefetch"):
+        pre = prefetch_jcl(source, fetcher, paths=list(paths),
+                           dest=deps, source_name=source_name, unavailable=why)
 
-    job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
-    lineage = build_jcl_lineage(job)
-    artifacts = build_jcl_artifacts(job)
+    with timer.stage("parse"):
+        job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
+    with timer.stage("jcl-lineage"):
+        lineage = build_jcl_lineage(job)
+    with timer.stage("jcl-artifacts"):
+        artifacts = build_jcl_artifacts(job)
     base = _artifact_base(args, default_stem, job.name or "job")
-    fetched = fetch_dependencies(artifacts, fetcher, dest=deps,
-                                 prefetched=pre.store, unavailable=why)
+    with timer.stage("fetch"):
+        fetched = fetch_dependencies(artifacts, fetcher, dest=deps,
+                                     prefetched=pre.store, unavailable=why)
 
     for suffix, obj in ((".jcl.artifacts.json", artifacts),
                         (".jcl.lineage.json", lineage),
@@ -243,6 +253,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
               f"{len(job.flags)} flag(s)")
         for f in job.flags:
             _log.info(f"  FLAG {f}")
+    timer.report()
     return 0
 
 
@@ -335,6 +346,7 @@ def _run(args) -> int:
     if args.jcl or _looks_like_jcl(source_name, source):
         return _run_jcl(args, source, source_name, default_stem, search_paths)
 
+    timer = StageTimer(_log, args.timing, source_name)
     default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     fmt = _format(args.format)
     if fmt is None:
@@ -362,9 +374,10 @@ def _run(args) -> int:
         _log.error(f"error: {err}")
         return 2
     deps = str(run_dir / "deps")
-    pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
-                         source_name=source_name, unavailable=why,
-                         exts=tuple(args.copybook_ext) + default_exts)
+    with timer.stage("prefetch"):
+        pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
+                             source_name=source_name, unavailable=why,
+                             exts=tuple(args.copybook_ext) + default_exts)
 
     resolver = CopybookResolver(
         paths=search_paths,
@@ -372,8 +385,20 @@ def _run(args) -> int:
         fetcher=fetcher,
         store=pre.store,        # everything stage 1 retrieved, already paid for
     )
-    program = parse_program(source, fmt, resolver=resolver)
-    machine = build_machine(program, source_name=source_name)
+    with timer.stage("parse"):
+        program = parse_program(source, fmt, resolver=resolver)
+    with timer.stage("build_machine"):
+        machine = build_machine(program, source_name=source_name)
+    # Under --timing, force the two memoized analyses now so each is attributed to its
+    # own line instead of to whichever companion writer happens to touch it first. Both
+    # run unconditionally later anyway (stage 2 builds the interface via build_artifacts
+    # and the lineage fixpoint via the dynamic-calls view), so pre-warming changes total
+    # work and emitted bytes by nothing.
+    if args.timing:
+        with timer.stage("interface"):
+            machine.interface()
+        with timer.stage("lineage-fixpoint"):
+            machine.lineage().run()
 
     # A copybook fetcher that ERRORED is not the same as a member that does not exist:
     # the model is missing logic for a fixable reason (bad credentials, service down),
@@ -503,9 +528,11 @@ def _run(args) -> int:
     # STAGE 2. Unconditional: retrieving what this program depends on is not a mode of
     # the tool, it is what the tool does. Run before the views are written so the two
     # reports land even when a later view refuses.
-    _art = _artifacts_obj()
-    report = fetch_dependencies(_art, fetcher, dest=deps, prefetched=pre.store,
-                                unavailable=why, dynamic=_dynamic_obj(_art))
+    with timer.stage("artifacts"):
+        _art = _artifacts_obj()
+    with timer.stage("fetch"):
+        report = fetch_dependencies(_art, fetcher, dest=deps, prefetched=pre.store,
+                                    unavailable=why, dynamic=_dynamic_obj(_art))
     # --machine-only suppresses the REPORTS, never the retrieval: what was fetched
     # decides whether the machine is right, so skipping it to save two files would be
     # backwards.
@@ -516,6 +543,7 @@ def _run(args) -> int:
             _log.info(f"[{source_name}] wrote {path}")
     _report_stages(source_name, pre, report)
 
+    _t_views = timer.start()
     if args.target in ("business", "lineage", "artifacts"):
         obj = (build_lineage(machine) if args.target == "lineage"
                else _artifacts_obj() if args.target == "artifacts"
@@ -566,6 +594,7 @@ def _run(args) -> int:
         _write_artifacts_companion(out_path)
         _write_dynamic_companion(out_path)
 
+    timer.since("views", _t_views)
     if args.summary:
         n_states = len(machine.config.get("states", {}))
         iface = machine.bundle()["interface"]
@@ -603,6 +632,7 @@ def _run(args) -> int:
         for f in machine.flags:
             _log.info(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}")
 
+    timer.report()
     return 0
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from cobol_xstate.cli import run
+from cobol_xstate.profiling import StageTimer
 
 EXAMPLES_CBL = str(
     Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl")
@@ -324,3 +325,69 @@ def test_companion_never_overwrites_the_bundle(tmp_path):
     # the bundle survives and is still the FAITHFUL machine, not the distillation
     bundle = json.loads((_run_dir(out) / "ACCT.business.json").read_text(encoding="utf-8"))
     assert bundle["metadata"].get("view") is None
+
+
+# --- --timing instrumentation: a diagnostic that must never perturb output ---
+
+
+class _FakeLog:
+    """Captures .info() lines so the timer can be tested without the logging stack."""
+
+    def __init__(self):
+        self.msgs = []
+
+    def info(self, m):
+        self.msgs.append(m)
+
+
+def test_stage_timer_records_and_reports_when_enabled():
+    log = _FakeLog()
+    t = StageTimer(log, enabled=True, source_name="x.cbl")
+    with t.stage("parse"):
+        pass
+    tok = t.start()
+    t.since("views", tok)
+    t.report()
+    text = "\n".join(log.msgs)
+    assert "timing (ms):" in text
+    assert "parse" in text and "views" in text and "measured" in text
+
+
+def test_stage_timer_is_a_no_op_when_disabled():
+    """Disabled, it must record nothing and emit nothing - the normal-run code path is
+    then byte-for-byte the same as before the flag existed."""
+    log = _FakeLog()
+    t = StageTimer(log, enabled=False, source_name="x.cbl")
+    with t.stage("parse"):
+        pass
+    assert t.start() is None
+    t.since("views", None)
+    t.report()
+    assert log.msgs == []
+
+
+def _all_files(root):
+    """Every file under an --outdir root, keyed by its path relative to that root."""
+    root = Path(root)
+    return {str(p.relative_to(root)): p.read_bytes()
+            for p in root.rglob("*") if p.is_file()}
+
+
+def test_timing_does_not_change_any_output_byte(tmp_path):
+    """--timing writes only to stderr: the FILES a run produces must be byte-identical
+    with or without it. This is the guarantee that the diagnostic cannot corrupt the
+    tool's byte-stable output contract."""
+    src = EXAMPLES_CBL
+    assert run([src, "--outdir", str(tmp_path / "plain")]) == 0
+    assert run([src, "--timing", "--outdir", str(tmp_path / "timed")]) == 0
+    assert _all_files(tmp_path / "plain") == _all_files(tmp_path / "timed")
+
+
+def test_timing_prints_a_per_stage_breakdown_to_stderr(tmp_path, capsys):
+    src = EXAMPLES_CBL
+    assert run([src, "--timing", "--outdir", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert "timing (ms):" in err
+    for stage in ("prefetch", "parse", "build_machine", "lineage-fixpoint",
+                  "fetch", "views", "measured"):
+        assert stage in err, f"missing stage {stage!r} in stderr:\n{err}"
