@@ -432,7 +432,13 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     if verb in ("READ", "START"):
         f = io.get("file") or _name_suffix(name)
         if io.get("into"):
-            fields = [io["into"]]
+            # READ f INTO rec == READ f; MOVE fd-record TO rec. Subsequent statements
+            # address rec's LEAVES, so the arriving event must carry them - exactly as
+            # SQL SELECT ... INTO :a :b carries its host variables. Listing only the group
+            # record name left the reactive `recv` with no elementary field to assign (a
+            # group item is not a context key), so it was a runtime NO-OP that processed an
+            # empty record every cycle.
+            fields = dv.record_fields(io["into"])
         else:  # no INTO: the data lands in the FD record - list its field layout
             fields = [x for r in dv.records_of(f) for x in dv.record_fields(r)]
         return [_hit("get", _FILE, f, verb, fields)]
