@@ -47,11 +47,9 @@ import copy
 from typing import Dict, List, Optional, Tuple
 
 from .emitter import (
-    _build_actors,
-    _buildable_targets,
-    _emit_split,
+    _invoke_transform,
+    _invoke_transform_parallel,
     _para_of,
-    _prune,
 )
 
 # Names that are not paragraph members: the shared program end, an actor's return, and
@@ -179,36 +177,21 @@ def to_harel(machine) -> Tuple[dict, Dict[str, dict]]:
     sections = getattr(machine, "sections", {}) or {}
     charts: Dict[str, dict] = {}
 
+    # Resolve PERFORM with the emitter's own transform - the runnable (`--target js`)
+    # target's, tested under real XState - then add the two things a *drawable* statechart
+    # needs on top: nest each flat paragraph run into a compound OR-state, and keep the
+    # provenance `meta` the emitter strips for runnable JS. The transform is meta-
+    # transparent: it propagates whatever `meta` the states it is handed carry, so feeding
+    # it the un-stripped config reproduces the (previously duplicated) inline orchestration
+    # exactly, now single-sourced. Each concurrent region resolves PERFORM against a pool
+    # unioned across all regions (so a handler can PERFORM a main-flow paragraph and vice
+    # versa) inside `_invoke_transform_parallel`; here each transformed region is nested.
     if src.get("type") == "parallel":
-        # Each concurrent region resolves against a pool unioned across all regions, so
-        # a handler can PERFORM a main-flow paragraph and vice versa.
-        pool: Dict[str, dict] = {}
-        for r in src.get("states", {}).values():
-            pool.update(r.get("states", {}))
-        buildable = _buildable_targets(pool, ordered, sections)
-        seed: set = set()
-        regions: Dict[str, dict] = {}
-        for name, r in src.get("states", {}).items():
-            new_states: Dict[str, dict] = {}
-            sink: set = set()
-            for k, st in copy.deepcopy(r.get("states", {})).items():
-                _emit_split(k, st, new_states, buildable, sink)
-            nr = dict(r)
-            nr["states"] = _prune(new_states, r["initial"])
-            regions[name] = _nest_chart(nr)
-            seed |= sink
-        charts = _build_actors(pool, buildable, seed, ordered, sections)
-        src["states"] = regions
+        new_regions, charts = _invoke_transform_parallel(src["states"], ordered, sections)
+        src["states"] = {name: _nest_chart(nr) for name, nr in new_regions.items()}
     elif src.get("states") and src.get("initial"):
-        buildable = _buildable_targets(src["states"], ordered, sections)
-        main_new: Dict[str, dict] = {}
-        sink: set = set()
-        for k, st in copy.deepcopy(src["states"]).items():
-            _emit_split(k, st, main_new, buildable, sink)
-        main_new = _prune(main_new, src["initial"])
-        seed = {inv["src"][len("actor:"):] for s in main_new.values()
-                for inv in [s.get("invoke") or {}] if inv.get("src")}
-        charts = _build_actors(src["states"], buildable, seed, ordered, sections)
+        main_new, charts = _invoke_transform(
+            src["states"], src["initial"], ordered, sections)
         nested = _nest_chart({"initial": src["initial"], "states": main_new})
         src["states"] = nested["states"]
         src["initial"] = nested["initial"]
