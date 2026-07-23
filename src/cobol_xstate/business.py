@@ -27,7 +27,10 @@ import heapq
 from typing import Dict, List, Optional, Tuple
 
 from . import interface as _iface
-from .emitter import _para_of, _target_owner, perform_target as _perform_target
+from .emitter import (
+    _para_of, _target_owner, edge_target, iter_transitions,
+    perform_target as _perform_target,
+)
 from .statechart import Machine
 
 
@@ -95,22 +98,22 @@ def _guard_field(tree: Optional[dict]) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 def _successors(st: dict) -> List[Tuple[dict, str]]:
-    """Outgoing (label, target) pairs. label = {'guard': name} or {'event': name} or {}."""
+    """Outgoing (label, target) pairs. label = {'guard': name} or {'event': name} or {}.
+
+    Bare-string handler targets (``on: {EVENT: "__H_x"}`` from
+    ``statechart._build_handlers_region``) are followed too - handling only the dict form
+    silently dropped every watch->handler edge. Single-sourced via emitter.iter_transitions
+    / edge_target so this and the other transition walkers cannot drift on that again."""
     out: List[Tuple[dict, str]] = []
-    for e in st.get("always", []) or []:
-        lab = {"guard": e["guard"]} if e.get("guard") else {}
-        if e.get("target"):
-            out.append((lab, e["target"]))
-    for ev, handler in (st.get("on", {}) or {}).items():
-        for h in (handler if isinstance(handler, list) else [handler]):
-            # A handler target can be a BARE STRING, not only a {target: ...} dict -
-            # `statechart._build_handlers_region` emits `on: {EVENT: "__H_x"}` exactly so.
-            # Handling only the dict form silently dropped every watch->handler edge, the
-            # way lineage._edges (which does handle both) does not.
-            if isinstance(h, str):
-                out.append(({"event": ev}, h))
-            elif isinstance(h, dict) and h.get("target"):
-                out.append(({"event": ev}, h["target"]))
+    for ev, e in iter_transitions(st):
+        tgt = edge_target(e)
+        if not tgt:
+            continue
+        if ev is None:
+            lab = {"guard": e["guard"]} if isinstance(e, dict) and e.get("guard") else {}
+        else:
+            lab = {"event": ev}
+        out.append((lab, tgt))
     return out
 
 

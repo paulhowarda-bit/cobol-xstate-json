@@ -50,6 +50,7 @@ from .emitter import (
     _invoke_transform,
     _invoke_transform_parallel,
     _para_of,
+    retarget_on,
 )
 
 # Names that are not paragraph members: the shared program end, an actor's return, and
@@ -86,19 +87,7 @@ def _retarget(node: dict) -> None:
         inv["onDone"]["target"] = "#" + inv["onDone"]["target"]
     on = node.get("on")
     if isinstance(on, dict):
-        for ev, v in list(on.items()):
-            items = v if isinstance(v, list) else [v]
-            out = []
-            for item in items:
-                if isinstance(item, str):
-                    out.append({"target": "#" + item})
-                elif isinstance(item, dict) and item.get("target"):
-                    item = dict(item)
-                    item["target"] = "#" + item["target"]
-                    out.append(item)
-                else:
-                    out.append(item)
-            on[ev] = out if isinstance(v, list) else out[0]
+        retarget_on(on, lambda t: "#" + t)
 
 
 def _nest(states: Dict[str, dict]) -> Dict[str, dict]:

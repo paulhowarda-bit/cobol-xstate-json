@@ -16,7 +16,10 @@ import pytest
 from cobol_xstate.emitter import (
     _emit_guard,
     _emit_numeric_expr,
+    edge_target,
     emit_setup_module,
+    iter_transitions,
+    retarget_on,
     segment_entry,
 )
 from cobol_xstate.parser import parse_program
@@ -200,6 +203,37 @@ def test_segment_entry_terminate_keeps_boundary_at_segment_tail():
     # no boundary at all: one segment (the whole run) in either mode
     assert segment_entry(["A", "B"], lambda a: a in bnd, isolate=False) == [["A", "B"]]
     assert segment_entry(["A", "B"], lambda a: a in bnd, isolate=True) == [["A", "B"]]
+
+
+def test_edge_target_reads_both_handler_forms():
+    assert edge_target({"target": "S"}) == "S"
+    assert edge_target("S") == "S"                  # bare-string handler form
+    assert edge_target({"actions": ["a"]}) is None  # action-only handler, no target
+    assert edge_target(None) is None
+
+
+def test_iter_transitions_covers_always_invoke_and_bare_handlers():
+    st = {
+        "always": [{"target": "A", "guard": "g"}, {"target": "B"}],
+        "invoke": {"src": "actor:P", "onDone": {"target": "C"}},
+        "on": {"E1": "D", "E2": {"target": "F"}, "E3": [{"target": "G"}, "H"]},
+    }
+    # default: always + on (bare string, dict, and a list mixing both)
+    assert [(ev, edge_target(e)) for ev, e in iter_transitions(st)] == [
+        (None, "A"), (None, "B"), ("E1", "D"), ("E2", "F"), ("E3", "G"), ("E3", "H")]
+    # invoke=True: the onDone edge appears between the always edges and the handlers
+    assert [(ev, edge_target(e)) for ev, e in iter_transitions(st, invoke=True)] == [
+        (None, "A"), (None, "B"), (None, "C"),
+        ("E1", "D"), ("E2", "F"), ("E3", "G"), ("E3", "H")]
+
+
+def test_retarget_on_rewrites_and_promotes_bare_string_targets():
+    on = {"E1": "x", "E2": {"target": "y", "actions": ["a"]},
+          "E3": ["z", {"actions": ["b"]}]}
+    retarget_on(on, lambda t: "P__" + t)
+    assert on["E1"] == {"target": "P__x"}                     # bare promoted to dict
+    assert on["E2"] == {"target": "P__y", "actions": ["a"]}   # dict keeps its other keys
+    assert on["E3"] == [{"target": "P__z"}, {"actions": ["b"]}]  # no-target left as is
 
 
 def test_perform_becomes_invoke_of_actor():

@@ -47,7 +47,8 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 from . import interface as _iface
 from .business import _is_control_guard
 from .emitter import (
-    _para_of, _target_owner, perform_target as _perform_target, segment_entry,
+    _para_of, _target_owner, edge_target, iter_transitions,
+    perform_target as _perform_target, segment_entry,
 )
 from .statechart import Machine
 
@@ -499,15 +500,9 @@ class _Lineage:
         return None
 
     def _edges(self, st: dict) -> List[str]:
-        out = [t["target"] for t in (st.get("always", []) or []) if t.get("target")]
-        on = st.get("on") or {}
-        for v in on.values():
-            for item in (v if isinstance(v, list) else [v]):
-                if isinstance(item, str):
-                    out.append(item)
-                elif isinstance(item, dict) and item.get("target"):
-                    out.append(item["target"])
-        return out
+        # always + on targets (the faithful config has no invoke here), bare-string
+        # handler targets included - see emitter.iter_transitions / edge_target.
+        return [t for _ev, e in iter_transitions(st) if (t := edge_target(e))]
 
     def _owns(self, node: str, owner: Set[str]) -> bool:
         """Is this (possibly split) node part of the performed paragraph's extent?"""

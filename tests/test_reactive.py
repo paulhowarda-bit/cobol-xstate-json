@@ -46,6 +46,19 @@ def test_event_slug_is_identifier_safe():
     assert _event_slug("GET.RESPONSE.DB2") == "GET_RESPONSE_DB2"
 
 
+def test_retarget_namespaces_bare_string_handler_targets():
+    """Flattening an actor body must namespace bare-string handler targets
+    (``on: {EVENT: "__H_x"}`` from statechart._build_handlers_region) as well as the dict
+    form. The dict-only version dropped the bare one - the same latent bug harel._retarget
+    was fixed for, now shared via emitter.retarget_on. (Reactive refuses parallel machines,
+    where these edges live, so this guards the rewriter directly rather than via an example.)"""
+    from cobol_xstate.reactive import _retarget
+    node = {"on": {"IO.ERROR.F": "__H_2000", "OTHER": {"target": "s1"}}}
+    _retarget(node, "ACT")
+    assert node["on"]["IO.ERROR.F"] == {"target": "ACT____H_2000"}  # was silently dropped
+    assert node["on"]["OTHER"] == {"target": "ACT__s1"}
+
+
 def test_inbound_get_becomes_an_on_wait():
     mod = emit_reactive_module(_machine("sqlsel.cbl"))
     cfg = _extract(mod, "machineConfig")

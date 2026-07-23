@@ -39,7 +39,7 @@ from . import interface as _iface
 from .emitter import (
     RUNTIME_IMPORT, _HELPERS, _build_guards, _build_ops, _collect_referenced,
     _emit_guard, _field_table, _invoke_transform, _js_context, _js_str,
-    _negated_externals, _strip_meta, segment_entry,
+    _negated_externals, _strip_meta, retarget_on, segment_entry,
 )
 from .statechart import Machine
 
@@ -123,11 +123,9 @@ def _retarget(node: dict, actor: str) -> dict:
         inv["onDone"]["target"] = _ns(actor, inv["onDone"]["target"])
     on = node.get("on")
     if isinstance(on, dict):
-        for ev, v in list(on.items()):
-            items = v if isinstance(v, list) else [v]
-            for item in items:
-                if isinstance(item, dict) and item.get("target"):
-                    item["target"] = _ns(actor, item["target"])
+        # Bare-string handler targets (on: {EVENT: "__H_x"}) must be namespaced too; the
+        # dict-only version here dropped them, the same bug harel._retarget was fixed for.
+        retarget_on(on, lambda t: _ns(actor, t))
     return node
 
 
