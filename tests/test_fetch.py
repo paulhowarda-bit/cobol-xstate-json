@@ -78,7 +78,10 @@ def test_plan_covers_every_artifact_kind_with_its_retrieval_type():
         "           EXEC CICS WRITEQ TS QUEUE('ERRQ') END-EXEC.\n",
         data_body="       01 WS-B PIC 9(5).\n")
     plan = {p["artifact"]: p for p in build_fetch_plan(man)}
-    assert plan["DCIOC104"]["type"] == "cobol"
+    # A called program carries NO assumed language: it is probed in likelihood order, and
+    # whichever request retrieves it is the finding.
+    assert plan["DCIOC104"]["type"] is None
+    assert plan["DCIOC104"]["probeTypes"] == ["cobol", "asm"]
     assert plan["ACCOUNT"]["type"] == "ddl"
     assert plan["MENUMAP"]["type"] == "bms"
     assert plan["ERRQ"]["type"] == "csd"
@@ -254,10 +257,10 @@ def test_fetched_artifacts_are_collected_and_usable_as_a_search_path(tmp_path):
 
 
 def test_the_service_type_wins_over_our_guess_and_the_disagreement_is_recorded():
-    """We infer 'cobol' from a CALL; the estate says the member is an assembler module.
-    The estate is looking at the member and we are looking at one program's usage of a
-    name, so its answer wins - and the disagreement is a finding worth surfacing, not a
-    discrepancy to smooth over."""
+    """The first probe is cobol; the estate hands the member back but reports it as an
+    assembler module. The estate is looking at the member and we are looking at one
+    program's usage of a name, so its answer wins - and the disagreement is a finding
+    worth surfacing, not a discrepancy to smooth over."""
     def asm(name, type=None, copy=None):
         return {"artifact_name": name, "found": True, "text": "         CSECT\n",
                 "detected_type": "asm", "source_location": "PROD.ASMLIB(DCIOC104)"}
@@ -267,6 +270,45 @@ def test_the_service_type_wins_over_our_guess_and_the_disagreement_is_recorded()
     row = _by(rep, "DCIOC104")
     assert row["detectedType"] == "asm"
     assert "requested as cobol" in row["typeNote"]
+    assert row["language"] == "asm"
+    assert row["languageBasis"] == "estate detected_type"
+
+
+def test_a_called_program_absent_from_the_cobol_library_is_found_as_asm():
+    """The core fix: a CALL says nothing about the callee's language. When the member is
+    NOT in the cobol library but IS in the asm library, the probe (cobol -> asm) finds it
+    as asm and says so - proven by where it lives, not assumed from the CALL. Before, the
+    hardcoded type=cobol made the cobol request the only one, so the ASM module came back
+    not-found or mislabelled cobol."""
+    def estate(name, type=None, copy=None):
+        if type == "asm":
+            return {"artifact_name": name, "found": True, "text": "DCIOC104 CSECT\n",
+                    "source_location": "PROD.ASMLIB(DCIOC104)"}
+        return {"artifact_name": name, "found": False}      # absent from the cobol library
+
+    rep = fetch_dependencies(
+        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), estate)
+    row = _by(rep, "DCIOC104")
+    assert row["status"] == "fetched"
+    assert row["language"] == "asm"
+    assert "asm" in row["languageBasis"] and "cobol not present" in row["languageBasis"]
+
+
+def test_an_estate_language_synonym_is_normalised_and_not_a_false_disagreement(tmp_path):
+    """An estate that answers 'ASSEMBLER' (or HLASM) means asm: the member saves under
+    .asm, the language is 'asm', and asm-vs-assembler is NOT reported as a type
+    disagreement (the first probe requested cobol, which IS the real disagreement here)."""
+    def estate(name, type=None, copy=None):
+        return {"artifact_name": name, "found": True, "text": "X CSECT\n",
+                "detected_type": "ASSEMBLER", "source_location": "PROD.ASMLIB(DCIOC104)"}
+
+    rep = fetch_dependencies(
+        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), estate,
+        dest=str(tmp_path))
+    row = _by(rep, "DCIOC104")
+    assert row["language"] == "asm"                          # folded from ASSEMBLER
+    assert row["copiedTo"].endswith("DCIOC104.asm")          # saved under the asm extension
+    assert {p.name for p in tmp_path.iterdir()} == {"DCIOC104.asm"}
 
 
 def test_alternatives_are_recorded_so_the_syslib_choice_is_visible():

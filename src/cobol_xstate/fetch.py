@@ -52,13 +52,25 @@ from __future__ import annotations
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .artifact_service import ServiceUnavailable, call_service, collect
+from .artifact_service import (
+    ServiceUnavailable, call_service, call_service_probing, canonical_type, collect)
+
+# A CALL names a load module but NOT its language: the callee may be COBOL, assembler,
+# PL/I, C, ... So a program dependency is not assumed to be COBOL - it is REQUESTED by
+# trying each language in likelihood order, and the one that actually retrieves it is the
+# finding (COBOL and assembler source live in different libraries, so where the member is
+# found proves what it is). Most common first, to keep a COBOL callee at one round-trip;
+# extend for an estate that also holds PL/I or C ("pli", "c").
+PROGRAM_TYPE_ORDER: Tuple[str, ...] = ("cobol", "asm")
 
 # artifact kind -> the type HINT passed to the service, in the estate's own vocabulary.
 # Only ever a hint: it is what this program's usage suggests the artifact is, which a
 # service that auto-detects is free to override - and when it does, its `detected_type`
 # is the answer that goes in the report. The extension a member is saved under follows
 # the type, and lives in artifact_service.EXT_FOR_TYPE so both stages agree.
+#
+# "program" is the exception: it carries NO single language (see PROGRAM_TYPE_ORDER). Its
+# presence here only marks the kind as fetchable; the request is the ordered probe.
 _KIND_TYPE: Dict[str, str] = {
     # ...from a COBOL program's manifest
     "program":          "cobol",
@@ -159,6 +171,17 @@ def build_fetch_plan(manifest: dict) -> List[dict]:
         }
         if name is None:
             entry.update({"status": "skipped", "reason": reason})
+        elif kind == "program":
+            # No assumed language: request it as each of PROGRAM_TYPE_ORDER in turn; the
+            # one that retrieves it is the finding. `type` stays null so nothing claims a
+            # language before the estate has answered.
+            entry.update({"status": "planned", "request": name,
+                          "type": None, "probeTypes": list(PROGRAM_TYPE_ORDER)})
+            if name != row.get("artifact"):
+                entry["requestedAs"] = (
+                    "dataset" if row.get("dataset") == name
+                    else "member" if _DSN_MEMBER.match(str(row.get("artifact") or ""))
+                    else "ddname")
         else:
             entry.update({"status": "planned", "request": name,
                           "type": _KIND_TYPE.get(kind)})
@@ -242,7 +265,8 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     # Manifest rows first, then dynamic-call candidates. Order matters: a name that is
     # BOTH a proven dependency and a candidate should be recorded as the dependency.
     plan = build_fetch_plan(manifest) + [
-        dict(entry, status="planned", request=entry["artifact"], type="cobol")
+        dict(entry, status="planned", request=entry["artifact"],
+             type=None, probeTypes=list(PROGRAM_TYPE_ORDER))
         for entry in candidate_requests(dynamic)]
 
     for entry in plan:
@@ -297,7 +321,11 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             continue
 
         try:
-            got = call_service(fetcher, name, row.get("type"), dest)
+            probe = row.get("probeTypes")
+            if probe:
+                got = call_service_probing(fetcher, name, probe, dest)
+            else:
+                got = call_service(fetcher, name, row.get("type"), dest)
         except ServiceUnavailable as exc:
             row.update({"status": "error", "error": str(exc)})
             errors.append({"artifact": name, "error": row["error"]})
@@ -316,6 +344,22 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
         # The service's own answers - what it found, where, and what else shares the
         # name - in preference to the kind we inferred from one program's usage.
         row.update(got.row())
+        # A called program's language is PROVEN, never assumed: by the estate's own
+        # detected_type when it gives one, else by which probe (cobol -> asm -> ...)
+        # actually retrieved it. Record it and how we know, so a reader is not left to
+        # infer "cobol" from silence.
+        if probe:
+            lang = canonical_type(got.detected_type or got.requested_type)
+            if lang:
+                row["language"] = lang
+                if got.detected_type:
+                    row["languageBasis"] = "estate detected_type"
+                else:
+                    earlier = probe[:probe.index(got.requested_type)] \
+                        if got.requested_type in probe else []
+                    row["languageBasis"] = (
+                        "retrieved as " + lang
+                        + (f" ({', '.join(earlier)} not present)" if earlier else ""))
         rows.append(row)
         done[key] = row["status"]
 
