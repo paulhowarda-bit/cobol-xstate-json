@@ -442,9 +442,15 @@ def test_bundle_is_json_serializable_and_well_formed():
     obj = json.loads(text)
     assert obj["format"] == "xstate-v5-config"
     assert "machine" in obj and "provenance" in obj and "flags" in obj
-    # machine-only path is the bare config
+    # machine-only path drops the review-contract material but is the SAME machine as
+    # the bundle presents (the Harel machine + its charts), NOT the raw pre-Harel IR
     bare = json.loads(machine.to_json(machine_only=True))
-    assert "states" in bare and "format" not in bare
+    assert set(bare) == {"machine", "charts"}
+    assert "format" not in bare and "provenance" not in bare
+    assert bare["machine"] == obj["machine"] and bare["charts"] == obj["charts"]
+    # PERFORM is resolved to a real call/return here, not left as an inert marker
+    assert "invoke" in json.dumps(bare["machine"])
+    assert "perform_" not in json.dumps(bare["machine"])
 
 
 # --------------------------------------------------------------------------- #

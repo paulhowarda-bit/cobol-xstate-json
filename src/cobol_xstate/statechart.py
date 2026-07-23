@@ -192,7 +192,18 @@ class Machine:
         }
 
     def to_json(self, machine_only: bool = False, indent: int = 2) -> str:
-        obj = self.config if machine_only else self.bundle()
+        bundle = self.bundle()
+        if machine_only:
+            # The SAME machine the full bundle presents, with only the review-contract
+            # material (provenance / flags / notes / interface / data / semantics)
+            # dropped. It used to return `self.config` - the raw pre-Harel flat IR, a
+            # DIFFERENT and wrong machine: PERFORM is an inert action there, so control
+            # never transfers, the callee is an unreachable sibling paragraph, and the
+            # child `charts` are absent entirely. Deriving it from the bundle here means
+            # the two can never disagree again.
+            obj: dict = {"machine": bundle["machine"], "charts": bundle["charts"]}
+        else:
+            obj = bundle
         return json.dumps(obj, indent=indent)
 
 
