@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .artifact_service import (Fetched, ServiceUnavailable, call_service,
-                               collect, decode_member)
+                               call_service_many, collect, decode_member)
 from .normalizer import SourceFormat
 from .preprocessor import scan_copy_members
 
@@ -189,18 +189,19 @@ class _Prefetcher:
                         return decode_member(fh.read()), candidate
         return None
 
-    def obtain(self, raw: str, type_hint: Optional[str] = None,
-               why: str = "") -> Optional[str]:
-        """Retrieve one member, record a row, return its text (or ``None``).
+    def _plan(self, raw: str, why: str = "") -> Tuple[str, Optional[dict],
+                                                      str, Optional[tuple]]:
+        """Settle one member as far as can be settled WITHOUT asking the service:
+        already-seen, not a requestable name, already on disk, or nothing to ask.
 
-        Every distinct reason for coming back empty stays distinct - that separation is
-        the point of the report, because "the estate does not have it" and "we could not
-        ask" lead to completely different next actions."""
+        Returns ``(kind, row, member, local)``. The row is built but deliberately NOT
+        appended - the report's row order is part of its output, and a wave that recorded
+        its locally-satisfied members as it planned them would file them ahead of the
+        members either side that had to be fetched. Recording happens in :meth:`_record`,
+        in request order, for every kind alike."""
         name = _key(raw)
         if name in self.seen:
-            # Via the resolver, not the raw store: a name first seen as
-            # `PARM.LIB(SORTCRD)` is stored under the member it resolved to.
-            return self.result.resolver()(name)
+            return "seen", None, name, None
         self.seen.add(name)
 
         row: dict = {"member": name, "status": "", "for": why} if why else \
@@ -220,28 +221,42 @@ class _Prefetcher:
             row["status"] = "skipped"
             row["reason"] = (f"'{name}' is not a member name that can be requested - "
                              f"it names something inside this job, not a stored member")
-            self.result.rows.append(row)
-            return None
+            return "skipped", row, member, None
 
         local = self._local(member)
         if local is not None:
-            row.update({"status": "local", "source": local[1], "bytes": len(local[0])})
-            self.result.rows.append(row)
-            self.result.store[member] = local
-            return local[0]
+            return "local", row, member, local
 
         if self.fetcher is None:
             row["status"] = "no-service"
             row["reason"] = (self.result.unavailable
                              or "no estate artifact service is configured, so this "
                                 "member was never looked for")
+            return "no-service", row, member, None
+
+        return "request", row, member, None
+
+    def _record(self, planned: tuple, got=None) -> Optional[str]:
+        """Append the planned row, update the store, and return the member's text.
+
+        ``got`` is the service's answer for a ``request`` - a ``Fetched``, ``None`` when
+        it was asked and had nothing, or a ``ServiceUnavailable`` it raised. Every
+        distinct reason for coming back empty stays distinct - that separation is the
+        point of the report, because "the estate does not have it" and "we could not ask"
+        lead to completely different next actions."""
+        kind, row, member, local = planned
+        if kind == "local":
+            row.update({"status": "local", "source": local[1], "bytes": len(local[0])})
+            self.result.rows.append(row)
+            self.result.store[member] = local
+            return local[0]
+
+        if kind in ("skipped", "no-service"):
             self.result.rows.append(row)
             return None
 
-        try:
-            got = call_service(self.fetcher, member, type_hint, self.dest)
-        except ServiceUnavailable as exc:
-            row.update({"status": "error", "error": str(exc),
+        if isinstance(got, ServiceUnavailable):
+            row.update({"status": "error", "error": str(got),
                         "reason": "the request itself failed - this is fixable, and is "
                                   "NOT evidence the member is absent from the estate"})
             self.result.rows.append(row)
@@ -253,6 +268,9 @@ class _Prefetcher:
             self.result.rows.append(row)
             return None
 
+        # Collected HERE rather than in whatever thread retrieved it: this writes a file
+        # into the run directory, and the run directory should fill in the order the
+        # report lists, not in the order the estate happened to answer.
         got = collect(got, self.dest)
         row["status"] = "fetched"
         row.update(got.row())
@@ -260,6 +278,49 @@ class _Prefetcher:
         self.result.fetched[member] = got
         self.result.store[member] = (got.text, got.source)
         return got.text
+
+    def obtain(self, raw: str, type_hint: Optional[str] = None,
+               why: str = "") -> Optional[str]:
+        """Retrieve one member, record a row, return its text (or ``None``)."""
+        planned = self._plan(raw, why)
+        if planned[0] == "seen":
+            # Via the resolver, not the raw store: a name first seen as
+            # `PARM.LIB(SORTCRD)` is stored under the member it resolved to.
+            return self.result.resolver()(planned[2])
+        got = None
+        if planned[0] == "request":
+            try:
+                got = call_service(self.fetcher, planned[2], type_hint, self.dest)
+            except ServiceUnavailable as exc:
+                got = exc
+        return self._record(planned, got)
+
+    def obtain_wave(self, items: List[Tuple[str, str]],
+                    type_hint: Optional[str] = None,
+                    jobs: int = 1) -> List[Tuple[str, str]]:
+        """Retrieve one LEVEL of the closure at once; returns ``[(member, text)]``.
+
+        A level is the largest set of members known to be needed before any of them has
+        been read, which is exactly what can be asked for together - the level below it
+        is not knowable until these arrive, since a copybook names its own COPYs only in
+        its text. So the closure still costs one round of latency per level of nesting,
+        and no longer one per member.
+
+        Planning the whole level first also collapses a name requested twice within it:
+        :meth:`_plan` marks it seen on the first, so the second is ``seen`` and never
+        becomes a second request. Rows are appended in the level's own order, whatever
+        order the answers arrived in."""
+        planned = [p for p in (self._plan(raw, why) for raw, why in items)
+                   if p[0] != "seen"]
+        requests = [(p[2], type_hint) for p in planned if p[0] == "request"]
+        answers = iter(call_service_many(self.fetcher, requests, jobs, self.dest)
+                       if requests else ())
+        out: List[Tuple[str, str]] = []
+        for p in planned:
+            text = self._record(p, next(answers) if p[0] == "request" else None)
+            if text:
+                out.append((p[2], text))
+        return out
 
     def store_text(self, name: str) -> Optional[str]:
         hit = self.result.store.get(_key(name))
@@ -272,7 +333,8 @@ def prefetch_cobol(source: str, fetcher: Optional[Callable],
                    source_name: str = "<source>",
                    unavailable: Optional[str] = None,
                    result: Optional[PrefetchResult] = None,
-                   exts: Optional[Tuple[str, ...]] = None) -> PrefetchResult:
+                   exts: Optional[Tuple[str, ...]] = None,
+                   jobs: int = 1) -> PrefetchResult:
     """Close over every ``COPY`` / ``EXEC SQL INCLUDE`` member the program needs.
 
     Transitive: each retrieved member is scanned in turn, because a copybook that COPYs
@@ -286,16 +348,19 @@ def prefetch_cobol(source: str, fetcher: Optional[Callable],
     if pf.result.source_name == "<source>":
         pf.result.source_name = source_name
 
-    queue: List[Tuple[str, str]] = [(m, "COPY in the program") for m in
-                                    scan_copy_members(source, fmt)]
-    while queue:
-        member, why = queue.pop(0)
-        text = pf.obtain(member, "copybook", why)
-        if not text:
-            continue
-        for nested in scan_copy_members(text, fmt):
-            if _key(nested) not in pf.seen:
-                queue.append((nested, f"COPY inside {member}"))
+    # Level by level, not member by member. The worklist GROWS as members are read - a
+    # copybook names its own COPYs only in its text - so the members one level down are
+    # not knowable until this level has arrived. That makes the level, and only the
+    # level, the thing that can be retrieved together.
+    wave: List[Tuple[str, str]] = [(m, "COPY in the program") for m in
+                                   scan_copy_members(source, fmt)]
+    while wave:
+        nxt: List[Tuple[str, str]] = []
+        for member, text in pf.obtain_wave(wave, "copybook", jobs):
+            for nested in scan_copy_members(text, fmt):
+                if _key(nested) not in pf.seen:
+                    nxt.append((nested, f"COPY inside {member}"))
+        wave = nxt
     return pf.result
 
 
@@ -303,7 +368,8 @@ def prefetch_jcl(source: str, fetcher: Optional[Callable],
                  paths: Optional[List[str]] = None, dest: Optional[str] = None,
                  source_name: str = "<jcl>", max_rounds: int = 12,
                  unavailable: Optional[str] = None,
-                 result: Optional[PrefetchResult] = None) -> PrefetchResult:
+                 result: Optional[PrefetchResult] = None,
+                 jobs: int = 1) -> PrefetchResult:
     """Close over the cataloged PROCs, ``INCLUDE`` members and control-card datasets a
     job needs, by replaying the parse until it stops asking for members it has not got.
 
@@ -331,8 +397,11 @@ def prefetch_jcl(source: str, fetcher: Optional[Callable],
         fresh = [n for n in asked if _key(n) not in pf.seen]
         if not fresh:
             break
-        for name in fresh:
-            pf.obtain(name, None, "referenced by the job (PROC / INCLUDE / control card)")
+        # One round IS a level: everything the parse asked for this time round was asked
+        # for before any of it came back, so it can all be retrieved together.
+        pf.obtain_wave(
+            [(n, "referenced by the job (PROC / INCLUDE / control card)") for n in fresh],
+            None, jobs)
     else:
         # Bounded, and said so: a member set this deep is more likely a resolver loop
         # than a real job, and silently stopping would look like a complete closure.
