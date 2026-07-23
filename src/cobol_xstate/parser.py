@@ -20,6 +20,7 @@ the statechart stage, never silently smoothed.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -48,6 +49,8 @@ from .model import (
     TerminateStmt,
     walk_statements,
 )
+
+logger = logging.getLogger(__name__)
 
 # Verbs that begin a statement. Used to bound opaque actions and conditions.
 ACTION_VERBS: Set[str] = {
@@ -410,6 +413,10 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
             raw = " ".join(cl.text.strip() for cl in plines).strip()
             para.statements = [Action(line=para.line, text=raw[:200], verb="?")]
             para.parse_error = f"{type(exc).__name__}: {exc}"
+            # The one-line parse_error above rides on the paragraph (and into the output);
+            # the full traceback is only recoverable here, so keep it at DEBUG (-v).
+            logger.debug("paragraph %r failed to parse; opaque fallback used",
+                         para.name, exc_info=True)
 
     if buckets and buckets[0].name == "_ENTRY_" and not buckets[0].statements:
         buckets.pop(0)

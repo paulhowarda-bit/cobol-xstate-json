@@ -19,6 +19,7 @@ reported so coverage is measurable, never silently dropped.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -28,6 +29,8 @@ from typing import Callable, List, Optional, Tuple
 from .artifact_service import (decode_member,
                                normalize_fetched)  # re-exported: see artifact_service
 from .normalizer import CodeLine, SourceFormat, normalize
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["normalize_fetched", "CopybookResolver", "PreprocessResult", "preprocess",
            "scan_copy_members"]
@@ -103,6 +106,7 @@ class CopybookResolver:
             got = self._normalize_fetched(self.fetcher(name), name)
         except Exception as exc:                      # a flaky service is not fatal
             self.fetch_errors.append((key, f"{type(exc).__name__}: {exc}"))
+            logger.debug("copybook fetcher raised for %r", name, exc_info=True)
             got = None
         self._cache[key] = got
         return got
