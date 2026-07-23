@@ -46,7 +46,7 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from . import interface as _iface
 from .business import _is_control_guard
-from .emitter import _para_of, _target_owner
+from .emitter import _para_of, _target_owner, perform_target as _perform_target
 from .statechart import Machine
 
 # An origin: (event name, maybe?, program that would resolve a `maybe`).
@@ -183,6 +183,7 @@ class _Lineage:
         self.fills: List[dict] = []       # field <- an external input event
         self.flow: List[dict] = []        # target <- source operands, at one write site
         self.dynamic_sites: List[dict] = []   # unresolved dynamic targets + their origins
+        self._view: Optional[dict] = None     # `run`'s result, computed at most once
         raw: Dict[str, dict] = {}
         for name, _region, st in _iface._iter_states(self.config):
             raw[name] = st
@@ -489,7 +490,7 @@ class _Lineage:
     def _perform_of(self, st: dict) -> Optional[str]:
         for a in st.get("entry", []) or []:
             if a.startswith("perform_"):
-                return a[len("perform_"):]
+                return _perform_target(a, self.ordered, self.sections)
         return None
 
     def _edges(self, st: dict) -> List[str]:
@@ -819,6 +820,11 @@ class _Lineage:
         return e
 
     def run(self) -> dict:
+        # Solved once per instance. The dynamic-call view wants the primitive facts this
+        # pass records (`fills`/`flow`/`dynamic_sites`) and the lineage table wants the
+        # rows; both call this, and re-solving would also append every flag twice.
+        if self._view is not None:
+            return self._view
         self.changers = self._changers()
         entries = self.entries
 
@@ -865,7 +871,7 @@ class _Lineage:
                 continue
             self._apply(s, self.states[s], IN[s], rows)
 
-        return {
+        self._view = {
             "format": "cobol-xstate-lineage",
             "program": self.m.program_id,
             "source": self.m.source_name,
@@ -890,8 +896,9 @@ class _Lineage:
             "rows": rows,
             "flags": self.flags,
         }
+        return self._view
 
 
 def build_lineage(machine: Machine) -> dict:
     """Field lineage across the external boundary. Pure read over the emitted machine."""
-    return _Lineage(machine).run()
+    return machine.lineage().run()

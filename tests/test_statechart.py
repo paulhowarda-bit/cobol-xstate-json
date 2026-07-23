@@ -445,3 +445,89 @@ def test_bundle_is_json_serializable_and_well_formed():
     # machine-only path is the bare config
     bare = json.loads(machine.to_json(machine_only=True))
     assert "states" in bare and "format" not in bare
+
+
+# --------------------------------------------------------------------------- #
+# name-collision cluster (review findings J4, J5, J6)
+# --------------------------------------------------------------------------- #
+
+def test_duplicate_paragraph_names_in_two_sections_are_kept_distinct():
+    """The COMMON-EXIT shop idiom: one paragraph name, once per section. As one shared
+    state id the second definition overwrote the first, so BOTH sections' exits ran the
+    last body - here section A would MOVE 222 (B's value). Now each is its own state,
+    referenced section-locally, and provenance records the source spelling."""
+    machine = _machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. DUP.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-A PIC 9(4) VALUE 0.\n"
+        "       01 WS-B PIC 9(4) VALUE 0.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       A-SECTION SECTION.\n"
+        "       A-START.\n"
+        "           PERFORM COMMON-EXIT.\n"
+        "       COMMON-EXIT.\n"
+        "           MOVE 111 TO WS-A.\n"
+        "       B-SECTION SECTION.\n"
+        "       B-START.\n"
+        "           PERFORM COMMON-EXIT.\n"
+        "       COMMON-EXIT.\n"
+        "           MOVE 222 TO WS-B.\n"
+    )
+    states = machine.config["states"]
+    assert "COMMON-EXIT" not in states, "the collided name must not survive as one state"
+    a_exit = "COMMON-EXIT_OF_A-SECTION"
+    b_exit = "COMMON-EXIT_OF_B-SECTION"
+    assert a_exit in states and b_exit in states
+
+    def performs(para):
+        return [a for a in states[para]["entry"] if a.startswith("perform_")]
+
+    # each section performs ITS OWN exit, not the other's
+    assert performs("A-START") == [f"perform_{a_exit}"]
+    assert performs("B-START") == [f"perform_{b_exit}"]
+    # the two bodies stayed separate: A moves 111, B moves 222
+    a_body = [machine.provenance[x]["cobol"] for x in states[a_exit]["entry"]]
+    b_body = [machine.provenance[x]["cobol"] for x in states[b_exit]["entry"]]
+    assert "MOVE 111 TO WS-A" in a_body and "MOVE 222 TO WS-B" in b_body
+    # provenance still points back to the source name
+    assert machine.provenance[a_exit]["bareName"] == "COMMON-EXIT"
+
+
+def test_no_qualification_when_a_paragraph_name_is_unique():
+    machine = _machine((EXAMPLES / "custrpt.cbl").read_text())
+    assert not any(p.get("bareName") for p in machine.provenance.values())
+
+
+def test_two_identical_perform_n_times_get_independent_exit_guards():
+    """Both loops read `5 TIMES`, but each has its own synthetic counter. Sharing the
+    guard name (the registry dedups on text) made both test the FIRST counter, so the
+    second loop ran zero times - or, reordered, never terminated."""
+    machine = _machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TWICE.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-A PIC 9(4) VALUE 0.\n"
+        "       01 WS-B PIC 9(4) VALUE 0.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           PERFORM 5 TIMES\n"
+        "               ADD 1 TO WS-A\n"
+        "           END-PERFORM\n"
+        "           PERFORM 5 TIMES\n"
+        "               ADD 1 TO WS-B\n"
+        "           END-PERFORM\n"
+        "           STOP RUN.\n"
+    )
+    guards = machine.semantics["guards"]
+    counters = set()
+    for name, st in machine.config["states"].items():
+        for e in st.get("always", []) or []:
+            g = e.get("guard")
+            tree = guards.get(g) if g else None
+            if isinstance(tree, dict) and str(tree.get("left", "")).startswith("TIMES-CTR"):
+                counters.add(tree["left"])
+    # two loops -> two distinct counters, each governing its own loop exit
+    assert len(counters) == 2, f"each loop must test its own counter, got {counters}"

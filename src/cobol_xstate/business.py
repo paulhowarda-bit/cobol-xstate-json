@@ -27,7 +27,7 @@ import heapq
 from typing import Dict, List, Optional, Tuple
 
 from . import interface as _iface
-from .emitter import _para_of, _target_owner
+from .emitter import _para_of, _target_owner, perform_target as _perform_target
 from .statechart import Machine
 
 
@@ -169,8 +169,8 @@ class _BusinessView:
     # level (empty stack) is program end; reached inside a call it is a return.
 
     def _perform_names(self, st: dict) -> List[str]:
-        return [a[len("perform_"):] for a in (st.get("entry", []) or [])
-                if a.startswith("perform_")]
+        return [_perform_target(a, self.ordered, self.sections)
+                for a in (st.get("entry", []) or []) if a.startswith("perform_")]
 
     def _continuation(self, st: dict) -> Optional[str]:
         """Where control resumes after a PERFORM returns = the call state's fall-through."""

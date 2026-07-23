@@ -61,7 +61,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Dict, List, Optional, Tuple
 
-from .lineage import _UNKNOWN, _Lineage
+from .lineage import _UNKNOWN
 from .statechart import Machine
 from .storage import field_position
 
@@ -352,7 +352,7 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
 
     ``artifacts`` is the related-artifact manifest, used to give each source its
     retrievable identity (ddname, and the dataset when the JCL was bound). Pure read."""
-    lin = _Lineage(machine)
+    lin = machine.lineage()
     lin.run()
 
     flow_by_target = _index(lin.flow, "target")

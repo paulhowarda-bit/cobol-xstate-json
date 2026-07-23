@@ -442,3 +442,43 @@ def test_declarative_handler_fires_on_its_event(repo_tmp):
     r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
                        cwd=str(repo_tmp), timeout=30)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# PERFORM target resolution through the registry's _N suffix (review finding J6)
+# --------------------------------------------------------------------------- #
+
+def test_perform_of_one_paragraph_two_ways_invokes_the_real_actor():
+    """`PERFORM 1000-INIT` and `PERFORM 1000-INIT 3 TIMES` are one paragraph but two
+    statements, so the registry names the second `perform_1000-INIT_2`. Slicing off the
+    prefix yielded target `1000-INIT_2`, which owns no paragraph - the PERFORM became a
+    silent no-op. Both must invoke actor:1000-INIT, and no perform_ marker may survive."""
+    mod = emit_setup_module(_machine("perftwice.cbl"))
+    assert '"src": "actor:1000-INIT"' in mod
+    assert "1000-INIT_2" not in mod            # the phantom target is gone
+    assert "perform_" not in mod               # neither PERFORM is a leftover no-op
+
+
+def test_perform_target_helper_strips_only_a_registry_suffix():
+    from cobol_xstate.emitter import perform_target
+    ordered = ["0000-MAIN", "1000-INIT"]
+    # the real target resolves as-is
+    assert perform_target("perform_1000-INIT", ordered) == "1000-INIT"
+    # a _2 suffix that does NOT name a paragraph falls back to the base that does
+    assert perform_target("perform_1000-INIT_2", ordered) == "1000-INIT"
+    # not a perform action at all
+    assert perform_target("MOVE_1_TO_WS-A", ordered) is None
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_two_identical_times_loops_each_run_to_completion(repo_tmp):
+    # Both `PERFORM 5 TIMES` loops must count independently: WS-A = WS-B = 5. With a
+    # shared exit guard the second loop tested the first's spent counter and ran 0 times.
+    _run_to_done(repo_tmp, "twotimes.cbl", {"WS-A": "5", "WS-B": "5"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_perform_of_one_paragraph_two_ways_runs_both(repo_tmp):
+    # 1000-INIT performed once then 3 times: it must run 4 times total, WS-A = 4. The
+    # _2-suffixed PERFORM used to resolve to nothing and be dropped, leaving WS-A = 1.
+    _run_to_done(repo_tmp, "perftwice.cbl", {"WS-A": "4"})
