@@ -53,7 +53,7 @@ import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .artifact_service import (
-    ServiceUnavailable, call_service, call_service_probing, canonical_type, collect)
+    ServiceUnavailable, call_service_many, canonical_type, collect)
 from .classify import CATEGORY_ASM, CATEGORY_COBOL, NON_FETCHABLE
 
 # A CALL names a load module but NOT its language: the callee may be COBOL, assembler,
@@ -238,11 +238,47 @@ def candidate_requests(dynamic: Optional[dict]) -> List[dict]:
     return out
 
 
+def _dispatch(row: dict, subject: str, seen, prefetched: dict,
+              fetcher: Optional[Callable]) -> Tuple[str, Optional[str]]:
+    """How one plan row is settled - decided WITHOUT touching the service.
+
+    Written once and read twice: a pre-pass replays it to learn which names will actually
+    be requested (so they can be retrieved together), and the recording pass replays it to
+    build the row. Two copies of this chain would be two chances to disagree about whether
+    a member is asked for, which is precisely the "one member is one round-trip" property
+    the report asserts - so there is one copy, and both callers get the same answers from
+    it by construction.
+
+    ``seen`` is only ever tested for membership, which is why the pre-pass can pass a set
+    of names while the recording pass passes the ``done`` map of real outcomes: the
+    branch does not depend on WHICH outcome a name reached, only that it reached one.
+    """
+    if row["status"] == "skipped":
+        return "skipped", None                # build_fetch_plan already said why
+    key = str(row["request"]).upper()
+    if key == subject:
+        return "subject", key
+    if key in seen:
+        return "inherit", key
+    if prefetched.get(key) is not None:
+        return "prefetched", key
+    if fetcher is None:
+        return "no-service", key
+    return "request", key
+
+
+def _wanted(row: dict):
+    """What to ask the service for this row: a probe ORDER for a program (whose language
+    is proven by which type retrieves it), else the single type hint its kind implies."""
+    return row.get("probeTypes") or row.get("type")
+
+
 def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
                        dest: Optional[str] = None,
                        prefetched: Optional[Dict[str, Tuple[str, str]]] = None,
                        unavailable: Optional[str] = None,
-                       dynamic: Optional[dict] = None) -> dict:
+                       dynamic: Optional[dict] = None,
+                       jobs: int = 1) -> dict:
     """Fetch this program's immediate dependent artifacts.
 
     ``fetcher(name, type=..., copy=...)`` is the estate's artifact service - mf-fetch by
@@ -282,26 +318,52 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
              type=None, probeTypes=list(PROGRAM_TYPE_ORDER))
         for entry in candidate_requests(dynamic)]
 
+    # PASS 1 - which names actually reach the service, in plan order and each once. The
+    # plan is fully known before any of it runs (build_fetch_plan is pure), so there is
+    # no reason to discover the second request only after the first has come back.
+    # Collapsing duplicates HERE, rather than on a `done` map consulted mid-flight, is
+    # also what keeps "one member is one round-trip" true once these overlap: read-then-
+    # write on `done` is a race, and two threads would both find the name absent and both
+    # ask for it.
+    pending: List[Tuple[str, object]] = []
+    pending_keys: List[str] = []
+    seen_keys: set = set()
+    for entry in plan:
+        kind, key = _dispatch(entry, subject, seen_keys, prefetched, fetcher)
+        if kind in ("skipped", "subject", "inherit"):
+            continue
+        seen_keys.add(key)
+        if kind == "request":
+            pending.append((entry["request"], _wanted(entry)))
+            pending_keys.append(key)
+
+    # PASS 2 - retrieve them. The only concurrent step; it decides nothing.
+    got_by_key: Dict[str, object] = dict(
+        zip(pending_keys, call_service_many(fetcher, pending, jobs, dest))
+    ) if pending else {}
+
+    # PASS 3 - record, in plan order, so the report reads the same however the retrievals
+    # happened to interleave.
     for entry in plan:
         row = dict(entry)
         row["forProgram"] = program
-        if row["status"] == "skipped":
+        kind, key = _dispatch(row, subject, done, prefetched, fetcher)
+        if kind == "skipped":
             rows.append(row)
             continue
 
-        name, kind = row["request"], row["kind"]
+        name = row["request"]
         # Keyed on the NAME alone, not name+kind: one member is one round-trip however
         # many ways this manifest arrives at it. A JCL job that both EXECs PAYPROC and
         # names it as a called program produces two rows for one member, and asking the
         # estate twice for the same thing is waste that scales with the estate.
-        key = name.upper()
-        if key == subject:
+        if kind == "subject":
             row.update({"status": "skipped",
                         "reason": f"{name} is the artifact being analysed, not a "
                                   f"dependency of it"})
             rows.append(row)
             continue
-        if key in done:
+        if kind == "inherit":
             prior = done[key]
             if prior in ("fetched", "prefetched"):
                 row.update({"status": "already-fetched",
@@ -315,8 +377,8 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             rows.append(row)
             continue
 
-        hit = prefetched.get(name.upper())
-        if hit is not None:
+        if kind == "prefetched":
+            hit = prefetched[key]
             # Stage 1 already paid for this member. Reported, because a reader tracing
             # what this run retrieved needs it in the list - but not requested twice.
             row.update({"status": "prefetched", "source": hit[1], "bytes": len(hit[0]),
@@ -325,7 +387,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             done[key] = row["status"]
             continue
 
-        if fetcher is None:
+        if kind == "no-service":
             row.update({"status": "no-service",
                         "reason": (unavailable or "no estate artifact service is "
                                    "configured, so this artifact was never looked for")})
@@ -333,14 +395,18 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             done[key] = row["status"]
             continue
 
-        try:
-            probe = row.get("probeTypes")
-            if probe:
-                got = call_service_probing(fetcher, name, probe, dest)
-            else:
-                got = call_service(fetcher, name, row.get("type"), dest)
-        except ServiceUnavailable as exc:
-            row.update({"status": "error", "error": str(exc)})
+        probe = row.get("probeTypes")
+        # Subscripted, never .get(): a missing key would otherwise read as `None`, which
+        # here MEANS "the estate was asked and had nothing" - so a future edit that broke
+        # the two passes' agreement about what gets requested would not fail, it would
+        # quietly report every affected member absent from the estate. That is the one
+        # failure this report exists to make impossible.
+        got = got_by_key[key]
+        if isinstance(got, ServiceUnavailable):
+            # Raised in pass 2, carried here, and recorded against ITS OWN row - so one
+            # member's failure still says exactly what happened to that member, and never
+            # to any other.
+            row.update({"status": "error", "error": str(got)})
             errors.append({"artifact": name, "error": row["error"]})
             rows.append(row)
             done[key] = row["status"]

@@ -2,6 +2,8 @@
 mapsets, control members - through a caller-supplied estate service, and reporting
 honestly which rows were never fetchable in the first place."""
 
+import json
+
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.fetch import build_fetch_plan, fetch_dependencies
 from cobol_xstate.parser import parse_program
@@ -413,3 +415,89 @@ def test_assign_literal_keeps_its_dots():
 
 # A copybook shared by many members costing one round-trip is now stage 1's guarantee,
 # and is tested there: see test_prefetch.py::test_a_member_reached_many_ways_is_fetched_once
+
+
+# --------------------------------------------------------------------------- #
+# retrieving the plan concurrently
+#
+# The plan is fully known before any of it runs - build_fetch_plan is pure - so there was
+# never a reason to discover the second request only after the first had come back. That
+# cost 6.5s of a measured 19.5s run. The report is what must not move: its row order is
+# part of its output, so it follows the PLAN and never the order the estate answered in.
+# --------------------------------------------------------------------------- #
+
+
+def _slow_fetcher(peak, log=None):
+    import random
+    import threading
+    import time
+    state = {"now": 0}
+    lock = threading.Lock()
+
+    def fetch(name, type=None):
+        with lock:
+            state["now"] += 1
+            peak[0] = max(peak[0], state["now"])
+            if log is not None:
+                log.append((name, type))
+        try:
+            time.sleep(random.uniform(0.002, 0.02))
+            if name.upper() == "BOOM":
+                raise RuntimeError("the estate refused this request")
+            text = STORE.get(name.upper())
+            if text is None:
+                return {"artifact_name": name, "found": False}
+            return {"artifact_name": name, "found": True, "text": text,
+                    "source_path": rf"\share\{name}"}
+        finally:
+            with lock:
+                state["now"] -= 1
+    return fetch
+
+
+# Every branch the recording pass can take, in one plan: two fetchable programs, a table,
+# a member the estate lacks, one whose request fails outright, a duplicate name, the
+# subject itself, a row that was never fetchable, and one stage 1 already paid for.
+MIXED = {"program": "MAINPGM", "artifacts": [
+    {"artifact": "DCIOC104", "kind": "program", "dependency": "runtime"},
+    {"artifact": "ACCOUNT", "kind": "db2-table", "dependency": "runtime"},
+    {"artifact": "GONE", "kind": "program", "dependency": "runtime"},
+    {"artifact": "BOOM", "kind": "program", "dependency": "runtime"},
+    {"artifact": "AUDITLOG", "kind": "program", "dependency": "runtime"},
+    {"artifact": "DCIOC104", "kind": "copybook", "dependency": "compile-time"},
+    {"artifact": "MAINPGM", "kind": "program", "dependency": "runtime"},
+    {"artifact": "CALLER", "kind": "caller", "dependency": "runtime"},
+    {"artifact": "CUSTCPY", "kind": "copybook", "dependency": "compile-time"},
+]}
+PRE = {"CUSTCPY": ("       01 CUST-REC PIC X(80).\n", "PROD.COPYLIB")}
+
+
+def test_the_plan_is_fetched_concurrently_and_still_reported_in_plan_order():
+    peak = [0]
+    seq = fetch_dependencies(MIXED, _slow_fetcher(peak), prefetched=PRE, jobs=1)
+    assert peak[0] == 1, "jobs=1 must not start a second request; it is the escape hatch"
+
+    for attempt in range(5):
+        peak[0] = 0
+        par = fetch_dependencies(MIXED, _slow_fetcher(peak), prefetched=PRE, jobs=8)
+        assert json.dumps(par, indent=2) == json.dumps(seq, indent=2), (
+            f"attempt {attempt}: the report followed the estate's timing, not the plan")
+        assert peak[0] > 1, "nothing actually overlapped - the test proves nothing"
+
+    assert [r["status"] for r in seq["artifacts"]] == [
+        "fetched", "fetched", "not-found", "error", "fetched",
+        "already-fetched", "skipped", "skipped", "prefetched"]
+
+
+def test_a_duplicate_name_is_still_one_round_trip_when_requests_overlap():
+    """The check that made this safe sequentially - is this name already done? - is a
+    read-then-write, and two threads would both find it absent and both ask. So duplicates
+    collapse when the plan is read, before anything is dispatched."""
+    calls = []
+    rep = fetch_dependencies(MIXED, _slow_fetcher([0], log=calls), prefetched=PRE, jobs=8)
+    assert [n for n, _ in calls].count("DCIOC104") == 1
+    # ...and the row that did NOT cause the round-trip is still the second one
+    dup = [r for r in rep["artifacts"] if r["artifact"] == "DCIOC104"]
+    assert [r["status"] for r in dup] == ["fetched", "already-fetched"]
+    # the member stage 1 paid for is never requested at all
+    assert "CUSTCPY" not in [n for n, _ in calls]
