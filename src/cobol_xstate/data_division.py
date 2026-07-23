@@ -238,7 +238,15 @@ def _entries(region: List[CodeLine]):
         if up.startswith(("FD ", "SD ", "RD ", "FD.", "01 FD")) or up in ("FD", "SD"):
             # File/sort descriptions - skip the FD line itself; its 01 follows.
             continue
-        if _LEVEL_START.match(cl.text) and re.match(r"^\s*\d", cl.text):
+        # A data entry runs until its terminating period, and a level number only starts a
+        # NEW entry at that boundary. A clause continued onto a line that happens to begin
+        # with digits - the standard `OCCURS` \ `n TIMES` wrap, or a level number pushed
+        # to its own line - was read as a fresh item: `05 WS-TAB OCCURS` split from
+        # `10 TIMES PIC X(5)` invented a phantom item named TIMES and dropped WS-TAB's
+        # OCCURS. Only break when the entry so far is terminated (its last line ends in a
+        # period) or nothing is buffered yet.
+        terminated = (not buf) or buf[-1].rstrip().endswith(".")
+        if terminated and _LEVEL_START.match(cl.text) and re.match(r"^\s*\d", cl.text):
             if buf:
                 yield " ".join(buf), first_line, section, first_origin, first_fd
             buf = [t]

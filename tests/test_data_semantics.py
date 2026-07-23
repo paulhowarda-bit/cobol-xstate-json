@@ -363,3 +363,82 @@ def test_refmod_write_target_is_flagged_and_not_a_phantom_key():
     # never a silent phantom store; the runnable machine fails loudly instead
     assert "notModeled" in mod
     assert 'FIELDS["WS-NAME(1 : 2)"]' not in mod
+
+
+# --------------------------------------------------------------------------- #
+# entry/paragraph boundaries are period-driven (review finding J13)
+# --------------------------------------------------------------------------- #
+
+def _items(src):
+    return {it.name: it for it in parse_program(src).data_items}
+
+
+def test_data_clause_continued_onto_a_numeric_line_is_not_a_new_item():
+    # OCCURS wrapped onto its own line starting with the count: `05 X OCCURS` / `10 TIMES`
+    # used to split into X (no occurs) plus a phantom item named TIMES at level 10.
+    items = _items(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-TAB OCCURS\n"
+        "          10 TIMES PIC X(5).\n"
+        "       01 WS-B PIC 9(4) VALUE 0.\n"
+    )
+    assert "TIMES" not in items, "a continuation line became a phantom data item"
+    assert items["WS-TAB"].occurs == 10
+    assert items["WS-TAB"].pic == "X(5)"
+    assert set(items) == {"WS-TAB", "WS-B"}
+
+
+def test_a_real_new_entry_after_a_period_still_splits():
+    # the boundary check must not over-merge: two terminated entries stay two entries
+    items = _items(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01 WS-A PIC X(3).\n"
+        "       05 WS-B PIC X(3).\n"
+    )
+    assert set(items) == {"WS-A", "WS-B"}
+
+
+def test_free_format_statement_continuation_is_not_a_phantom_paragraph():
+    # a MOVE whose target is on the next line, alone, reads as `NAME.` - the header shape.
+    # In free format every line is an Area-A candidate, so it became a phantom paragraph
+    # that stole the rest of the real one.
+    prog = parse_program(
+        ">>SOURCE FORMAT FREE\n"
+        "IDENTIFICATION DIVISION.\n"
+        "PROGRAM-ID. T.\n"
+        "DATA DIVISION.\n"
+        "WORKING-STORAGE SECTION.\n"
+        "01 WS-SRC PIC 9(4) VALUE 7.\n"
+        "01 WS-RESULT PIC 9(4).\n"
+        "PROCEDURE DIVISION.\n"
+        "0000-MAIN.\n"
+        "    MOVE WS-SRC TO\n"
+        "    WS-RESULT.\n"
+        "    STOP RUN.\n"
+    )
+    names = [p.name for p in prog.paragraphs]
+    assert names == ["0000-MAIN"], f"phantom paragraph(s): {names}"
+    verbs = [type(s).__name__ for s in prog.paragraphs[0].statements]
+    assert "TerminateStmt" in verbs, "STOP RUN was stolen by the phantom paragraph"
+
+
+def test_free_format_real_paragraph_header_after_a_period_is_recognized():
+    # the boundary gate must still admit a genuine header once the sentence is closed
+    prog = parse_program(
+        ">>SOURCE FORMAT FREE\n"
+        "IDENTIFICATION DIVISION.\n"
+        "PROGRAM-ID. T.\n"
+        "PROCEDURE DIVISION.\n"
+        "0000-MAIN.\n"
+        "    PERFORM 1000-SUB.\n"
+        "    STOP RUN.\n"
+        "1000-SUB.\n"
+        "    CONTINUE.\n"
+    )
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN", "1000-SUB"]
