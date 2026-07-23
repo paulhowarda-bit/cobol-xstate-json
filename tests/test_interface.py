@@ -442,3 +442,38 @@ def test_file_status_branch_is_a_response_event():
     # DISPLAY of a variable carries it as a field
     disp = next(e for e in iface["events"] if e["verb"] == "DISPLAY")
     assert disp["fields"] == ["WS-FSTAT"]
+
+
+def test_read_into_carries_the_into_records_leaves_not_just_the_group():
+    """``READ f INTO ws-rec`` == ``READ f; MOVE fd-record TO ws-rec``: subsequent
+    statements address ``ws-rec``'s ELEMENTARY fields, so the crossing must carry them -
+    the file analogue of ``SELECT ... INTO :a :b``. Here the FD record is one opaque
+    ``X(13)`` field while the INTO target reinterprets those bytes as key + amount, so the
+    event must carry the INTO record's leaves (WS-KEY / WS-AMT), NOT the FD record. Listing
+    only the group record name left the reactive ``recv`` with no context key to assign."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. RI.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT IN-FILE ASSIGN TO INDD.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  IN-FILE.\n"
+        "       01  IN-REC        PIC X(13).\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-REC.\n"
+        "           05  WS-KEY    PIC X(8).\n"
+        "           05  WS-AMT    PIC 9(5).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           READ IN-FILE INTO WS-REC\n"
+        "               AT END CONTINUE\n"
+        "           END-READ\n"
+        "           STOP RUN.\n"
+    )
+    iface = _iface_of(src)
+    rd = next(e for e in iface["events"] if e["verb"] == "READ")
+    assert set(rd["fields"]) >= {"WS-KEY", "WS-AMT"}   # the leaves the machine addresses
+    assert "IN-REC" not in rd["fields"]                # not the opaque FD record

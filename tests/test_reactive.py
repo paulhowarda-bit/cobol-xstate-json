@@ -212,6 +212,38 @@ def test_reactive_slice_runs_by_sending_events(repo_tmp):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+def test_file_read_into_recv_assigns_the_into_records_leaves():
+    """A file ``READ f INTO ws-rec`` event must carry the INTO record's ELEMENTARY fields,
+    so the reactive ``recv`` assigns them through their PICTURE - exactly as an SQL SELECT's
+    host variables are. Before the fix the event carried only the group record name (not a
+    context key), so ``recv`` was ``=> ({})``: a runtime NO-OP that processed an empty
+    record. This is why readproc.cbl had to use SQL, not a file READ, to be drivable."""
+    mod = emit_reactive_module(_machine("readinto.cbl"))
+    assert '"recv_GET_FILE_IN_FILE": (context, event) => ({})' not in mod   # was a no-op
+    assert ('"WS-KEY": event["WS-KEY"] !== undefined ? '
+            'storeStr(event["WS-KEY"], FIELDS["WS-KEY"]) : context["WS-KEY"]') in mod
+    assert ('"WS-AMT": event["WS-AMT"] !== undefined ? '
+            'store(D(String(event["WS-AMT"])), FIELDS["WS-AMT"])') in mod
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_file_read_into_derives_from_the_arriving_record(repo_tmp):
+    """The file analogue of the readproc SQL proof, drivable only now that a file READ
+    event carries the INTO record's leaves. The FD record is opaque X(13); WS-REC's leaves
+    (WS-KEY / WS-AMT) arrive on the event and drive per-record processing. Pre-fix the recv
+    was a no-op: the loop still counted records and reached ``done``, but WS-SUM stayed 0
+    and OUT-KEY stayed blank - a machine that looked finished while every derived value was
+    wrong."""
+    body = (
+        "for (const [k, amt] of "
+        "[['AAAA1111','00021'],['BBBB2222','00100'],['CCCC3333','00007']]) "
+        "a.send({ type: 'GET.FILE.IN-FILE', 'WS-KEY': k, 'WS-AMT': amt });\n"
+        "a.send({ type: 'END.FILE.IN-FILE' });\n"
+        + _expect({"WS-CNT": "3", "WS-SUM": "128", "OUT-KEY": "CCCC3333"}))
+    r = _run_reactive(repo_tmp, "readinto.cbl", body)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
 def test_read_process_write_derives_from_the_arriving_record(repo_tmp):
     """The end-to-end proof of the J8 fix: start the machine (no record yet), send the
