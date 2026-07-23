@@ -409,3 +409,61 @@ def test_the_not_at_end_arm_is_control_not_a_business_decision():
         for c in r.get("conditions", []):
             if c["guard"].lower().endswith("atend"):
                 assert c["kind"] == "control"
+
+
+# --------------------------------------------------------------------------- #
+# a subprogram whose output IS the COMMAREA (review finding J10)
+# --------------------------------------------------------------------------- #
+
+def _lin_src(src: str) -> dict:
+    return build_lineage(build_machine(parse_program(src), source_name="sub"))
+
+
+_SUBFEE = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. SUBFEE.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 WS-RATE PIC 9(3)V99 VALUE 1.50.\n"
+    "       LINKAGE SECTION.\n"
+    "       01 DFHCOMMAREA.\n"
+    "          05 CA-QTY  PIC 9(5).\n"
+    "          05 CA-FEE  PIC 9(7)V99.\n"
+    "          05 CA-FLAG PIC X.\n"
+    "       PROCEDURE DIVISION USING DFHCOMMAREA.\n"
+    "       0000-MAIN.\n"
+    "           COMPUTE CA-FEE = CA-QTY * WS-RATE\n"
+    "           MOVE 'Y' TO CA-FLAG\n"
+    "           MOVE 0 TO RETURN-CODE\n"
+    "           GOBACK.\n"
+)
+
+
+def test_commarea_output_subprogram_has_a_lineage_table():
+    # writing a LINKAGE field is the caller-visible output; the event classifier does not
+    # see it, so this table used to be EMPTY while the interface listed the same fields.
+    d = _lin_src(_SUBFEE)
+    out = {r["field"] for r in d["rows"] if r["direction"] == "output"}
+    assert {"CA-FEE", "CA-FLAG", "RETURN-CODE"} <= out, f"missing outputs, got {out}"
+
+
+def test_commarea_output_field_traces_back_to_the_caller_input():
+    # CA-FEE = CA-QTY * WS-RATE, and CA-QTY is a caller input, so its origin is the caller
+    d = _lin_src(_SUBFEE)
+    fee = _row(d, "CA-FEE")
+    assert fee["changedByProgram"] is True
+    assert _origins(fee) == {"GET.CALLER.CALLER"}
+
+
+def test_leaves_lists_every_field_of_a_wide_record():
+    from cobol_xstate.interface import _DataView
+    lines = ["       IDENTIFICATION DIVISION.", "       PROGRAM-ID. WIDE.",
+             "       DATA DIVISION.", "       LINKAGE SECTION.", "       01 DFHCOMMAREA."]
+    lines += [f"          05 CA-F{i:03d} PIC X(2)." for i in range(80)]
+    lines += ["       PROCEDURE DIVISION USING DFHCOMMAREA.", "       0000-MAIN.",
+              "           MOVE 'AB' TO CA-F079.", "           GOBACK."]
+    m = build_machine(parse_program("\n".join(lines) + "\n"), source_name="wide")
+    leaves = _DataView(m.data).leaves("DFHCOMMAREA")
+    # all 80 present - not silently capped at 64
+    assert len(leaves) == 80
+    assert "CA-F079" in leaves and "CA-F064" in leaves

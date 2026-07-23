@@ -160,17 +160,28 @@ class _DataView:
     def records_of(self, file_name: str) -> List[str]:
         return self.records.get(file_name, [])
 
-    def leaves(self, name: str, limit: int = 64) -> List[str]:
+    def leaves(self, name: str) -> List[str]:
         """Elementary (leaf) fields under `name`, in dictionary order; the record's
-        actual field layout, for field-level interface fidelity."""
+        actual field layout, for field-level interface fidelity.
+
+        Every leaf is returned - a record's fields are its interface, and a wide COMMAREA
+        or FD layout that ran past a fixed cap (this once stopped at 64) silently lost the
+        rest with no sign they existed. The deque made the walk linear, so listing all of
+        them is cheap; a `seen` guard keeps a malformed or REDEFINES-tangled layout that
+        points a child back at an ancestor from looping instead of relying on that cap.
+        """
         out: List[str] = []
         root = (name or "").upper()
         # A deque: the previous list `pop(0)` was O(n) per step and `kids + stack`
         # reallocated the whole frontier on every expansion - quadratic on a wide
         # COMMAREA/FD record with hundreds of subordinate fields.
         stack: Deque[str] = deque([root])
-        while stack and len(out) < limit:
+        seen: set = set()
+        while stack:
             cur = stack.popleft()
+            if cur in seen:
+                continue
+            seen.add(cur)
             kids = [k for k in self.children.get(cur, [])
                     if isinstance(self.data.get(k), dict)
                     and self.data[k].get("kind") != "condition-name"]

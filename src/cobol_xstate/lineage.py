@@ -168,6 +168,11 @@ class _Lineage:
         self.known: Set[str] = {n.upper() for n, it in self.data.items()
                                 if isinstance(it, dict)
                                 and it.get("kind") != "condition-name"}
+        # LINKAGE items (the caller's parameter records / COMMAREA). A write into one is
+        # a caller-visible OUTPUT the event classifier does not recognize - see `_apply`.
+        self.linkage: Set[str] = {n.upper() for n, it in self.data.items()
+                                  if isinstance(it, dict)
+                                  and it.get("section") == "LINKAGE"}
         self.ordered = machine.paragraph_order
         self.sections = getattr(machine, "sections", {}) or {}
         self.files = getattr(machine, "files", {}) or {}
@@ -582,6 +587,18 @@ class _Lineage:
                                     self.cursors)
             got = [h for h in hits if h["direction"] == "get"]
             made = [h for h in hits if h["direction"] == "create"]
+            # A MOVE / COMPUTE / SET into a LINKAGE (COMMAREA) field or RETURN-CODE is the
+            # caller-visible OUTPUT of a subprogram, but the event classifier does not see
+            # it as one - so a subprogram whose whole result IS its COMMAREA produced an
+            # EMPTY lineage table, while the interface overlay (which runs exactly this
+            # fallback) listed every field. Add the CREATE side here so those rows exist.
+            # The GET side needs nothing: `_seed` already marks every linkage item
+            # caller-originated at entry, so the data-movement pass threads it, and adding
+            # per-action get hits would trip the `if got: continue` guard below and break
+            # that threading.
+            if not hits and spec:
+                made = [h for h in _iface._classify_dataflow(spec, self.linkage)
+                        if h["direction"] == "create"]
 
             # 1. an INPUT event fills its fields: they originate HERE.
             for h in got:
