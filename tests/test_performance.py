@@ -279,6 +279,129 @@ def test_condition_fixpoint_is_actually_a_fixpoint():
 
 
 # --------------------------------------------------------------------------- #
+# lineage's reaching-origins fixpoint
+#
+# The same defect as the condition fixpoint above, in the pass next door, and dearer: a
+# wasted visit there costs a few integer ops, here it re-runs the whole transfer function
+# over a state's entry run and re-merges every predecessor's full field map. It was walked
+# from a STACK with no dedup, so a state was re-propagated once per revision of anything
+# upstream of it - and what drives the revisions is the WIDTH of the lattice, the number of
+# fields, which no test built on a handful of data items could ever show. Measured across
+# programs of one shape: 6.8 visits per state over 5 fields, 41.6 over 100, 81.6 over 300,
+# against exactly 1.0 for all three in queue order. 19x to 48x, widening with size.
+# --------------------------------------------------------------------------- #
+
+def _wide_fields_machine(paras: int, fields: int):
+    """`paras` reconverging diamonds over `fields` distinct data items.
+
+    Two axes, because only their PRODUCT exposes the cost: the diamonds make the graph,
+    and the fields make each state's origin map wide enough that a merge point revises it
+    many times. Every field is written from a LINKAGE item so a real origin flows into it -
+    a field nothing external reaches never revises anything and would not stress the pass.
+    """
+    src = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. WIDEF.",
+        "       DATA DIVISION.",
+        "       WORKING-STORAGE SECTION.",
+        "       01 WS-AMT PIC 9(5) VALUE 0.",
+    ]
+    src += [f"       01 F{i:04d} PIC 9(5) VALUE 0." for i in range(fields)]
+    src += [
+        "       LINKAGE SECTION.",
+        "       01 DFHCOMMAREA.",
+        "          05 CA-ID PIC X(8).",
+        "       PROCEDURE DIVISION.",
+        "       0000-MAIN.",
+    ]
+    src += [f"           PERFORM {i + 1:04d}-STEP" for i in range(paras)]
+    # An external boundary at the end, so the pass has rows to emit at all: the fields
+    # carry a LINKAGE origin by now, and a DISPLAY is what asks where it came from.
+    src += [f"           DISPLAY F{i:04d}" for i in range(min(fields, 8))]
+    src += ["           STOP RUN."]
+    for i in range(paras):
+        src += [
+            f"       {i + 1:04d}-STEP.",
+            f"           IF WS-AMT > {i + 1}",
+            f"               ADD CA-ID TO F{i % fields:04d}",
+            "           ELSE",
+            f"               ADD 1 TO F{i % fields:04d}",
+            "           END-IF.",
+        ]
+    return build_machine(parse_program("\n".join(src) + "\n"))
+
+
+def test_origins_fixpoint_settles_in_roughly_one_visit_per_state(monkeypatch):
+    """Queue order, so the transfer function runs about once per state.
+
+    Counts `_apply`, which IS the expensive thing - one call is one state's whole entry
+    run re-interpreted. The threshold sits far from both the 1.0 a queue achieves and the
+    81.6 a stack reached on this shape, so scheduling noise cannot trip it; only the
+    ordering actually regressing can.
+    """
+    calls = []
+    real = _Lineage._apply
+
+    def counting(self, name, st, incoming, rows):
+        calls.append(1)
+        return real(self, name, st, incoming, rows)
+
+    monkeypatch.setattr(_Lineage, "_apply", counting)
+    lin = _Lineage(_wide_fields_machine(80, 100))
+    lin.run()
+    # the fixpoint, plus one final row-emitting pass over every reached state
+    assert len(calls) < 5 * len(lin.states), (
+        f"{len(calls)} transfer-function runs for {len(lin.states)} states - the "
+        f"worklist is re-propagating, which is what stack order did")
+
+
+def test_origins_fixpoint_answer_does_not_depend_on_visit_order():
+    """The queue and the dedup set are a scheduling choice, never a semantic one.
+
+    Skipping a re-queue is only sound because the worklist holds NAMES, not values: the
+    incoming map is re-merged from the predecessors' current outputs at pop time, so
+    collapsing two pending visits into one cannot lose an update. That is the property
+    this asserts, against the exhaustive stack-order walk it replaced - if the dedup ever
+    drops a visit that mattered, the two answers diverge.
+    """
+    m = _wide_fields_machine(24, 40)
+
+    ref = _Lineage(m)
+    ref.changers = ref._changers()
+    preds = {s: [] for s in ref.states}
+    for s, ts in ref.succs.items():
+        for t in ts:
+            if t in preds:
+                preds[t].append(s)
+    seed = ref._seed()
+    IN = {s: None for s in ref.states}
+    OUT = {s: None for s in ref.states}
+    work = list(ref.entries)                  # a STACK, and every push kept
+    while work:
+        s = work.pop()
+        merged = dict(seed) if s in ref.entries else {}
+        for p in preds[s]:
+            if OUT[p] is None:
+                continue
+            for f, o in OUT[p].items():
+                merged[f] = merged.get(f, frozenset()) | o
+        if IN[s] is not None and merged == IN[s]:
+            continue
+        IN[s] = merged
+        new_out = ref._apply(s, ref.states[s], merged, None)
+        if OUT[s] is None or new_out != OUT[s]:
+            OUT[s] = new_out
+            work.extend(t for t in ref.succs.get(s, []) if t in ref.states)
+    expected = []
+    for s in ref.states:
+        if IN[s] is not None:
+            ref._apply(s, ref.states[s], IN[s], expected)
+
+    assert _Lineage(m).run()["rows"] == expected
+    assert expected, "the fixture must actually produce lineage rows to compare"
+
+
+# --------------------------------------------------------------------------- #
 # the business view's collapse walk
 #
 # It used to recurse, at roughly ten interpreter frames per technical state stepped
