@@ -309,3 +309,99 @@ def test_prefetch_honors_a_custom_copybook_extension_on_disk(tmp_path):
     row = _row(pre, "CUSTREC")
     assert row["status"] == "local"
     assert row["source"].endswith("CUSTREC.xyz")
+
+
+# --------------------------------------------------------------------------- #
+# retrieving a level at a time
+#
+# Members within one level of the closure do not depend on each other, so the run used to
+# cost the SUM of the estate's latencies where it could cost the maximum - measured at
+# 7.9s of a 19.5s run, for about forty copybooks at a couple of hundred milliseconds each.
+# What must not change is the report: its row order is part of its output, and if that
+# followed the order answers happened to arrive, the same run against the same estate
+# would produce different bytes twice in a row.
+# --------------------------------------------------------------------------- #
+
+# Wide (several members per level) and deep (three levels), so there is something to
+# overlap AND more than one level to get in the wrong order. The outcomes are mixed on
+# purpose: a level whose members all succeed cannot show that a not-found, an error and a
+# skip still land in the right places among them.
+WIDE_ESTATE = {
+    "L1A": "       COPY L2A.\n       COPY L2B.\n",
+    "L1B": "       COPY L2C.\n       COPY L2A.\n",     # L2A reached twice, from two parents
+    "L1C": "       01 C PIC X.\n",
+    "L2A": "       COPY L3A.\n",
+    "L2B": "       01 B PIC X.\n",
+    "L2C": "       01 D PIC X.\n",
+    "L3A": "       01 E PIC X.\n",
+}
+WIDE_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. WIDEPGM.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       COPY L1A.\n"
+    "       COPY L1B.\n"
+    "       COPY GONE.\n"                              # not-found
+    "       COPY BOOM.\n"                              # the request itself fails
+    "       COPY L1C.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           STOP RUN.\n"
+)
+
+
+def _jittered(peak):
+    """An estate whose answers come back out of request order, which is the only way to
+    catch a report that files rows as they arrive."""
+    import random
+    import threading
+    import time
+    state = {"now": 0}
+    lock = threading.Lock()
+
+    def fetch_artifact(name, type=None, copy=None):
+        with lock:
+            state["now"] += 1
+            peak[0] = max(peak[0], state["now"])
+        try:
+            time.sleep(random.uniform(0.002, 0.02))
+            if name.upper() == "BOOM":
+                raise RuntimeError("the estate refused this request")
+            text = WIDE_ESTATE.get(name.upper())
+            if text is None:
+                return {"artifact_name": name, "found": False}
+            return {"artifact_name": name, "found": True, "text": text,
+                    "detected_type": "copybook",
+                    "source_location": f"PROD.SYSLIB({name})"}
+        finally:
+            with lock:
+                state["now"] -= 1
+    return fetch_artifact
+
+
+def test_a_level_is_retrieved_concurrently_and_still_reported_in_its_own_order():
+    peak = [0]
+    seq = prefetch_cobol(WIDE_SRC, _jittered(peak), jobs=1).report()
+    assert peak[0] == 1, "jobs=1 must not start a second request; it is the escape hatch"
+
+    for attempt in range(5):
+        peak[0] = 0
+        par = prefetch_cobol(WIDE_SRC, _jittered(peak), jobs=8).report()
+        assert json.dumps(par, indent=2) == json.dumps(seq, indent=2), (
+            f"attempt {attempt}: the report followed the estate's timing, not the plan")
+        assert peak[0] > 1, "nothing actually overlapped - the test proves nothing"
+
+
+def test_every_outcome_survives_the_concurrent_path_distinctly():
+    """The reasons must stay apart under concurrency too. 'the estate had nothing' and
+    'we could not ask' lead to different next actions, and an exception raised in another
+    thread is exactly the kind of thing that gets flattened into a generic miss."""
+    rep = prefetch_cobol(WIDE_SRC, _jittered([0]), jobs=8).report()
+    by = {r["member"]: r for r in rep["members"]}
+    assert by["GONE"]["status"] == "not-found"
+    assert by["BOOM"]["status"] == "error"
+    assert "the estate refused this request" in by["BOOM"]["error"]
+    assert by["L3A"]["status"] == "fetched", "the third level must still be reached"
+    # ...and one member named by two parents is still one round-trip and one row
+    assert [r["member"] for r in rep["members"]].count("L2A") == 1
