@@ -97,13 +97,16 @@ _RESERVED_HEADER = STARTERS | {
 
 def _find_program_id(lines: List[CodeLine]) -> str:
     for cl in lines:
-        m = re.search(r"\bPROGRAM-ID\b\s*\.?\s*([A-Z0-9][A-Z0-9-]*)", cl.text, re.I)
+        m = _PROGRAM_ID_RE.search(cl.text)
         if m:
             return m.group(1).upper()
     return "RECOVERED"
 
 
-_PROGRAM_ID_RE = re.compile(r"\bPROGRAM-ID\b\s*\.?\s*([A-Z0-9][A-Z0-9-]*)", re.I)
+# `(?<!-)`: `\b` alone fires after a hyphen, so `\bPROGRAM-ID\b` matched the tail of a data
+# name like `PNET-MQ-PROGRAM-ID` and counted a phantom program. Excluding a preceding hyphen
+# drops those false hits and still rejects `XPROGRAM-ID`, exactly as the bare `\b` did.
+_PROGRAM_ID_RE = re.compile(r"(?<!-)\bPROGRAM-ID\b\s*\.?\s*([A-Z0-9][A-Z0-9-]*)", re.I)
 _END_PROGRAM_RE = re.compile(r"\bEND\s+PROGRAM\b(?:\s+([A-Z0-9][A-Z0-9-]*))?", re.I)
 
 
