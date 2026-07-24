@@ -43,6 +43,51 @@ def test_le_service_is_ibm_le():
     assert classify_call_target("CEESITST")["subsystem"] == "ibm-le"
 
 
+def test_cics_module_is_ibm_cics():
+    """DFH is reserved to CICS, so a DFH-named CALL target is CICS-supplied by
+    construction - the same kind of reading as CEE*, not a guess."""
+    r = classify_call_target("DFHNCTR")
+    assert r["category"] == CATEGORY_IBM and r["subsystem"] == "ibm-cics"
+
+
+def test_the_cics_rule_is_a_prefix_because_a_list_would_go_stale():
+    """CICS ships hundreds of DFH modules. An enumerated list is exactly what left
+    DFHNCTR looking like an unresolved application dependency while its better-known
+    siblings were recognised - so every DFH name resolves, named or not."""
+    for name in ("DFHEI1", "DFHECI", "DFHPC", "DFHNCTR", "DFHXXXXX"):
+        assert classify_call_target(name)["subsystem"] == "ibm-cics", name
+
+
+def test_a_cics_module_is_never_requested_from_the_estate():
+    """The point of classifying it. `unresolved` is FETCHABLE, so DFHNCTR was probed -
+    cobol then asm - came back not-found, and an impact analysis downstream read that as
+    a missing application program. ibm-runtime is in NON_FETCHABLE, so it is not asked
+    for at all."""
+    from cobol_xstate.classify import NON_FETCHABLE
+    from cobol_xstate.fetch import build_fetch_plan
+    info = classify_call_target("DFHNCTR")
+    assert info["category"] in NON_FETCHABLE
+    man = {"program": "CICSPGM", "artifacts": [
+        {"artifact": "DFHNCTR", "kind": "program", "dependency": "runtime",
+         "classification": info["category"], "classificationReason": info["reason"]}]}
+    row, = build_fetch_plan(man)
+    assert row["status"] == "skipped"
+    assert "DFH" in row["reason"] or "no application source" in row["reason"]
+
+
+def test_a_contained_program_still_wins_over_the_cics_prefix():
+    """Same precedence the MQI verbs already have: what the source CONTAINS beats what a
+    reserved namespace suggests, because the contained program is the one that runs."""
+    assert classify_call_target(
+        "DFHNCTR", internal_programs=["DFHNCTR"])["category"] == CATEGORY_INTERNAL
+
+
+def test_a_name_merely_containing_dfh_is_not_cics():
+    """Reserved as a PREFIX, not as a substring - `PAYDFH` is a site program."""
+    assert classify_call_target("PAYDFH")["category"] == CATEGORY_UNRESOLVED
+    assert classify_call_target("XDFHNCTR")["category"] == CATEGORY_UNRESOLVED
+
+
 def test_unknown_name_stays_unresolved():
     # A site abend-handler utility with no source and no recognised API: not force-fit into
     # an invented label - it stays `unresolved` until the fetch stage (or a human) resolves it.
