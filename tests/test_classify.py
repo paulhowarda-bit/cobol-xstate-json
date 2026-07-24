@@ -262,3 +262,47 @@ def test_unbalanced_program_units_do_not_drop_a_units_calls():
     called = {r["artifact"] for r in build_artifacts(_machine(TWO_UNITS))["artifacts"]
               if r["kind"] == "program"}
     assert {"EXTX", "EXTY"} <= called, f"a unit's CALL was dropped: {called}"
+
+
+# --------------------------------------------------------------------------- #
+# a nested program hidden by a hyphenated data name (the FBMMAAIO failure)
+#
+# A copybook item like PNET-MQ-PROGRAM-ID false-matched the PROGRAM-ID regex, so
+# _split_program_units miscounted, bailed out, and reported NO contained programs. The
+# real nested program then classified `unresolved` - which is FETCHABLE - so the estate
+# was asked for a program that was never external, came back not-found, and the tracer
+# read that as a missing program. See test_parser.py for the parser-level reproduction.
+# --------------------------------------------------------------------------- #
+
+_NESTED_HIDDEN = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. FBMMAAIO.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  PNET-MQ-PROGRAM-ID   PIC X(8).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'USECICS' USING PNET-MQ-PROGRAM-ID\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. USECICS.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-USECICS.\n"
+    "           GOBACK.\n"
+    "       END PROGRAM USECICS.\n"
+    "       END PROGRAM FBMMAAIO.\n"
+)
+
+
+def test_a_nested_program_behind_a_hyphenated_item_is_internal_not_fetched():
+    from cobol_xstate.artifacts import build_artifacts
+    from cobol_xstate.fetch import build_fetch_plan
+    m = _machine(_NESTED_HIDDEN)
+    art = build_artifacts(m)
+    row = next(r for r in art["artifacts"]
+               if r["kind"] == "program" and r["artifact"] == "USECICS")
+    assert row["classification"] == "internal-nested"
+    # ...and therefore never requested from the estate
+    plan = {e["artifact"]: e for e in build_fetch_plan(art)}
+    assert plan["USECICS"]["status"] == "skipped"
+    assert "contained" in plan["USECICS"]["reason"] or "internal" in plan["USECICS"]["reason"]

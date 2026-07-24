@@ -475,3 +475,54 @@ def test_perform_procedure_then_times_still_parses_both():
     assert perform.kind == "times"
     assert "3 TIMES" in perform.control_text.upper()
     assert not perform.inline_body
+
+
+# --------------------------------------------------------------------------- #
+# a hyphenated data name must not be mistaken for a PROGRAM-ID
+#
+# The PROGRAM-ID regex led with `\bPROGRAM-ID\b`, and a word boundary fires between a
+# hyphen and a letter - so it matched the tail of a data name like PNET-MQ-PROGRAM-ID
+# (an item a copybook can declare) and counted a phantom PROGRAM-ID with no END PROGRAM.
+# _split_program_units then ended with depth != 0, tripped its "not well-formed nesting"
+# fallback, and returned NO contained programs. The real nested programs vanished, were
+# classified `unresolved` rather than `internal-nested`, and got requested from the estate.
+# --------------------------------------------------------------------------- #
+
+_NESTED_WITH_HYPHENATED_ITEM = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. FBMMAAIO.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  PNET-MQ-AREA.\n"
+    "           05  PNET-MQ-PROGRAM-ID   PIC X(8).\n"   # the false PROGRAM-ID match
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'USECICS'\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. USECICS.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-USECICS.\n"
+    "           GOBACK.\n"
+    "       END PROGRAM USECICS.\n"
+    "       END PROGRAM FBMMAAIO.\n"
+)
+
+
+def test_hyphenated_data_name_does_not_hide_a_nested_program():
+    prog = parse_program(_NESTED_WITH_HYPHENATED_ITEM)
+    assert prog.program_id == "FBMMAAIO"
+    assert prog.nested_programs == ["USECICS"], (
+        "a data item ending in -PROGRAM-ID was counted as a program, breaking the "
+        "contained-program walk")
+
+
+def test_find_program_id_ignores_a_hyphenated_data_name():
+    """Even if the DATA DIVISION item came first, the leading hyphen must keep it from
+    being read as the program's own id."""
+    from cobol_xstate.parser import _find_program_id
+    from cobol_xstate.normalizer import normalize
+    lines = normalize(
+        "       01  WS-SAVED-PROGRAM-ID PIC X(8).\n"
+        "       PROGRAM-ID. REALPGM.\n")
+    assert _find_program_id(lines) == "REALPGM"
