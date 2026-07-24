@@ -183,7 +183,7 @@ def test_every_run_writes_both_retrieval_reports(tmp_path):
     # No estate client on a test machine: that must be stated, never left to look like
     # an estate that was asked and had nothing.
     assert pre["serviceAvailable"] is False
-    assert "cast_clients" in pre["serviceUnavailable"]
+    assert "network_drive" in pre["serviceUnavailable"]
 
 
 def test_there_is_no_second_way_to_place_output(tmp_path):
