@@ -1311,6 +1311,7 @@ most are pinned by a test.
 | `sqlsel.cbl` / `sqldml.cbl` | SQL SELECT INTO; INSERT/UPDATE/DELETE |
 | `sqlload.cbl` / `sqlunld.cbl` | file→Db2 load; Db2 cursor→file unload |
 | `txnflat.cbl` | flat transaction flow (reactive-target subject) |
+| `calltwice.cbl` | **one program CALLed twice with different operands — still one endpoint** |
 | `custrec.cpy` | a copybook (COPY expansion + `member` provenance) |
 
 ---

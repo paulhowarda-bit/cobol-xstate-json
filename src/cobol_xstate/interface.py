@@ -63,10 +63,19 @@ _DECLARE_CURSOR = re.compile(
     r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
 _CALL_USING = re.compile(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", re.I | re.S)
 _CALL_RETURNING = re.compile(r"\bRETURNING\s+([A-Z0-9-]+)", re.I)
-# The two dynamic-CALL provenance spellings statechart._call_action produces:
-# unresolved keeps the identifier and says so; resolved names the identifier it came via.
-_CALL_DYNAMIC = re.compile(r"CALL\s+\(DYNAMIC\)\s", re.I)
-_CALL_RESOLVED = re.compile(r"CALL\s+([A-Z0-9-]+)\s+->\s+RESOLVED\b", re.I)
+# The three CALL provenance spellings statechart._call_action produces, and the program
+# each one names. Mutually exclusive by construction (a quote is not in the identifier
+# class, and only one spelling carries the literal "(DYNAMIC)"), so the order they are
+# tried in is defensive rather than load-bearing.
+#   CALL (dynamic) WS-PGM ...                    -> the data item; the target is unknown
+#   CALL WS-SUBPGM -> resolved 'POSTLOG' (...)   -> the literal it was proved to be
+#   CALL 'DSNTIAC' ...                           -> the literal itself
+# The resolved literal is an OPTIONAL group: the `via` capture beside it must keep
+# matching even if that spelling ever loses its quoted target.
+_CALL_DYNAMIC = re.compile(r"CALL\s+\(DYNAMIC\)\s+([A-Z0-9-]+)", re.I)
+_CALL_RESOLVED = re.compile(
+    r"CALL\s+([A-Z0-9-]+)\s+->\s+RESOLVED\b(?:\s+'([^']+)')?", re.I)
+_CALL_LITERAL = re.compile(r"CALL\s+'([^']+)'", re.I)
 _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
 _WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -87,8 +96,40 @@ def _parse_call_args(cobol: str) -> List[str]:
 
 
 def _name_suffix(name: str) -> str:
-    """The endpoint encoded in an action name like ``read_TRAN-FILE`` / ``call_POSTLOG``."""
+    """The endpoint encoded in an action name like ``read_TRAN-FILE`` / ``call_POSTLOG``.
+
+    A LAST resort. An action name is allocated by ``naming.NameRegistry``, which keys on
+    (kind, COBOL text) and appends ``_2``, ``_3``, ... to keep two STATEMENTS apart - so
+    the name is not purely the endpoint, and reading one out of it can recover a spelling
+    the estate never had. Prefer whatever recorded the endpoint directly: ``io["file"]``
+    for a file, :func:`_call_endpoint` for a CALL.
+    """
     return name.split("_", 1)[1] if "_" in name else name
+
+
+def _call_endpoint(cobol: str, name: str) -> str:
+    """The program a CALL names, read from the COBOL rather than from the action name.
+
+    Two CALLs to one program whose ``USING`` operands differ are two statements, so the
+    registry allocates ``call_MQINQ`` and ``call_MQINQ_2`` - correctly, they have distinct
+    provenance. Splitting the second name for an endpoint yielded ``MQINQ_2``: a program
+    that exists nowhere, which was then classified (the MQI verb list holds ``MQINQ``, not
+    ``MQINQ_2``), listed in the artifact manifest, REQUESTED from the estate, and published
+    as a ``CREATE.PROGRAM.MQINQ_2`` event. Two identical CALLs never split that way, so the
+    perimeter disagreed with itself over which spelling a program had.
+
+    The COBOL provenance label names the target in all three spellings, so read it there.
+    Deliberately matched against the original text, not an uppercased copy: ``CALL 'mqinq'``
+    registers as ``call_mqinq`` and has always reported ``mqinq``, and this is a fix for a
+    phantom name, not an occasion to start re-casing real ones.
+    """
+    for pattern, group in ((_CALL_DYNAMIC, 1), (_CALL_RESOLVED, 2), (_CALL_LITERAL, 1)):
+        hit = pattern.match(cobol or "")
+        if hit and hit.group(group):
+            return hit.group(group)
+    # A spelling this function does not know. Degrade to the old derivation rather than
+    # to nothing: a suffixed name is wrong, but no name at all loses the dependency.
+    return _name_suffix(name)
 
 
 def _event(direction: str, etype: str, endpoint: str) -> str:
@@ -499,7 +540,7 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         rm = _CALL_RETURNING.search(up)
         if rm:
             params = [rm.group(1).upper()]
-        hit = _hit("create", _PROGRAM, _name_suffix(name), "CALL",
+        hit = _hit("create", _PROGRAM, _call_endpoint(cobol, name), "CALL",
                    _parse_call_args(cobol), params)
         # The statechart's provenance label spells out the dynamic-target status
         # (see statechart._call_action): carry it so downstream views don't present
