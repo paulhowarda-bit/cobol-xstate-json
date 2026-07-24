@@ -57,7 +57,7 @@ Every state/guard/action expression is a faithful translation of the COBOL its `
 
 ### Two-stage dependency retrieval, and the JCL axis
 
-Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `fetch.py`, via `artifact_service.py`; `cast_clients.mf_fetch` is the default estate client). Order matters: a copybook that doesn't arrive drops its `VALUE` clauses, which turns a resolvable dynamic `CALL` into an unresolved name — so it never becomes a fetchable row. The COBOL says *what* a program does, not *what dataset* it does it to — that binding lives in JCL: `jcl.py` + `jcl_views.py` parse jobs/PROCs, and `--bind-jcl` joins a program's file ddnames to real datasets.
+Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `fetch.py`, via `artifact_service.py`; `network_drive.mf_fetch` is the default estate client). Order matters: a copybook that doesn't arrive drops its `VALUE` clauses, which turns a resolvable dynamic `CALL` into an unresolved name — so it never becomes a fetchable row. The COBOL says *what* a program does, not *what dataset* it does it to — that binding lives in JCL: `jcl.py` + `jcl_views.py` parse jobs/PROCs, and `--bind-jcl` joins a program's file ddnames to real datasets.
 
 ### The decimal runtime ships but is never executed by the converter
 

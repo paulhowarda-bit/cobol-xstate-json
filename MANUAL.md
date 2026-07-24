@@ -228,7 +228,7 @@ Extra extension to try when resolving a copybook. Defaults already tried:
 ### `--copybook-fetcher MODULE:FUNC`
 
 **Overrides** the estate artifact service. It does not enable retrieval — every run
-retrieves through `cast_clients.mf_fetch:fetch_artifact` by default, because only the
+retrieves through `network_drive.mf_fetch:fetch_artifact` by default, because only the
 estate knows where its members live. Use this only for a differently-named client.
 
 ```bash
@@ -272,7 +272,7 @@ resolvable dynamic `CALL` target into an unresolved one (see the flag table belo
 In Python, pass the callable directly:
 
 ```python
-from cast_clients.mf_fetch import fetch_artifact
+from network_drive.mf_fetch import fetch_artifact
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.parser import parse_program
 
