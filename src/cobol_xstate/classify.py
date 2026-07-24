@@ -13,9 +13,10 @@ Categories, decided by the highest-confidence signal available:
                          ``PROGRAM-ID``); a CALL to it is internal, not an external
                          dependency. Signal: the parser's `Program.nested_programs`.
   ``ibm-runtime``        the target is a standard IBM subsystem entry point - an MQ MQI
-                         verb, a Db2 language-interface / message module, or a Language
-                         Environment ``CEE*`` service - corroborated by the program's own
-                         context. Provided by the runtime; there is no application source.
+                         verb, a Db2 language-interface / message module, a Language
+                         Environment ``CEE*`` service, or a CICS ``DFH*`` module -
+                         corroborated by the program's own context. Provided by the
+                         runtime; there is no application source.
   ``unresolved``         NONE of the above could be positively established. This is an
                          HONEST default: the tool never guesses a provider it cannot prove
                          (the project rule is *flag, never guess*). The fetch stage then
@@ -65,6 +66,21 @@ _DB2_MODULES = frozenset({
 # CEE is reserved to LE: no application program may use it).
 _LE_PREFIX = "CEE"
 
+# IBM CICS - the reserved DFH* namespace, for exactly the reason CEE is a prefix and the
+# MQI is a list: IBM reserves DFH, so a DFH-named module is CICS-supplied by construction
+# and no application program may take the name. That is what makes a prefix a reading of
+# the code rather than a guess, and it is also why this cannot be an enumerated list -
+# CICS ships hundreds of them (DFHEI1 and DFHECI, the command-level stubs, plus DFHPC,
+# DFHNCTR and the rest) and any list would go stale in exactly the way that leaves a
+# caller looking like an unresolved application dependency. What the classification rests
+# on is the RESERVATION, not on knowing what each module does.
+#
+# The cost, stated plainly because it is the same one CEE already carries: a site that
+# breaks the reservation and names its own module DFHxxx now goes unfetched, where before
+# it would have been probed and found. That trade is deliberate - the reservation is a
+# documented IBM rule, and a site breaking it is a site defect, not a modelling case.
+_CICS_PREFIX = "DFH"
+
 
 def _copies_mq(copybooks: Iterable[dict]) -> bool:
     """True if the program COPYs an IBM MQ copybook (``CMQ*``) - the members that define
@@ -105,6 +121,11 @@ def classify_call_target(name: str, *, internal_programs: Iterable[str] = (),
     if up.startswith(_LE_PREFIX):
         return {"category": CATEGORY_IBM, "subsystem": "ibm-le",
                 "reason": "IBM Language Environment callable service (CEE*) - runtime "
+                          "library, no application source"}
+
+    if up.startswith(_CICS_PREFIX):
+        return {"category": CATEGORY_IBM, "subsystem": "ibm-cics",
+                "reason": "IBM CICS-supplied module (DFH* is reserved to CICS) - runtime "
                           "library, no application source"}
 
     return {"category": CATEGORY_UNRESOLVED,
