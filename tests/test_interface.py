@@ -477,3 +477,131 @@ def test_read_into_carries_the_into_records_leaves_not_just_the_group():
     rd = next(e for e in iface["events"] if e["verb"] == "READ")
     assert set(rd["fields"]) >= {"WS-KEY", "WS-AMT"}   # the leaves the machine addresses
     assert "IN-REC" not in rd["fields"]                # not the opaque FD record
+
+
+# --------------------------------------------------------------------------- #
+# a CALL names the program the COBOL names - never the name registry's spelling of it
+#
+# naming.NameRegistry keys a registered name on (kind, COBOL text) and appends _2, _3, ...
+# to keep two STATEMENTS apart. Two CALLs to one program differing only in their USING
+# operands are two statements, so the second registered as `call_MQINQ_2` - and the endpoint
+# was recovered by splitting that name, which produced a program called "MQINQ_2".
+#
+# It exists nowhere. It was classified `unresolved` (the MQI verb list holds "MQINQ"), which
+# made it FETCHABLE, so the estate was asked for it - twice, cobol then asm - came back
+# not-found, and a downstream impact analysis read that as a missing program. It also
+# emitted a lineage event CREATE.PROGRAM.MQINQ_2 into the message contract.
+#
+# That two IDENTICAL CALLs have always collapsed to one endpoint is what makes this a bug
+# rather than a modelling choice: only differing text split them, and only the split was
+# phantom.
+# --------------------------------------------------------------------------- #
+
+_MQ_TWICE = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. MQTWICE.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 WS-A PIC S9(9) COMP.\n"
+    "       01 WS-B PIC S9(9) COMP.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'MQINQ' USING WS-A\n"
+    "           CALL 'MQINQ' USING WS-B\n"
+    "           STOP RUN.\n"
+)
+
+
+def _mq_twice_machine():
+    return build_machine(parse_program(_MQ_TWICE), source_name="mqtwice.cbl")
+
+
+def test_calling_one_program_twice_names_it_once():
+    """The registry still allocates two names - it must, they are two statements - but
+    both name the same program, so the perimeter has one endpoint."""
+    m = _mq_twice_machine()
+    assert "call_MQINQ_2" in m.provenance, \
+        "two CALLs with different operands must still be two registered statements"
+    programs = [e["endpoint"] for e in m.interface()["endpoints"]
+                if e.get("type") == "program"]
+    assert programs == ["MQINQ"], f"expected one MQINQ endpoint, got {programs}"
+
+
+def test_the_phantom_program_is_not_classified_fetched_or_published():
+    """Every consequence in one test, because fixing only the classification would leave
+    the other three: the manifest would still list a program that exists nowhere, the
+    estate would still be asked for it, and the message contract would still carry it."""
+    from cobol_xstate.artifacts import build_artifacts
+    from cobol_xstate.fetch import build_fetch_plan
+    from cobol_xstate.lineage import build_lineage
+    m = _mq_twice_machine()
+    art = build_artifacts(m)
+
+    rows = [r for r in art["artifacts"] if r["kind"] == "program"]
+    assert [r["artifact"] for r in rows] == ["MQINQ"]
+    assert rows[0]["classification"] == "ibm-runtime"
+    assert rows[0]["subsystem"] == "ibm-mq"
+
+    # ibm-runtime is NON_FETCHABLE, so nothing is requested from the estate at all
+    planned = [e for e in build_fetch_plan(art) if e["status"] == "planned"]
+    assert planned == [], f"the estate would be asked for {[e['request'] for e in planned]}"
+
+    events = {r["event"] for r in build_lineage(m)["rows"]}
+    assert not [e for e in events if e.endswith("_2")], \
+        f"a phantom program reached the message contract: {sorted(events)}"
+
+
+def _call_endpoints(proc_body: str, data_body: str = ""):
+    return [e for e in _iface(proc_body, data_body)["endpoints"]
+            if e.get("type") == "program"]
+
+
+def test_a_static_call_names_the_literal():
+    """`CALL 'DSNTIAC'` - the label carries the target in quotes."""
+    eps = _call_endpoints("           CALL 'DSNTIAC' USING WS-A\n"
+                          "           STOP RUN.\n",
+                          "       01 WS-A PIC X(4).\n")
+    assert [e["endpoint"] for e in eps] == ["DSNTIAC"]
+    assert "via" not in eps[0] and "dynamic" not in eps[0]
+
+
+def test_a_resolved_dynamic_call_names_the_literal_and_keeps_the_item_it_came_via():
+    """The at-risk spelling: `CALL WS-PGM -> resolved 'POSTLOG' (only literal reaching
+    WS-PGM is 'POSTLOG')` holds TWO quoted strings, and the endpoint is the first. The
+    identifier it was proved through has to survive as `via` - it is the evidence."""
+    eps = _call_endpoints("           CALL WS-PGM USING WS-A\n"
+                          "           STOP RUN.\n",
+                          "       01 WS-A PIC X(4).\n"
+                          "       01 WS-PGM PIC X(8) VALUE 'POSTLOG'.\n")
+    assert [e["endpoint"] for e in eps] == ["POSTLOG"]
+    assert eps[0]["via"] == "WS-PGM"
+
+
+def test_an_unresolved_dynamic_call_names_the_data_item_and_stays_marked_dynamic():
+    """Nothing proves the target, so the honest endpoint is the ITEM, not a guess - and it
+    must keep saying so, or a data item reads downstream as a load-module name."""
+    eps = _call_endpoints("           CALL WS-PGM USING WS-A\n"
+                          "           STOP RUN.\n",
+                          "       01 WS-A PIC X(4).\n"
+                          "       01 WS-PGM PIC X(8).\n")
+    assert [e["endpoint"] for e in eps] == ["WS-PGM"]
+    assert eps[0]["dynamic"] is True
+
+
+def test_the_endpoint_keeps_the_casing_the_cobol_used():
+    """Read from the original text, not an uppercased copy. A lower-case CALL literal has
+    always been reported as written; this fix removes a phantom name, it does not license
+    re-casing real ones."""
+    eps = _call_endpoints("           CALL 'mixedCase' USING WS-A\n"
+                          "           STOP RUN.\n",
+                          "       01 WS-A PIC X(4).\n")
+    assert [e["endpoint"] for e in eps] == ["mixedCase"]
+
+
+def test_an_unrecognised_call_spelling_falls_back_rather_than_vanishing():
+    """A provenance spelling this does not know must degrade to the old derivation. A
+    suffixed name is wrong; no name at all would drop the dependency entirely."""
+    from cobol_xstate.interface import _call_endpoint
+    assert _call_endpoint("CALL 'POSTLOG' USING X", "call_POSTLOG") == "POSTLOG"
+    assert _call_endpoint("SOMETHING ELSE ENTIRELY", "call_POSTLOG_2") == "POSTLOG_2"
+    assert _call_endpoint("", "call_POSTLOG") == "POSTLOG"
