@@ -19,15 +19,14 @@ This module imports nothing from the package, so it is safe to import from anywh
 """
 from __future__ import annotations
 
-
-class CobolXstateError(Exception):
-    """Base for every error this package raises deliberately.
-
-    Code at the boundary (the CLI, or any embedding application) can print ``str(exc)``
-    as the whole user-facing message: these carry human-readable explanations, not
-    developer diagnostics. Unexpected exceptions — the ones that are NOT a
-    ``CobolXstateError`` — signal a bug in the tool and warrant a traceback.
-    """
+# RE-EXPORTED, never redefined. The base lives at the lowest layer both front-ends
+# depend on (cobol_xstate_core.errors) because ServiceUnavailable — raised by the estate
+# boundary, which is core's — must derive from the SAME class this package's CLI catches.
+# Defining a second CobolXstateError here would look harmless and would silently stop
+# `except CobolXstateError` in cli.run from catching retrieval failures, turning an
+# expected, explainable error into an "internal error" traceback.
+# tests/test_logging.py::test_every_domain_error_derives_from_the_one_base is the guard.
+from cobol_xstate_core.errors import CobolXstateError
 
 
 class SourceFormatError(CobolXstateError):

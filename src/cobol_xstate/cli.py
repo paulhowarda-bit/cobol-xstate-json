@@ -9,28 +9,31 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+# Shared with the JCL front-end: the estate boundary, retrieval, and the CLI plumbing
+# both CLIs repeat. Core never imports back into this package.
+from cobol_xstate_core.artifact_service import (DEFAULT_FETCHER, decode_member,
+                                                load_fetcher)
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
+from cobol_xstate_core.profiling import StageTimer
 
 from . import PACKAGE_LOGGER
-from .errors import CobolXstateError
 from .artifacts import build_artifacts
 from .business import build_business_view
-from .emitter import emit_setup_module
-from .artifact_service import DEFAULT_FETCHER, decode_member, load_fetcher
-from .fetch import fetch_dependencies
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
-from .prefetch import attribute_resolution, prefetch_cobol, prefetch_jcl
+from .emitter import emit_setup_module
+from .errors import CobolXstateError
+from .fetch import fetch_dependencies
 from .jcl import parse_jcl
 from .jcl_views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage
 from .normalizer import SourceFormat, detect_source_format
-from .reactive import build_reactive_view, emit_reactive_module
 from .parser import parse_program
+from .prefetch import attribute_resolution, prefetch_cobol, prefetch_jcl
 from .preprocessor import CopybookResolver
+from .reactive import build_reactive_view, emit_reactive_module
 from .runtime_assets import read_runtime_asset
 from .statechart import build_machine
-from .profiling import StageTimer
 
 # Explicit name, NOT __name__: this module is also run as `python -m cobol_xstate.cli`,
 # where __name__ == "__main__" would put the logger outside the cobol_xstate hierarchy and

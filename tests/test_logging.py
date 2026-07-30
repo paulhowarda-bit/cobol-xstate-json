@@ -25,7 +25,7 @@ from cobol_xstate.errors import (
     SourceFormatError,
 )
 from cobol_xstate import PACKAGE_LOGGER
-from cobol_xstate.artifact_service import ServiceUnavailable
+from cobol_xstate_core.artifact_service import ServiceUnavailable
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging, level_for
 from cobol_xstate.runtime_assets import RuntimeAssetMissing
