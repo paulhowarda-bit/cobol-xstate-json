@@ -13,6 +13,7 @@ from typing import List, Optional
 # both CLIs repeat. Core never imports back into this package.
 from cobol_xstate_core.artifact_service import (DEFAULT_FETCHER, decode_member,
                                                 load_fetcher)
+from cobol_xstate_core.fetch import fetch_dependencies
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
 from cobol_xstate_core.profiling import StageTimer
@@ -23,7 +24,6 @@ from .business import build_business_view
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
 from .emitter import emit_setup_module
 from .errors import CobolXstateError
-from .fetch import fetch_dependencies
 from .jcl import parse_jcl
 from .jcl_views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage

@@ -44,10 +44,11 @@ sys.path.insert(0, str(REPO / "tests"))
 
 from fakes.estate import fetch_artifact                              # noqa: E402
 
+from cobol_xstate_core.fetch import fetch_dependencies               # noqa: E402
+
 from cobol_xstate.artifacts import build_artifacts                   # noqa: E402
 from cobol_xstate.dynamic_calls import (annotate_artifacts,          # noqa: E402
                                         build_dynamic_calls)
-from cobol_xstate.fetch import fetch_dependencies                    # noqa: E402
 from cobol_xstate.jcl import parse_jcl                               # noqa: E402
 from cobol_xstate.jcl_views import build_jcl_artifacts               # noqa: E402
 from cobol_xstate.normalizer import detect_source_format             # noqa: E402
