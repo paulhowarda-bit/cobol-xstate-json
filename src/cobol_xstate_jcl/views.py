@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from .jcl import DD, DDSegment, Job, Step, _dd_direction
+from .parser import DD, DDSegment, Job, Step, _dd_direction
 
 
 # --------------------------------------------------------------------------- #
