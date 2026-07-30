@@ -51,7 +51,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .artifact_service import (Fetched, ServiceUnavailable, call_service,
+from cobol_xstate_core.artifact_service import (Fetched, ServiceUnavailable,
+                                                 call_service,
                                call_service_many, collect, decode_member)
 from .normalizer import SourceFormat
 from .preprocessor import scan_copy_members

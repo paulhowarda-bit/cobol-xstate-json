@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, List, Optional, Tuple
 
-from .artifact_service import (decode_member,
+from cobol_xstate_core.artifact_service import (decode_member,
                                normalize_fetched)  # re-exported: see artifact_service
 from .normalizer import CodeLine, SourceFormat, normalize
 

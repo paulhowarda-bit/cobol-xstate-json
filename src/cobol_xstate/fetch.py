@@ -52,7 +52,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .artifact_service import (
+from cobol_xstate_core.artifact_service import (
     ServiceUnavailable, call_service_many, canonical_type, collect)
 from .classify import CATEGORY_ASM, CATEGORY_COBOL, NON_FETCHABLE
 
