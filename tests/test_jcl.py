@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from cobol_xstate.jcl import parse_jcl
-from cobol_xstate.jcl_views import build_jcl_artifacts, build_jcl_lineage
+from cobol_xstate_jcl.parser import parse_jcl
+from cobol_xstate_jcl.views import build_jcl_artifacts, build_jcl_lineage
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "jcl"
 
@@ -256,7 +256,7 @@ def test_binding_closes_the_ddname_to_dsn_chain():
     """The join both sides were built for: SQLUNLD's OUT-FILE row said 'ddname OUTDD, DSN
     in the JCL'; ACCTUNLD's STEP01 says OUTDD -> PROD.ACCT.UNLOAD. Bound, the row carries
     the dataset and the ACTUAL DD statement that resolved it."""
-    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    from cobol_xstate_jcl.views import bind_cobol_artifacts
     out = bind_cobol_artifacts(_sqlunld_manifest(), [_job("acctunld.jcl")])
     row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
     assert row["dataset"] == "PROD.ACCT.UNLOAD"
@@ -267,7 +267,7 @@ def test_binding_closes_the_ddname_to_dsn_chain():
 
 
 def test_binding_does_not_mutate_the_input_manifest():
-    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    from cobol_xstate_jcl.views import bind_cobol_artifacts
     manifest = _sqlunld_manifest()
     bind_cobol_artifacts(manifest, [_job("acctunld.jcl")])
     row = next(a for a in manifest["artifacts"] if a.get("ddname") == "OUTDD")
@@ -275,7 +275,7 @@ def test_binding_does_not_mutate_the_input_manifest():
 
 
 def test_binding_ignores_steps_running_a_different_program():
-    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    from cobol_xstate_jcl.views import bind_cobol_artifacts
     other = parse_jcl("//J JOB\n//S1 EXEC PGM=OTHERPGM\n"
                       "//OUTDD DD DSN=PROD.WRONG.FILE,DISP=(NEW,CATLG)\n",
                       source_name="other.jcl")
@@ -288,7 +288,7 @@ def test_binding_ignores_steps_running_a_different_program():
 def test_conflicting_bindings_list_candidates_and_flag_never_collapse():
     """The same program bound to different datasets in different jobs is a FACT (it runs
     against different data), not an error - and picking one silently would be a lie."""
-    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    from cobol_xstate_jcl.views import bind_cobol_artifacts
     job_b = parse_jcl("//OTHERJOB JOB\n//S1 EXEC PGM=SQLUNLD\n"
                       "//OUTDD DD DSN=TEST.ACCT.UNLOAD,DISP=(NEW,CATLG)\n",
                       source_name="other.jcl")
@@ -303,7 +303,7 @@ def test_conflicting_bindings_list_candidates_and_flag_never_collapse():
 def test_binding_carries_the_steps_run_conditions():
     """A binding made by a conditional step only holds when the step runs - the condition
     from the IF travels with the boundBy entry."""
-    from cobol_xstate.jcl_views import bind_cobol_artifacts
+    from cobol_xstate_jcl.views import bind_cobol_artifacts
     job = parse_jcl("//J JOB\n// IF (PREP.RC = 0) THEN\n//S1 EXEC PGM=SQLUNLD\n"
                     "//OUTDD DD DSN=PROD.ACCT.UNLOAD,DISP=(NEW,CATLG)\n// ENDIF\n",
                     source_name="cond.jcl")
@@ -415,7 +415,7 @@ def test_proc_dd_override_binds_to_its_own_invocation():
 
 
 def test_proc_dd_override_merges_and_keeps_the_disp_direction():
-    from cobol_xstate.jcl import _dd_direction
+    from cobol_xstate_jcl.parser import _dd_direction
     # the override names only DSN, so the PROC DD's DISP (and its output direction) must
     # survive - replacing the whole DD nulled it and the dataflow edge disappeared.
     job = parse_jcl(
@@ -427,3 +427,84 @@ def test_proc_dd_override_merges_and_keeps_the_disp_direction():
     assert out.segments[0].dsn == "PROD.REAL.OUT"          # override's DSN wins
     assert out.segments[0].disp == ["NEW", "PASS"]         # PROC DD's DISP kept
     assert _dd_direction(out.segments[0]) == "output"      # ...so direction survives
+
+
+# --------------------------------------------------------------------------- #
+# the record-and-replay contract
+#
+# prefetch_jcl closes over a job's PROCs / INCLUDEs / control cards by REPLAYING the
+# parse under a recording resolver until it stops asking for anything new. That works
+# only while _Parser._resolve is the SOLE route by which the parser reaches an external
+# member. Anything that memoizes resolution inside the parser, short-circuits when the
+# resolver returns None, or adds a second resolution path silently SHORTENS the closure -
+# no error, just a job that reads as though it had fewer steps than it runs. These tests
+# pin the sequence and the round count so such a change is visible rather than merely
+# quieter.
+# --------------------------------------------------------------------------- #
+
+_NESTED = {
+    # job -> PROC -> INCLUDE -> a step whose control card names a DSN(MEMBER)
+    "OUTERPRC": ("//OUTERPRC PROC\n"
+                 "//         INCLUDE MEMBER=INNERINC\n"
+                 "//PS1 EXEC PGM=IEFBR14\n"),
+    "INNERINC": ("//PS2 EXEC PGM=SORT\n"
+                 "//SYSIN DD DSN=PARM.LIB(SORTCRD),DISP=SHR\n"),
+    "SORTCRD": "  SORT FIELDS=(1,8,CH,A)\n",
+}
+
+_JOB = "//J JOB (A),'T'\n//RUN EXEC OUTERPRC\n"
+
+
+def test_every_external_member_is_asked_for_through_the_resolver():
+    """One parse must funnel PROC, nested INCLUDE and control-card DSN through the one
+    resolver call - that is what makes replaying the parse ask the right questions."""
+    asked = []
+
+    def recording(name):
+        asked.append(name)
+        return _NESTED.get(str(name).upper().strip("'\""))
+
+    parse_jcl(_JOB, resolver=recording)
+    # Sequence, not set: the order is the nesting order, and a parser that resolved the
+    # INCLUDE before expanding the PROC that contains it would be a different traversal.
+    assert asked[0].upper() == "OUTERPRC"
+    assert "INNERINC" in [a.upper() for a in asked]
+    assert any("SORTCRD" in a.upper() for a in asked)
+
+
+def test_the_closure_converges_and_costs_one_round_per_level_of_nesting():
+    """Three levels of nesting resolve in three retrieval rounds, then the parse stops
+    asking. A change to the replay loop shows up here as a different round count."""
+    from cobol_xstate_core.prefetch import PrefetchResult
+    from cobol_xstate_jcl.prefetch import prefetch_jcl
+
+    rounds = []
+
+    def fetcher(name, type=None, copy=None):        # noqa: A002 - the wire keyword
+        key = str(name).upper().strip("'\"")
+        rounds.append(key)
+        if "(" in key:                              # PARM.LIB(SORTCRD) -> the member
+            key = key.split("(", 1)[1].rstrip(")")
+        return _NESTED.get(key) or {"found": False}
+
+    result = prefetch_jcl(_JOB, fetcher, source_name="job.jcl")
+    got = [r["member"] for r in result.rows if r["status"] == "fetched"]
+    assert got == ["OUTERPRC", "INNERINC", "SORTCRD"]   # one per level, in nesting order
+    # ...and it converged rather than hitting the bound, so no <closure> row was filed.
+    assert not [r for r in result.rows if r["member"] == "<closure>"]
+
+
+def test_a_closure_deeper_than_the_bound_says_so_instead_of_looking_complete():
+    """Silently stopping would look exactly like a job that had no more members."""
+    from cobol_xstate_jcl.prefetch import prefetch_jcl
+
+    # Each PROC EXECs the next, forever: the closure can never converge.
+    def fetcher(name, type=None, copy=None):        # noqa: A002 - the wire keyword
+        key = str(name).upper().strip("'\"")
+        return f"//{key[:8]} PROC\n//S EXEC {key}X\n"
+
+    result = prefetch_jcl(_JOB, fetcher, source_name="job.jcl", max_rounds=3)
+    closure = [r for r in result.rows if r["member"] == "<closure>"]
+    assert len(closure) == 1
+    assert closure[0]["status"] == "skipped"
+    assert "3 resolution rounds" in closure[0]["reason"]

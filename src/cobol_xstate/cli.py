@@ -18,18 +18,24 @@ from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
 from cobol_xstate_core.profiling import StageTimer
 
+# The JCL front-end. Imported directly for now; --bind-jcl moves behind a lazy,
+# version-checked orchestrator (bind.py) in the next stage, so that installing the COBOL
+# package without the JCL one stays a complete, working install.
+from cobol_xstate_jcl.parser import parse_jcl
+from cobol_xstate_jcl.prefetch import prefetch_jcl
+from cobol_xstate_jcl.views import (bind_cobol_artifacts, build_jcl_artifacts,
+                                    build_jcl_lineage)
+
 from . import PACKAGE_LOGGER
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
 from .emitter import emit_setup_module
 from .errors import CobolXstateError
-from .jcl import parse_jcl
-from .jcl_views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
 from .lineage import build_lineage
 from .normalizer import SourceFormat, detect_source_format
 from .parser import parse_program
-from .prefetch import attribute_resolution, prefetch_cobol, prefetch_jcl
+from .prefetch import attribute_resolution, prefetch_cobol
 from .preprocessor import CopybookResolver
 from .reactive import build_reactive_view, emit_reactive_module
 from .runtime_assets import read_runtime_asset
