@@ -65,6 +65,12 @@ Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `
 
 ## Conventions when editing
 
-- **Output is byte-stable and deterministic.** Views are compared byte-for-byte across all `examples/*.cbl` and across `PYTHONHASHSEED`. A refactor that should not change output must produce an identical bundle — verify by diffing every view over every example (build a `Machine` per example, serialize each view, hash), not just by a green test run. Actor/chart key ordering is sorted deliberately for this reason; don't iterate a set into output.
+- **Output is byte-stable and deterministic.** A refactor that should not change output must produce identical bytes — a green test run does not prove this. Verify with **`python tools/gate.py`**, which hashes every view of every `examples/*.cbl` and both retrieval reports, and checks them under two `PYTHONHASHSEED` values and at `--jobs 1` and `8`:
+
+  ```bash
+  python tools/gate.py
+  ```
+
+  Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
 - **Prove runnable changes under real XState**, not just in Python — an emitted machine that type-checks can still compute the wrong decimal.
 - One test module per pipeline stage/view in `tests/`; `examples/*.cbl` are the fixtures each construct is exercised against (add one when adding a construct).
