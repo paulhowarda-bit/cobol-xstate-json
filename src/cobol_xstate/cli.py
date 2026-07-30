@@ -9,8 +9,11 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
+from cobol_xstate_core.logging_setup import configure_logging
+
+from . import PACKAGE_LOGGER
 from .errors import CobolXstateError
-from .logging_setup import configure_logging
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .emitter import emit_setup_module
@@ -332,7 +335,12 @@ def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     exit code; an UNEXPECTED exception is reported as an internal error (exit 1) with the
     full traceback shown only under ``--debug`` - never leaked raw to the user."""
     args = build_parser().parse_args(argv)
-    configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet)
+    # BOTH roots: retrieval logs from cobol_xstate_core.*, everything else from
+    # cobol_xstate.*. Configuring only one leaves the other propagating to the root
+    # logger - or, with no handler anywhere, printing WARNING+ via logging's lastResort,
+    # which would make -qq stop being silent.
+    configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet,
+                      loggers=(CORE_LOGGER, PACKAGE_LOGGER))
     try:
         return _run(args, timing_sink=timing_sink)
     except CobolXstateError as exc:

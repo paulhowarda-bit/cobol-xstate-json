@@ -24,9 +24,16 @@ from cobol_xstate.errors import (
     ReactiveLoweringError,
     SourceFormatError,
 )
+from cobol_xstate import PACKAGE_LOGGER
 from cobol_xstate.artifact_service import ServiceUnavailable
-from cobol_xstate.logging_setup import PACKAGE_LOGGER, configure_logging, level_for
+from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
+from cobol_xstate_core.logging_setup import configure_logging, level_for
 from cobol_xstate.runtime_assets import RuntimeAssetMissing
+
+#: Every top-level logger root the CLI can emit from. A root nobody configures does not
+#: merely lose messages - it propagates to the root logger, or falls back to logging's
+#: lastResort and prints straight to stderr. These are asserted together on purpose.
+LOGGER_ROOTS = (CORE_LOGGER, PACKAGE_LOGGER)
 
 _PROG = (
     "       IDENTIFICATION DIVISION.\n"
@@ -46,16 +53,21 @@ def _src(tmp_path):
 
 @pytest.fixture
 def pkg_logger():
-    """Snapshot and restore the package logger so a logging test cannot leak global
-    handler/level/propagate state into the rest of the suite."""
-    lg = logging.getLogger(PACKAGE_LOGGER)
-    saved = (lg.level, lg.propagate, list(lg.handlers))
+    """Snapshot and restore EVERY logger root so a logging test cannot leak global
+    handler/level/propagate state into the rest of the suite. Yields the front-end's
+    logger, which is the one most tests poke at."""
+    saved = {}
+    for name in LOGGER_ROOTS:
+        lg = logging.getLogger(name)
+        saved[name] = (lg.level, lg.propagate, list(lg.handlers))
     try:
-        yield lg
+        yield logging.getLogger(PACKAGE_LOGGER)
     finally:
-        lg.setLevel(saved[0])
-        lg.propagate = saved[1]
-        lg.handlers[:] = saved[2]
+        for name, (level, propagate, handlers) in saved.items():
+            lg = logging.getLogger(name)
+            lg.setLevel(level)
+            lg.propagate = propagate
+            lg.handlers[:] = handlers
 
 
 # --------------------------------------------------------------------------- #
@@ -83,8 +95,11 @@ def test_runtime_asset_missing_is_still_a_runtimeerror():
 # library logging contract
 # --------------------------------------------------------------------------- #
 
-def test_package_logger_has_a_nullhandler():
-    handlers = logging.getLogger(PACKAGE_LOGGER).handlers
+@pytest.mark.parametrize("root", LOGGER_ROOTS)
+def test_package_logger_has_a_nullhandler(root):
+    # Every package that logs attaches its own NullHandler on import; one that forgot
+    # would write to stderr the moment a host application imported it.
+    handlers = logging.getLogger(root).handlers
     assert any(isinstance(h, logging.NullHandler) for h in handlers)
 
 
@@ -129,14 +144,26 @@ def test_level_for(verbose, quiet, expected):
     assert level_for(verbose, quiet) == expected
 
 
-def test_configure_logging_is_idempotent(pkg_logger):
-    configure_logging(0, 0)
-    configure_logging(0, 0)
-    configure_logging(1, 0)
-    streams = [h for h in logging.getLogger(PACKAGE_LOGGER).handlers
+@pytest.mark.parametrize("root", LOGGER_ROOTS)
+def test_configure_logging_is_idempotent(pkg_logger, root):
+    configure_logging(0, 0, loggers=LOGGER_ROOTS)
+    configure_logging(0, 0, loggers=LOGGER_ROOTS)
+    configure_logging(1, 0, loggers=LOGGER_ROOTS)
+    streams = [h for h in logging.getLogger(root).handlers
                if isinstance(h, logging.StreamHandler)
                and not isinstance(h, logging.NullHandler)]
     assert len(streams) == 1   # replaced each call, never stacked
+
+
+def test_configure_logging_configures_every_root_it_is_given(pkg_logger):
+    """The regression this whole parameter exists for: core and the front-end are
+    separate logger trees, and a root left unconfigured propagates to the root logger or
+    prints via logging's lastResort."""
+    configured = configure_logging(0, 0, loggers=LOGGER_ROOTS)
+    assert [lg.name for lg in configured] == list(LOGGER_ROOTS)
+    for lg in configured:
+        assert lg.propagate is False
+        assert lg.level == logging.INFO
 
 
 # --------------------------------------------------------------------------- #
