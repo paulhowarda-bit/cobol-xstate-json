@@ -10,7 +10,7 @@ import json
 
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.dynamic_calls import annotate_artifacts, build_dynamic_calls
-from cobol_xstate.fetch import build_fetch_plan, fetch_dependencies
+from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
 from cobol_xstate.jcl import parse_jcl
 from cobol_xstate.jcl_views import bind_cobol_artifacts
 from cobol_xstate.parser import parse_program

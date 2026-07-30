@@ -34,18 +34,20 @@ from __future__ import annotations
 
 from typing import Dict, Iterable
 
-# The category vocabulary, named once here so every stage spells them identically.
-CATEGORY_INTERNAL = "internal-nested"
-CATEGORY_IBM = "ibm-runtime"
-CATEGORY_UNRESOLVED = "unresolved"
-# Refinements the fetch stage assigns to a formerly-`unresolved` target once the estate
-# answers - kept here so the fetch report and any summary name them the same way.
-CATEGORY_COBOL = "cobol-program"
-CATEGORY_ASM = "assembler-program"
+# The category vocabulary lives in core, because the retrieval stage there has to
+# recognise these strings in a manifest row it did not produce - while the JUDGEMENT
+# below (which names are MQI verbs, which prefixes IBM reserves) is COBOL domain
+# knowledge and stays here. Re-exported so `from cobol_xstate.classify import
+# NON_FETCHABLE` keeps working: this module remains the one place a COBOL caller needs.
+from cobol_xstate_core.categories import (CATEGORY_ASM, CATEGORY_COBOL, CATEGORY_IBM,
+                                          CATEGORY_INTERNAL, CATEGORY_UNRESOLVED,
+                                          NON_FETCHABLE)
 
-# Categories with NO application source to retrieve, so the fetch stage must not chase them
-# (mirrors `fetch._NEVER_FETCHABLE`, but keyed on classification, not endpoint kind).
-NON_FETCHABLE = frozenset({CATEGORY_INTERNAL, CATEGORY_IBM})
+__all__ = [
+    "classify_call_target",
+    "CATEGORY_INTERNAL", "CATEGORY_IBM", "CATEGORY_UNRESOLVED",
+    "CATEGORY_COBOL", "CATEGORY_ASM", "NON_FETCHABLE",
+]
 
 # --- Standard, closed IBM subsystem entry points (reference knowledge, not a guess) ------
 
