@@ -486,3 +486,41 @@ def test_cursor_fetch_columns_reach_the_lineage_fills():
     cols = fetch[0]["columns"]
     assert {(c["hostVar"], c["column"]) for c in cols} == {("WS-ID", "ID"), ("WS-BAL", "BAL")}
     assert all(c["table"] == "CUSTOMER" for c in cols)
+
+
+# -- literals are data, not operands (audit finding #6) ---------------------
+
+def test_string_literal_containing_into_does_not_steal_the_receiver():
+    """STRING exists to build messages, so its literals contain English. `STRING 'PUT
+    INTO QUEUE' ... INTO WS-MSG` found its INTO inside the literal - naming the phantom
+    receiver QUEUE and losing WS-MSG's write from the lineage entirely."""
+    from cobol_xstate.lineage import _dep_only_flow
+    known = {"WS-A", "WS-MSG", "QUEUE", "WS-X", "A", "B", "CNT", "X"}
+    recv, src = _dep_only_flow(
+        "STRING", "STRING 'PUT INTO QUEUE' WS-A DELIMITED BY SIZE INTO WS-MSG", known)
+    assert recv == ["WS-MSG"]
+    assert src == ["WS-A"]
+
+
+def test_unstring_delimiter_literal_does_not_add_receivers():
+    from cobol_xstate.lineage import _dep_only_flow
+    known = {"WS-X", "A", "B", "X"}
+    recv, src = _dep_only_flow(
+        "UNSTRING", "UNSTRING WS-X DELIMITED BY 'INTO X' INTO A B", known)
+    assert recv == ["A", "B"]
+    assert src == ["WS-X"]
+
+
+def test_inspect_tallying_for_a_literal_spelling_replacing_is_still_a_read():
+    """`INSPECT WS-X TALLYING CNT FOR ALL 'REPLACING'` counts occurrences - it never
+    writes WS-X. The word REPLACING inside the literal made WS-X a receiver."""
+    from cobol_xstate.lineage import _dep_only_flow
+    known = {"WS-X", "CNT"}
+    recv, src = _dep_only_flow(
+        "INSPECT", "INSPECT WS-X TALLYING CNT FOR ALL 'REPLACING'", known)
+    assert recv == ["CNT"]
+    assert src == ["WS-X"]
+    # ...while a REAL REPLACING still rewrites the subject in place.
+    recv, src = _dep_only_flow(
+        "INSPECT", "INSPECT WS-X REPLACING ALL ' ' BY '0'", known)
+    assert recv == ["WS-X"]
