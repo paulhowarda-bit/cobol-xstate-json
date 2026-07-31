@@ -277,27 +277,36 @@ def parse_data_division(lines: List[CodeLine]):
         item = DataItem(level=level, name=name, line=line, section=section, origin=origin,
                         file=fd if section == "FILE" else None)
 
-        pm = re.search(r"\bPIC(?:TURE)?\b\s+(?:IS\s+)?(\S+)", rest, re.I)
+        # Every CLAUSE scan below runs over `clauses`, the entry with its VALUE literal
+        # masked out - the same rule _find_usage already applies for USAGE (line ~103):
+        # a quoted VALUE literal is DATA, not syntax. Unmasked, `VALUE 'OUT OF SYNC'`
+        # made the item SYNCHRONIZED, and `VALUE 'TABLE OCCURS 10 TIMES'` made it a
+        # ten-element table - shifting the byte offset of every field after it. Only
+        # the VALUE scan itself reads the raw text, because its operand IS the literal
+        # (and it is safe there: a literal can appear in an entry only as a VALUE
+        # operand, so the first `\bVALUE\b` is always the real keyword).
+        clauses = _QUOTED.sub(" ", rest)
+        pm = re.search(r"\bPIC(?:TURE)?\b\s+(?:IS\s+)?(\S+)", clauses, re.I)
         if pm:
             item.pic = pm.group(1).rstrip(".")
         item.usage = _find_usage(rest)
         vm = re.search(r"\bVALUE\b\s+(?:IS\s+)?('(?:[^']*)'|\"(?:[^\"]*)\"|\S+)", rest, re.I)
         if vm:
             item.value = vm.group(1).rstrip(".")
-        om = re.search(r"\bOCCURS\b\s+(\d+)(?:\s+TO\s+(\d+))?", rest, re.I)
+        om = re.search(r"\bOCCURS\b\s+(\d+)(?:\s+TO\s+(\d+))?", clauses, re.I)
         if om:
             # A variable-length table (OCCURS min TO max) is sized at its MAXIMUM.
             item.occurs = int(om.group(2) or om.group(1))
-            dm = re.search(r"\bDEPENDING\s+(?:ON\s+)?([A-Z0-9][A-Z0-9-]*)", rest, re.I)
+            dm = re.search(r"\bDEPENDING\s+(?:ON\s+)?([A-Z0-9][A-Z0-9-]*)", clauses, re.I)
             if dm:
                 item.occurs_depending = dm.group(1).upper()
-        rm = re.search(r"\bREDEFINES\b\s+([A-Z0-9-]+)", rest, re.I)
+        rm = re.search(r"\bREDEFINES\b\s+([A-Z0-9-]+)", clauses, re.I)
         if rm:
             item.redefines = rm.group(1).upper()
         # Layout-only clauses. Matched on the whole-word abbreviations COBOL allows
         # (SYNC / SYNCHRONIZED, and SIGN [IS] {LEADING|TRAILING} SEPARATE [CHARACTER]).
-        item.sync = bool(re.search(r"\bSYNC(?:HRONIZED)?\b", rest, re.I))
-        item.sign_separate = bool(re.search(r"\bSEPARATE\b(?:\s+CHARACTER)?", rest, re.I))
+        item.sync = bool(re.search(r"\bSYNC(?:HRONIZED)?\b", clauses, re.I))
+        item.sign_separate = bool(re.search(r"\bSEPARATE\b(?:\s+CHARACTER)?", clauses, re.I))
 
         if level == 88:
             # condition-name: collect its VALUE(s); parent is the last elementary item.

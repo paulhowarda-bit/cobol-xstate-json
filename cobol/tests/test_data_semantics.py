@@ -494,3 +494,52 @@ def test_emitted_context_seeds_a_tiny_value_without_scientific_notation():
         "           STOP RUN.\n"))
     assert '"WS-RATE": "0.00000001"' in mod
     assert "1e-08" not in mod and "0.000000\"" not in mod
+
+
+# -- a VALUE literal is data, not clauses (audit finding #1) ----------------
+
+def test_value_literal_words_are_not_read_as_layout_clauses():
+    """`VALUE 'OUT OF SYNC'` made the item SYNCHRONIZED; `VALUE 'TABLE OCCURS 10
+    TIMES'` made it a ten-element table - shifting the byte offset of every field
+    after it. The clause scans must run with the literal masked, exactly as
+    _find_usage already does for USAGE (`VALUE 'INDEX'` was already handled)."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-ST    PIC X(12) VALUE 'OUT OF SYNC'.\n"
+        "       01  WS-MSG   PIC X(30) VALUE 'TABLE OCCURS 10 TIMES'.\n"
+        "       01  WS-RD    PIC X(20) VALUE 'REDEFINES AREA-X'.\n"
+        "       01  WS-DEP   PIC X(24) VALUE 'DEPENDING ON THE WEATHER'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-X.\n"
+        "           STOP RUN.\n"
+    )
+    program = parse_program(src)
+    for name in ("WS-ST", "WS-MSG", "WS-RD", "WS-DEP"):
+        it = program.data_by_name[name]
+        assert it.occurs is None, name
+        assert it.sync is False, name
+        assert it.redefines is None, name
+    # ...while the VALUE itself is still captured whole.
+    assert program.data_by_name["WS-ST"].value == "'OUT OF SYNC'"
+
+
+def test_real_layout_clauses_still_parse_beside_a_value():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-A     PIC X(4) VALUE 'ABCD'.\n"
+        "       01  WS-B     REDEFINES WS-A PIC 9(4).\n"
+        "       01  WS-TBL.\n"
+        "           05  WS-CELL  PIC 9(2) OCCURS 5 TIMES.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-X.\n"
+        "           STOP RUN.\n"
+    )
+    program = parse_program(src)
+    assert program.data_by_name["WS-B"].redefines == "WS-A"
+    assert program.data_by_name["WS-CELL"].occurs == 5
