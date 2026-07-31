@@ -80,6 +80,11 @@ _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
 _WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
 
+# The shared literal mask (semantics is a leaf; no cycle): SQL string constants and
+# DISPLAY message literals carry English and colons, and every keyword scan below that
+# runs over raw statement text must not see into them.
+from .semantics import mask_literals  # noqa: E402
+
 
 def _parse_call_args(cobol: str) -> List[str]:
     """The data-item names passed on a ``CALL ... USING a b c`` (for event fields)."""
@@ -250,8 +255,11 @@ class _DataView:
 def _display_fields(cobol: str, data: dict) -> List[str]:
     """Identifiers among DISPLAY operands (literals dropped, UPON clause skipped)."""
     body = re.sub(r"^\s*DISPLAY\b", "", cobol or "", flags=re.I)
-    body = re.split(r"\bUPON\b", body, flags=re.I)[0]
+    # Mask FIRST - the mask sat one line below the split, so a literal containing UPON
+    # ('REPORT UPON REQUEST') cut the operand list inside itself, naming the phantom
+    # field REPORT and dropping every real operand after the literal.
     body = _STR_LIT.sub(" ", body)
+    body = re.split(r"\bUPON\b", body, flags=re.I)[0]
     out = []
     for w in _WORD.findall(body.upper()):
         if w in ("NO", "WITH", "ADVANCING"):
@@ -308,8 +316,14 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     verb = verb.upper()
     into_fields = [a["target"] for a in (spec or {}).get("assignments", [])
                    if isinstance(a, dict) and "target" in a]
+    # Masked for the keyword scans below: an SQL string constant can contain FROM
+    # (`SELECT 'FROM AUDIT', COL1 ...` named the phantom Db2 table AUDIT - which the
+    # artifact manifest then listed and the fetch stage requested from the estate),
+    # and a time literal's colons read as host-variable markers ('12:30:45' -> the
+    # phantom host vars 30 and 45).
+    mup = mask_literals(up)
     host_vars = [h.lstrip(":").upper()
-                 for h in ((spec or {}).get("hostVars") or _sql_host_vars(up))]
+                 for h in ((spec or {}).get("hostVars") or _sql_host_vars(mup))]
 
     is_sql = "EXEC SQL" in up or name.startswith("exec_sql")
     is_cics = "EXEC CICS" in up or name.startswith("exec_cics")
@@ -329,7 +343,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 if columns is None:
                     columns = _fetch_columns(up, into_fields, cursor_cols or {})
             if endpoint is None:
-                m = _SQL_FROM.search(up)
+                m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
             params = [h for h in host_vars if h not in into_fields]
             return [_hit("get", _DB2, endpoint, verb, into_fields, params,
@@ -345,7 +359,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             return [_hit("create", _DB2, ep, verb, host_vars,
                          columns=_qualify(columns, ep))]
         if verb == "DELETE":
-            m = _SQL_FROM.search(up)
+            m = _SQL_FROM.search(mup)
             return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
         if verb in ("PREPARE", "EXECUTE"):
             # Dynamic SQL: the statement text is a run-time value, so the operation and
@@ -692,7 +706,9 @@ def _cursor_tables(provenance: dict) -> Dict[str, str]:
     """cursor-name -> table, from ``DECLARE c CURSOR FOR SELECT ... FROM t`` texts."""
     out: Dict[str, str] = {}
     for prov in (provenance or {}).values():
-        m = _DECLARE_CURSOR.search((prov or {}).get("cobol", "") or "")
+        # Masked: a string constant in the cursor's select list could otherwise supply
+        # the FROM this regex binds the cursor's table from.
+        m = _DECLARE_CURSOR.search(mask_literals((prov or {}).get("cobol", "") or ""))
         if m:
             out[m.group(1).upper()] = m.group(2).upper()
     return out
@@ -715,7 +731,8 @@ def _cursor_columns(semantics: dict, provenance: dict) -> Dict[str, List[str]]:
         cols = spec.get("selectList")
         if not cols:
             continue
-        m = _DECLARE_CURSOR.search((provenance.get(name) or {}).get("cobol", "") or "")
+        m = _DECLARE_CURSOR.search(
+            mask_literals((provenance.get(name) or {}).get("cobol", "") or ""))
         if m:
             out[m.group(1).upper()] = cols
     return out

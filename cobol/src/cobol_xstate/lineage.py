@@ -45,6 +45,7 @@ from collections import deque
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from . import interface as _iface
+from .semantics import mask_literals
 from .business import _is_control_guard
 from .emitter import (
     _para_of, _target_owner, edge_target, iter_transitions,
@@ -99,8 +100,16 @@ def _dep_only_flow(verb: str, text: str, known: Set[str]) -> Tuple[List[str], Li
 
     Lineage needs only *which fields feed which* - not the concatenation/split/count
     semantics - so the operands are enough to keep the chain intact.
+
+    Every scan runs over the MASKED text, because these verbs exist to build and take
+    apart message strings, so their literals are practically guaranteed to contain
+    English: ``STRING 'PUT INTO QUEUE' ... INTO WS-MSG`` found its INTO inside the
+    literal (naming the phantom receiver QUEUE and losing WS-MSG's write entirely),
+    and ``INSPECT ... FOR ALL 'REPLACING'`` made the subject a receiver. Masking also
+    keeps a literal that happens to SPELL a field's name out of the source list, since
+    a masked span yields no words at all.
     """
-    up = (text or "").upper()
+    up = mask_literals((text or "").upper())
     if verb == "STRING":            # STRING a b ... INTO c
         m = _STRING_RE.search(up)
         recv = [m.group(1)] if m and m.group(1) in known else []

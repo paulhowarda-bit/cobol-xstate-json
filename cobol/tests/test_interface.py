@@ -605,3 +605,73 @@ def test_an_unrecognised_call_spelling_falls_back_rather_than_vanishing():
     assert _call_endpoint("CALL 'POSTLOG' USING X", "call_POSTLOG") == "POSTLOG"
     assert _call_endpoint("SOMETHING ELSE ENTIRELY", "call_POSTLOG_2") == "POSTLOG_2"
     assert _call_endpoint("", "call_POSTLOG") == "POSTLOG"
+
+
+# -- literals are data, not keywords (audit findings #8, #9) ----------------
+
+def test_display_literal_containing_upon_keeps_the_real_operands():
+    """The mask sat one line BELOW the UPON split, so `DISPLAY 'REPORT UPON REQUEST'
+    WS-CODE` cut the operand list inside its own literal - naming the phantom field
+    REPORT and dropping WS-CODE."""
+    from cobol_xstate.interface import _display_fields
+    data = {"REPORT": {}, "WS-CODE": {}}
+    assert _display_fields("DISPLAY 'REPORT UPON REQUEST' WS-CODE", data) == ["WS-CODE"]
+    # A real UPON clause is still stripped.
+    assert _display_fields("DISPLAY WS-CODE UPON CONSOLE", data) == ["WS-CODE"]
+
+
+def test_sql_string_constant_containing_from_is_not_the_table():
+    """`SELECT 'FROM AUDIT', COL1 ... FROM CUSTMAST` named the phantom Db2 table AUDIT
+    - which the artifact manifest then listed, and the fetch stage requested from the
+    estate by name."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-TAG   PIC X(12).\n"
+        "       01  WS-COL   PIC X(10).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "             SELECT 'FROM AUDIT', COL1\n"
+        "               INTO :WS-TAG, :WS-COL\n"
+        "               FROM CUSTMAST\n"
+        "           END-EXEC\n"
+        "           STOP RUN.\n")
+    iface = build_machine(parse_program(src)).bundle()["interface"]
+    endpoints = {e["endpoint"] for e in iface["endpoints"]}
+    assert "CUSTMAST" in endpoints
+    assert "AUDIT" not in endpoints
+
+
+def test_time_literal_colons_are_not_host_variables():
+    """'12:30:45' in a WHERE clause read as the host variables :30 and :45 whenever the
+    parser supplied no real ones - and DELETE is exactly the verb whose spec carries
+    none, so the fallback scan is the one that fires. End-to-end through classify, so
+    the CALL SITE is pinned, not just the helper."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-X   PIC X(4).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "             DELETE FROM AUDITLOG WHERE TS = '12:30:45'\n"
+        "           END-EXEC\n"
+        "           STOP RUN.\n")
+    iface = build_machine(parse_program(src)).bundle()["interface"]
+    fields = {f for s in iface["perimeterStates"].values()
+              for f in s.get("creates", []) + s.get("gets", [])}
+    assert "30" not in fields and "45" not in fields
+    endpoints = {e["endpoint"] for e in iface["endpoints"]}
+    assert "AUDITLOG" in endpoints
+
+
+def test_cursor_table_binds_past_a_from_inside_the_select_list():
+    from cobol_xstate.interface import _cursor_tables
+    prov = {"a": {"cobol": "EXEC SQL DECLARE C1 CURSOR FOR SELECT 'FROM AUDIT', COL1 "
+                            "FROM CUSTMAST END-EXEC"}}
+    assert _cursor_tables(prov) == {"C1": "CUSTMAST"}
