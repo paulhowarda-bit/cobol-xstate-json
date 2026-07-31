@@ -52,10 +52,9 @@ from __future__ import annotations
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
-from cobol_xstate_core.artifact_service import (
-    ServiceUnavailable, call_service_many, canonical_type, collect)
-from cobol_xstate_core.categories import (CATEGORY_ASM, CATEGORY_COBOL,
-                                          NON_FETCHABLE)
+from .artifact_service import (ServiceUnavailable, call_service_many,
+                               canonical_type, collect)
+from .categories import CATEGORY_ASM, CATEGORY_COBOL, NON_FETCHABLE
 
 # A CALL names a load module but NOT its language: the callee may be COBOL, assembler,
 # PL/I, C, ... So a program dependency is not assumed to be COBOL - it is REQUESTED by
