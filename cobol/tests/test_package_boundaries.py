@@ -25,7 +25,8 @@ import pytest
 # is exactly the kind of cleverness that ends in a vacuous pass.
 _PREAMBLE = textwrap.dedent("""
     import sys
-    sys.path.insert(0, "src")
+    for _tree in ("core/src", "cobol/src", "jcl/src"):
+        sys.path.insert(0, _tree)
 
     class Blocker:
         def __init__(self, *blocked):
@@ -89,7 +90,7 @@ def test_a_cobol_install_without_the_jcl_package_is_a_complete_install(tmp_path)
         from cobol_xstate.cli import run
         out = {str(tmp_path / "o")!r}
         with contextlib.redirect_stderr(io.StringIO()):
-            rc = run(["examples/accum.cbl", "--outdir", out, "-q"])
+            rc = run(["cobol/examples/accum.cbl", "--outdir", out, "-q"])
         assert rc == 0, rc
         print("FILES", len([f for f in os.listdir(out) if f.endswith(".json")]))
     """)
@@ -107,8 +108,8 @@ def test_bind_jcl_without_the_jcl_package_says_exactly_what_to_install(tmp_path)
         from cobol_xstate.cli import run
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            rc = run(["examples/accum.cbl", "--outdir", {str(tmp_path / "o")!r},
-                      "--bind-jcl", "examples/jcl/acctunld.jcl", "-q"])
+            rc = run(["cobol/examples/accum.cbl", "--outdir", {str(tmp_path / "o")!r},
+                      "--bind-jcl", "jcl/examples/acctunld.jcl", "-q"])
         print("RC", rc)
         print(err.getvalue())
     """)
@@ -139,7 +140,7 @@ def test_no_jcl_module_imports_a_front_end(module):
     """Read the source rather than the runtime: an import inside a rarely-taken branch
     would not show up in a passing import test."""
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "src" / "cobol_xstate_jcl"
+    src = (Path(__file__).resolve().parents[2] / "jcl" / "src" / "cobol_xstate_jcl"
            / f"{module}.py").read_text(encoding="utf-8")
     for line in src.splitlines():
         stripped = line.strip()

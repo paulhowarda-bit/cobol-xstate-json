@@ -46,10 +46,11 @@ from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
-EXAMPLES = REPO / "examples"
-JCL_EXAMPLES = EXAMPLES / "jcl"
+EXAMPLES = REPO / "cobol" / "examples"
+JCL_EXAMPLES = REPO / "jcl" / "examples"
 
-sys.path.insert(0, str(REPO / "src"))
+for _tree in ("core/src", "cobol/src", "jcl/src"):
+    sys.path.insert(0, str(REPO / _tree))
 
 from cobol_xstate.artifacts import build_artifacts                    # noqa: E402
 from cobol_xstate.business import build_business_view                 # noqa: E402
@@ -73,8 +74,30 @@ INDENT = 2  # the CLI default; the hashes are of what a default run would write
 
 # --------------------------------------------------------------------------- digests
 
+def normalize(text: str) -> str:
+    """Replace this checkout's search roots with stable tokens before hashing.
+
+    One view genuinely embeds a local filesystem path, and it is not this tool's doing:
+    a copybook row in the artifact manifest carries the ``source`` it resolved from, so
+    ``<program>::artifacts`` is machine-dependent for any program that COPYs a member
+    found on disk. That was already true before these goldens existed - the path simply
+    never moved, so it never showed. Normalizing the search roots is what makes the
+    goldens portable across checkouts, and what let the three-distribution restructure
+    be VERIFIED as path-only rather than assumed to be.
+
+    Most specific root first: the examples directories sit under the repo root, so
+    replacing the repo root first would leave their tails unnormalized.
+    """
+    for root, token in ((EXAMPLES, "<EXAMPLES>"), (JCL_EXAMPLES, "<JCL_EXAMPLES>"),
+                        (REPO, "<REPO>")):
+        for form in (str(root), str(root).replace("\\", "/"),
+                     str(root).replace("\\", "\\\\")):
+            text = text.replace(form, token)
+    return text
+
+
 def digest(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(normalize(text).encode("utf-8")).hexdigest()
 
 
 def json_text(obj) -> str:

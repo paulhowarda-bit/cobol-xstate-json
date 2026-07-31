@@ -6,18 +6,40 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 
 ## Commands
 
-```bash
-# Run the converter (from a checkout, no install needed)
-PYTHONPATH=src python -m cobol_xstate examples/custrpt.cbl        # writes ./out/ (8 JSON views)
-PYTHONPATH=src python -m cobol_xstate prog.cbl --target js        # runnable ES module + cobolRuntime.mjs
-PYTHONPATH=src python -m cobol_xstate prog.cbl --summary          # + human summary & flags on stderr
-# Or install the console script: python -m pip install -e .  ->  cobol-xstate prog.cbl
+**Three distributions ship from this repo**, each with its own `pyproject.toml`:
 
-# Tests — pyproject sets pythonpath=src, so NO PYTHONPATH needed for pytest
-python -m pytest -q                                  # full suite (~540 tests)
-python -m pytest tests/test_emitter.py -q            # one module
-python -m pytest tests/test_reactive.py -k retarget  # one test by name substring
+| Directory | Distribution | What it is | Depends on |
+|---|---|---|---|
+| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
+| `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) | core |
+| `jcl/` | `cobol-xstate-jcl` | JCL → dataflow + dependencies (`cobol-xstate-jcl`) | core |
+
+The two front-ends are **peers**: neither imports the other, and a JCL install carries no
+COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
+the lazy orchestrator in `cobol/src/cobol_xstate/bind.py`. `pip install cobol-xstate[jcl]`
+adds that one join.
+
+```bash
+# Run from a checkout, no install needed (the root pyproject puts all three on sys.path)
+python -m pytest -q                                        # full suite (~670 tests)
+PYTHONPATH="core/src;cobol/src;jcl/src" python -m cobol_xstate cobol/examples/custrpt.cbl
+PYTHONPATH="core/src;cobol/src;jcl/src" python -m cobol_xstate_jcl jcl/examples/acctunld.jcl
+
+# Or install them for real (editable), which is what gives you the console scripts
+python -m pip install -e core -e cobol -e jcl
+cobol-xstate prog.cbl --summary        # 8 JSON views into ./out/
+cobol-xstate prog.cbl --target js      # runnable ES module + cobolRuntime.mjs
+cobol-xstate-jcl job.jcl               # 2 views + both retrieval reports
+
+# Gather where the estate is reachable, model where it is not
+cobol-xstate prog.cbl --gather-only ./bundle
+cobol-xstate prog.cbl --from-bundle ./bundle     # no network at all
+
+python -m pytest cobol/tests/test_emitter.py -q            # one module
+python -m pytest cobol/tests/test_reactive.py -k retarget  # one test by name substring
 ```
+
+Node-backed tests live in `cobol/` and need `npm install` **there** (`cobol/node_modules`).
 
 `--target` ∈ `{json (default bundle), js, reactive, business, lineage, artifacts}`. There is **no build step and no linter configured** — do not invent one. Python ≥ 3.9.
 
@@ -71,6 +93,9 @@ Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `
   python tools/gate.py
   ```
 
-  Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
+  Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `cobol/tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
+
+  Two things genuinely are machine-dependent and are normalized before hashing, rather than pretended away: `copiedTo` in both reports, and the `source` of any member resolved from disk (a copybook row in the artifact manifest carries it, so `<program>::artifacts` embeds a local path). Note also that `core.autocrlf=true` here, so a fresh clone gets CRLF example files while this working tree has LF — which changes the `bytes:` count in the prefetch report. The goldens are recorded from the working tree.
+- **Prove the three distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds three throwaway venvs and checks that a `core+jcl` box cannot even find `cobol_xstate` while its CLI still works, and that `--bind-jcl` on a `core+cobol` box fails naming the exact pip command. `cobol/tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
 - **Prove runnable changes under real XState**, not just in Python — an emitted machine that type-checks can still compute the wrong decimal.
 - One test module per pipeline stage/view in `tests/`; `examples/*.cbl` are the fixtures each construct is exercised against (add one when adding a construct).

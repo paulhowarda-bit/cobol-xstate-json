@@ -19,7 +19,7 @@ from cobol_xstate.cli import run as cobol_run                      # noqa: E402
 from cobol_xstate_jcl.cli import run as jcl_run                    # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-JCL = REPO / "examples" / "jcl"
+JCL = REPO.parent / "jcl" / "examples"
 FAKE = "fakes.estate:fetch_artifact"
 
 JOBS = sorted(p for p in JCL.iterdir()
@@ -95,10 +95,12 @@ def test_gather_then_replay_reproduces_the_views(tmp_path):
 
 
 def test_python_dash_m_works():
+    import os
     import subprocess
     proc = subprocess.run(
         [sys.executable, "-m", "cobol_xstate_jcl", "--help"],
-        capture_output=True, text=True, cwd=str(REPO),
-        env={**__import__("os").environ, "PYTHONPATH": str(REPO / "src")})
+        capture_output=True, text=True, cwd=str(REPO.parent),
+        env={**__import__("os").environ, "PYTHONPATH": os.pathsep.join(
+            str(REPO.parent / t) for t in ("core/src", "cobol/src", "jcl/src"))})
     assert proc.returncode == 0
     assert "cobol-xstate-jcl" in proc.stdout
