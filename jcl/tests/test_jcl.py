@@ -1,13 +1,13 @@
 """JCL / PROC parsing, dataflow + control-card field lineage, and the artifact manifest."""
 
+import json
 from pathlib import Path
 
 from cobol_xstate_jcl.parser import parse_jcl
 from cobol_xstate_jcl.views import build_jcl_artifacts, build_jcl_lineage
 
-# The JCL examples belong to the JCL distribution, which is a sibling of this one.
-EXAMPLES = Path(__file__).resolve().parents[2] / "jcl" / "examples"
-COBOL_EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def _job(name: str, resolver=None):
@@ -247,11 +247,16 @@ def test_sysout_and_dummy_are_excluded_with_reason():
 # --------------------------------------------------------------------------- #
 
 def _sqlunld_manifest():
-    from cobol_xstate.artifacts import build_artifacts
-    from cobol_xstate.parser import parse_program
-    from cobol_xstate.statechart import build_machine
-    src = (COBOL_EXAMPLES / "sqlunld.cbl").read_text()
-    return build_artifacts(build_machine(parse_program(src), source_name="sqlunld.cbl"))
+    """The COBOL artifact manifest bind_cobol_artifacts binds against, as a COMMITTED
+    FIXTURE rather than one built live.
+
+    This package must not depend on the COBOL one - they are peers - so the manifest
+    arrives as data, which is what it actually is: a schema contract between two
+    distributions that release separately. The COBOL side regenerates this file and
+    fails if it has drifted (see its test_manifest_contract.py), so the two learn about
+    a schema change from a red test rather than from a quietly unbound manifest.
+    """
+    return json.loads((FIXTURES / "sqlunld.artifacts.json").read_text(encoding="utf-8"))
 
 
 def test_binding_closes_the_ddname_to_dsn_chain():
@@ -315,47 +320,9 @@ def test_binding_carries_the_steps_run_conditions():
         {"test": "(PREP.RC = 0)", "negated": False}]
 
 
-def _run_dir(root):
-    """Where a run writes: --outdir itself, taken literally with nothing appended."""
-    return Path(root)
-
-
-def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
-    import json
-    from cobol_xstate.cli import run
-    src = COBOL_EXAMPLES / "sqlunld.cbl"
-    jcl = EXAMPLES / "acctunld.jcl"
-    assert run([str(src), "--target", "artifacts", "--bind-jcl", str(jcl),
-                "--outdir", str(tmp_path)]) == 0
-    art = json.loads((_run_dir(tmp_path) / "sqlunld.artifacts.json").read_text())
-    row = next(a for a in art["artifacts"] if a.get("ddname") == "OUTDD")
-    assert row["dataset"] == "PROD.ACCT.UNLOAD"
-
-
-def test_cli_bind_jcl_missing_file_is_a_clean_error(tmp_path, capsys):
-    from cobol_xstate.cli import run
-    src = COBOL_EXAMPLES / "sqlunld.cbl"
-    assert run([str(src), "--bind-jcl", str(tmp_path / "nope.jcl"),
-                "--outdir", str(tmp_path)]) == 2
-    assert "no such file" in capsys.readouterr().err
-
-
 # --------------------------------------------------------------------------- #
 # CLI integration: auto-detection and companion output
 # --------------------------------------------------------------------------- #
-
-def test_cli_autodetects_jcl_and_writes_both_views(tmp_path):
-    import json
-    from cobol_xstate.cli import run
-    assert run([str(EXAMPLES / "acctunld.jcl"), "--outdir", str(tmp_path)]) == 0
-    d = _run_dir(tmp_path)
-    names = {f.name for f in d.iterdir()}
-    assert names == {"acctunld.jcl.artifacts.json", "acctunld.jcl.lineage.json",
-                     # the JCL path retrieves its dependencies too, and must: a
-                     # cataloged PROC carries EXEC PGM= steps that are in no other file
-                     "acctunld.jcl.prefetch.json", "acctunld.jcl.fetch.json"}
-    art = json.loads((d / "acctunld.jcl.artifacts.json").read_text())
-    assert art["format"] == "cobol-xstate-jcl-artifacts"
 
 
 def test_bare_proc_member_is_analysed_with_its_defaults():
@@ -367,13 +334,6 @@ def test_bare_proc_member_is_analysed_with_its_defaults():
     assert step.from_proc == "EDVALID" and step.pgm == "EDCHECK"
     cardin = next(dd for dd in step.dds if dd.ddname == "CARDIN")
     assert cardin.segments[0].dsn == "TEST.EDIT.CARDS"    # &ENV -> TEST (the default)
-
-
-def test_cli_jcl_detection_does_not_misfire_on_cobol():
-    from cobol_xstate.cli import _looks_like_jcl
-    cobol = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
-    assert _looks_like_jcl("t.cbl", cobol) is False
-    assert _looks_like_jcl("t.jcl", "//J JOB\n//S EXEC PGM=P\n") is True
 
 
 # --------------------------------------------------------------------------- #
