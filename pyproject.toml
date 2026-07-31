@@ -1,34 +1,21 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "cobol-xstate"
-version = "0.1.0"
-description = "Parse IBM Enterprise COBOL and emit its control flow as an XState v5 JSON Harel statechart (a modernization rewrite contract)."
-readme = "README.md"
-requires-python = ">=3.9"
-license = { text = "MIT" }
-authors = [{ name = "Paul Howard" }]
-keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernization", "parser"]
-
-[project.scripts]
-cobol-xstate = "cobol_xstate.cli:main"
-
-[project.optional-dependencies]
-dev = ["pytest>=7"]
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-# The JS decimal runtime + reference driver ship INSIDE the package: `--target js`
-# writes cobolRuntime.mjs beside the emitted module, so it must be importable from an
-# installed wheel, not only from a source checkout.
-[tool.setuptools.package-data]
-cobol_xstate = ["runtime/*.mjs"]
+# Development root. This is NOT a distribution - the three that ship live in core/,
+# cobol/ and jcl/, each with its own pyproject.toml:
+#
+#   core/  cobol-xstate-core   the estate boundary and two-stage retrieval, shared
+#   cobol/ cobol-xstate        COBOL -> XState statechart      (depends on core)
+#   jcl/   cobol-xstate-jcl    JCL -> dataflow + dependencies  (depends on core)
+#
+# What this file exists for is running the whole suite together, across all three, from
+# a checkout with nothing installed. Install them for real with:
+#
+#   python -m pip install -e core -e cobol -e jcl
+#
+# The JCL half is an EXTRA of cobol-xstate rather than a dependency (`pip install
+# cobol-xstate[jcl]`), because a COBOL install without it is complete - it simply cannot
+# close the ddname->dataset join that --bind-jcl performs.
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-# Put the src/ layout on sys.path so `python -m pytest` works without installing the
-# package or setting PYTHONPATH (pytest >= 7).
-pythonpath = ["src"]
+# All three source trees on sys.path, so `python -m pytest` works with nothing installed
+# (pytest >= 7). Order does not matter: the three packages have distinct import names.
+pythonpath = ["core/src", "cobol/src", "jcl/src", "cobol/tests"]
+testpaths = ["core/tests", "cobol/tests", "jcl/tests"]

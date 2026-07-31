@@ -36,11 +36,11 @@ from pathlib import Path
 from typing import Dict, List
 
 REPO = Path(__file__).resolve().parents[1]
-EXAMPLES = REPO / "examples"
-JCL_EXAMPLES = EXAMPLES / "jcl"
+EXAMPLES = REPO / "cobol" / "examples"
+JCL_EXAMPLES = REPO / "jcl" / "examples"
 
-sys.path.insert(0, str(REPO / "src"))
-sys.path.insert(0, str(REPO / "tests"))
+for _tree in ("core/src", "cobol/src", "jcl/src", "cobol/tests"):
+    sys.path.insert(0, str(REPO / _tree))
 
 from fakes.estate import fetch_artifact                              # noqa: E402
 
@@ -69,10 +69,21 @@ def digest(text: str) -> str:
 
 
 def normalize(text: str, run_dir: Path) -> str:
-    """Replace this run's directory with a stable token, in both path spellings."""
-    for form in (str(run_dir), str(run_dir).replace("\\", "/"),
-                 str(run_dir).replace("\\", "\\\\")):
-        text = text.replace(form, "<RUNDIR>")
+    """Replace this run's directory and this checkout's search roots with stable tokens.
+
+    Two different local paths reach these reports. ``copiedTo`` names the run's own deps/
+    directory, and a member resolved from disk carries the ``source`` it was read from -
+    so both are machine-dependent before this tool touches them. Normalizing them is what
+    makes the goldens portable across checkouts and layouts.
+
+    Most specific root first: the examples directories sit under the repo root, so
+    replacing the repo root first would leave their tails unnormalized.
+    """
+    for root, token in ((run_dir, "<RUNDIR>"), (EXAMPLES, "<EXAMPLES>"),
+                        (JCL_EXAMPLES, "<JCL_EXAMPLES>"), (REPO, "<REPO>")):
+        for form in (str(root), str(root).replace("\\", "/"),
+                     str(root).replace("\\", "\\\\")):
+            text = text.replace(form, token)
     return text
 
 

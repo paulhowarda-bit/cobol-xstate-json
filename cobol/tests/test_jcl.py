@@ -5,7 +5,9 @@ from pathlib import Path
 from cobol_xstate_jcl.parser import parse_jcl
 from cobol_xstate_jcl.views import build_jcl_artifacts, build_jcl_lineage
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "jcl"
+# The JCL examples belong to the JCL distribution, which is a sibling of this one.
+EXAMPLES = Path(__file__).resolve().parents[2] / "jcl" / "examples"
+COBOL_EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 
 def _job(name: str, resolver=None):
@@ -248,7 +250,7 @@ def _sqlunld_manifest():
     from cobol_xstate.artifacts import build_artifacts
     from cobol_xstate.parser import parse_program
     from cobol_xstate.statechart import build_machine
-    src = (EXAMPLES.parent / "sqlunld.cbl").read_text()
+    src = (COBOL_EXAMPLES / "sqlunld.cbl").read_text()
     return build_artifacts(build_machine(parse_program(src), source_name="sqlunld.cbl"))
 
 
@@ -321,7 +323,7 @@ def _run_dir(root):
 def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
     import json
     from cobol_xstate.cli import run
-    src = EXAMPLES.parent / "sqlunld.cbl"
+    src = COBOL_EXAMPLES / "sqlunld.cbl"
     jcl = EXAMPLES / "acctunld.jcl"
     assert run([str(src), "--target", "artifacts", "--bind-jcl", str(jcl),
                 "--outdir", str(tmp_path)]) == 0
@@ -332,7 +334,7 @@ def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
 
 def test_cli_bind_jcl_missing_file_is_a_clean_error(tmp_path, capsys):
     from cobol_xstate.cli import run
-    src = EXAMPLES.parent / "sqlunld.cbl"
+    src = COBOL_EXAMPLES / "sqlunld.cbl"
     assert run([str(src), "--bind-jcl", str(tmp_path / "nope.jcl"),
                 "--outdir", str(tmp_path)]) == 2
     assert "no such file" in capsys.readouterr().err

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cobol-xstate"
+version = "0.1.0"
+description = "Parse IBM Enterprise COBOL and emit its control flow as an XState v5 JSON Harel statechart (a modernization rewrite contract)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Paul Howard" }]
+keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernization", "parser"]
+
+dependencies = ["cobol-xstate-core>=0.1,<0.2"]
+
+[project.optional-dependencies]
+# --bind-jcl closes the ddname->dataset join, which needs the JCL half. It is an EXTRA
+# rather than a dependency because a COBOL install without it is a complete, working
+# install that simply cannot do that one join - and because the two are peers, so making
+# one require the other would settle a hierarchy that does not exist.
+jcl = ["cobol-xstate-jcl>=0.1,<0.2"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+cobol-xstate = "cobol_xstate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The JS decimal runtime + reference driver ship INSIDE the package: `--target js`
+# writes cobolRuntime.mjs beside the emitted module, so it must be importable from an
+# installed wheel, not only from a source checkout.
+[tool.setuptools.package-data]
+cobol_xstate = ["runtime/*.mjs"]
