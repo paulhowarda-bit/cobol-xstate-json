@@ -36,7 +36,8 @@ from typing import Dict, List, Optional
 
 from .analysis import CallAnalysis, analyze_calls
 from .interface import build_interface
-from .semantics import parse_condition, parse_operation
+from .semantics import (mask_literals, parse_condition, parse_operation,
+                        split_outside_literals)
 from .model import (
     Action,
     AlterStmt,
@@ -1016,14 +1017,26 @@ _VARYING_RE = re.compile(
 
 
 def _parse_varying(control: str):
-    """Extract (var, from, by) for the primary VARYING and each AFTER clause."""
-    return [(v.upper(), frm, by) for v, frm, by in _VARYING_RE.findall(control or "")]
+    """Extract (var, from, by) for the primary VARYING and each AFTER clause.
+
+    Matched on the masked text so a literal in the UNTIL condition cannot fake a
+    clause: ``UNTIL WS-X = 'AFTER Y FROM 1 BY 2'`` is a comparison, not a nested loop.
+    (A real VARYING clause carries no quoted parts, so every genuine match lies wholly
+    outside the masked spans and its groups read back clean.)"""
+    return [(v.upper(), frm, by)
+            for v, frm, by in _VARYING_RE.findall(mask_literals(control or ""))]
 
 
 def _until_text(control: str) -> str:
-    """The primary UNTIL condition, bounded before any AFTER clause."""
-    m = re.search(r"\bUNTIL\b\s+(.+?)(?:\s+AFTER\b|$)", control or "", re.I)
-    return m.group(1).strip() if m else ""
+    """The primary UNTIL condition, bounded before any AFTER clause.
+
+    Both boundaries are found on the masked text and sliced from the original:
+    ``UNTIL WS-CMD = 'STOP AFTER CYCLE'`` must keep its whole literal - truncated at
+    the ``AFTER`` inside it, the condition became a comparison against a field named
+    STOP, which parsed cleanly and silently rewrote the loop's exit."""
+    control = control or ""
+    m = re.search(r"\bUNTIL\b\s+(.+?)(?:\s+AFTER\b|$)", mask_literals(control), re.I)
+    return control[m.start(1):m.end(1)].strip() if m else ""
 
 
 def _redefines_compatible(item, target) -> bool:
@@ -1046,8 +1059,8 @@ def _evaluate_when_condition(subject: str, when: str) -> str:
     (``EVALUATE a ALSO b ... WHEN x ALSO y`` -> ``a = x AND b = y``), ``EVALUATE TRUE``
     (the objects are conditions), ``THRU`` ranges, abbreviated relations (``WHEN > 5``),
     and ``ANY`` (matches anything -> dropped from the conjunction)."""
-    subjects = [s.strip() for s in re.split(r"\bALSO\b", subject or "", flags=re.I)]
-    objects = [o.strip() for o in re.split(r"\bALSO\b", when or "", flags=re.I)]
+    subjects = [s.strip() for s in _split_also(subject or "")]
+    objects = [o.strip() for o in _split_also(when or "")]
     pieces: List[str] = []
     for idx, obj in enumerate(objects):
         subj = subjects[idx] if idx < len(subjects) else (subjects[-1] if subjects else "")
@@ -1057,6 +1070,19 @@ def _evaluate_when_condition(subject: str, when: str) -> str:
     if not pieces:
         return ""  # all ANY (or empty) -> an unconditional WHEN
     return " AND ".join(f"({p})" for p in pieces) if len(pieces) > 1 else pieces[0]
+
+
+def _split_also(text: str) -> List[str]:
+    """``re.split(\\bALSO\\b)``, but never at an ALSO inside a quoted literal
+    (``WHEN 'X ALSO Y'`` is one object). Positions from the mask, slices from the
+    original, so the literals survive whole."""
+    parts: List[str] = []
+    pos = 0
+    for m in re.finditer(r"\bALSO\b", mask_literals(text), flags=re.I):
+        parts.append(text[pos:m.start()])
+        pos = m.end()
+    parts.append(text[pos:])
+    return parts
 
 
 def _evaluate_pair(subj: str, obj: str) -> str:
@@ -1069,9 +1095,13 @@ def _evaluate_pair(subj: str, obj: str) -> str:
         return obj
     if su == "FALSE":    # EVALUATE FALSE: the object is a condition that must be false
         return f"NOT ( {obj} )"
-    m = re.match(r"(.+?)\s+(?:THRU|THROUGH)\s+(.+)$", obj, re.I)
+    # THRU found outside literals only: `WHEN 'MON THRU FRI'` is ONE value, and tearing
+    # it built the guard `subj >= 'MON AND subj <= FRI'` - plausible-looking, wrong,
+    # and unflagged. (THRU first: THROUGH cannot be mistaken for it, since `THRU`
+    # followed by `\s` never matches inside `THROUGH`.)
+    m = split_outside_literals(obj, "THRU") or split_outside_literals(obj, "THROUGH")
     if m:               # WHEN lo THRU hi -> subj >= lo AND subj <= hi
-        return f"{subj} >= {m.group(1).strip()} AND {subj} <= {m.group(2).strip()}"
+        return f"{subj} >= {m[0].strip()} AND {subj} <= {m[1].strip()}"
     if re.match(r"^(NOT\s+)?(>=|<=|<>|[<>=])", up) or \
             re.match(r"^(NOT\s+)?(GREATER|LESS|EQUAL|EQUALS|EQ|GT|LT|GE|LE|NE)\b", up):
         return f"{subj} {obj}"   # abbreviated relation: WHEN > 5  ->  subj > 5
