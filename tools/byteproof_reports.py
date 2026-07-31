@@ -49,11 +49,11 @@ from cobol_xstate_core.fetch import fetch_dependencies               # noqa: E40
 from cobol_xstate.artifacts import build_artifacts                   # noqa: E402
 from cobol_xstate.dynamic_calls import (annotate_artifacts,          # noqa: E402
                                         build_dynamic_calls)
-from cobol_xstate_jcl.parser import parse_jcl                               # noqa: E402
-from cobol_xstate_jcl.views import build_jcl_artifacts               # noqa: E402
+from jcl_dependencies.parser import parse_jcl                       # noqa: E402
+from jcl_dependencies.views import build_jcl_artifacts               # noqa: E402
 from cobol_xstate.normalizer import detect_source_format             # noqa: E402
 from cobol_xstate.parser import parse_program                        # noqa: E402
-from cobol_xstate_jcl.prefetch import prefetch_jcl                   # noqa: E402
+from jcl_dependencies.prefetch import prefetch_jcl                   # noqa: E402
 from cobol_xstate.prefetch import (attribute_resolution,             # noqa: E402
                                    prefetch_cobol)
 from cobol_xstate.preprocessor import CopybookResolver               # noqa: E402

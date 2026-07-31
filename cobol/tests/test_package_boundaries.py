@@ -1,7 +1,7 @@
 """The package boundaries, enforced rather than asserted in prose.
 
 Three distributions ship from this tree: cobol_xstate_core (retrieval and the estate
-boundary), cobol_xstate_jcl (JCL), and cobol_xstate (COBOL). The whole point of the split
+boundary), jcl_dependencies (JCL), and cobol_xstate (COBOL). The whole point of the split
 is that the two front-ends are PEERS - a JCL install carries no COBOL modelling engine,
 and neither imports the other - with core underneath both.
 
@@ -54,7 +54,7 @@ def test_the_blocker_actually_blocks():
 
 
 def test_core_needs_neither_front_end():
-    proc = _run_isolated(["cobol_xstate", "cobol_xstate_jcl"], """
+    proc = _run_isolated(["cobol_xstate", "jcl_dependencies"], """
         import cobol_xstate_core
         from cobol_xstate_core.prefetch import Prefetcher, PrefetchResult
         from cobol_xstate_core.fetch import fetch_dependencies, build_fetch_plan
@@ -70,7 +70,7 @@ def test_the_jcl_package_needs_no_cobol_modelling_engine():
     """The environment-separation claim, at the code level: a JCL box that never
     installed the COBOL package can still parse a job and build both of its views."""
     proc = _run_isolated(["cobol_xstate"], """
-        from cobol_xstate_jcl.api import analyze
+        from jcl_dependencies.api import analyze
         a = analyze("//J JOB\\n//S EXEC PGM=IEFBR14\\n//D DD DSN=A.B,DISP=SHR\\n",
                     retrieve=False)
         assert len(a.job.steps) == 1
@@ -85,7 +85,7 @@ def test_the_jcl_package_needs_no_cobol_modelling_engine():
 def test_a_cobol_install_without_the_jcl_package_is_a_complete_install(tmp_path):
     """Everything except the one join keeps working, and a default run still writes all
     eight files."""
-    proc = _run_isolated(["cobol_xstate_jcl"], f"""
+    proc = _run_isolated(["jcl_dependencies"], f"""
         import io, contextlib, os
         from cobol_xstate.cli import run
         out = {str(tmp_path / "o")!r}
@@ -103,7 +103,7 @@ def test_a_cobol_install_without_the_jcl_package_is_a_complete_install(tmp_path)
 def test_bind_jcl_without_the_jcl_package_says_exactly_what_to_install(tmp_path):
     """The failure has to be loud. A manifest that was never bound looks FINE - its file
     rows say exactly what an unbound run's rows say - so this must not degrade quietly."""
-    proc = _run_isolated(["cobol_xstate_jcl"], f"""
+    proc = _run_isolated(["jcl_dependencies"], f"""
         import io, contextlib
         from cobol_xstate.cli import run
         err = io.StringIO()
@@ -115,7 +115,7 @@ def test_bind_jcl_without_the_jcl_package_says_exactly_what_to_install(tmp_path)
     """)
     assert proc.returncode == 0, proc.stderr
     assert "RC 2" in proc.stdout
-    assert "cobol-xstate-jcl" in proc.stdout
+    assert "jcl-dependencies" in proc.stdout
     assert "pip install cobol-xstate[jcl]" in proc.stdout
 
 
@@ -127,8 +127,8 @@ def test_importing_the_cobol_package_does_not_pull_in_the_jcl_one():
         import cobol_xstate
         import cobol_xstate.cli
         import cobol_xstate.api
-        assert "cobol_xstate_jcl" not in sys.modules, sorted(
-            m for m in sys.modules if m.startswith("cobol_xstate_jcl"))
+        assert "jcl_dependencies" not in sys.modules, sorted(
+            m for m in sys.modules if m.startswith("jcl_dependencies"))
         print("OK")
     """)
     assert proc.returncode == 0, proc.stderr
@@ -140,10 +140,10 @@ def test_no_jcl_module_imports_a_front_end(module):
     """Read the source rather than the runtime: an import inside a rarely-taken branch
     would not show up in a passing import test."""
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[2] / "jcl" / "src" / "cobol_xstate_jcl"
+    src = (Path(__file__).resolve().parents[2] / "jcl" / "src" / "jcl_dependencies"
            / f"{module}.py").read_text(encoding="utf-8")
     for line in src.splitlines():
         stripped = line.strip()
         if stripped.startswith(("import ", "from ")):
             assert "cobol_xstate." not in stripped and "import cobol_xstate\n" not in stripped + "\n", \
-                f"cobol_xstate_jcl/{module}.py imports the COBOL package: {stripped}"
+                f"jcl_dependencies/{module}.py imports the COBOL package: {stripped}"

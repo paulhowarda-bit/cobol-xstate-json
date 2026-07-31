@@ -19,7 +19,7 @@ dependencies = ["cobol-xstate-core>=0.1,<0.2"]
 # rather than a dependency because a COBOL install without it is a complete, working
 # install that simply cannot do that one join - and because the two are peers, so making
 # one require the other would settle a hierarchy that does not exist.
-jcl = ["cobol-xstate-jcl>=0.1,<0.2"]
+jcl = ["jcl-dependencies>=0.1,<0.2"]
 dev = ["pytest>=7"]
 
 [project.scripts]

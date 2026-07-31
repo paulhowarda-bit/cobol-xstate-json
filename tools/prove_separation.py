@@ -69,14 +69,14 @@ def main() -> int:
     try:
         print("all three (core + cobol + jcl)")
         v = make_venv(root, "all", ("core", "cobol", "jcl"))
-        for script in ("cobol-xstate", "cobol-xstate-jcl"):
+        for script in ("cobol-xstate", "jcl-dependencies"):
             check(f"{script} console script exists",
                   (v / BIN / f"{script}{EXE}").exists())
         r = run(v, "-m", "cobol_xstate", "cobol/examples/accum.cbl",
                 "--outdir", str(out / "a"), "-q")
         check("a COBOL run writes its eight files", r.returncode == 0
               and len(list((out / "a").glob("*.json"))) == 8)
-        r = run(v, "-m", "cobol_xstate_jcl", "jcl/examples/acctunld.jcl",
+        r = run(v, "-m", "jcl_dependencies", "jcl/examples/acctunld.jcl",
                 "--outdir", str(out / "b"), "-q")
         check("a JCL run writes its four files", r.returncode == 0
               and len(list((out / "b").glob("*.json"))) == 4)
@@ -89,15 +89,15 @@ def main() -> int:
         r = run(v, "-c", "import importlib.util as u; "
                          "print(u.find_spec('cobol_xstate') is None)")
         check("the COBOL package is not even findable", r.stdout.strip() == "True")
-        r = run(v, "-m", "cobol_xstate_jcl", "jcl/examples/dailypost.jcl",
+        r = run(v, "-m", "jcl_dependencies", "jcl/examples/dailypost.jcl",
                 "--outdir", str(out / "c"), "-q")
         check("the JCL CLI still works with no COBOL package at all",
               r.returncode == 0 and len(list((out / "c").glob("*.json"))) == 4)
 
         print("\nCOBOL box (core + cobol ONLY - the JCL extra not installed)")
         v = make_venv(root, "cobol", ("core", "cobol"))
-        r = run(v, "-c", "import cobol_xstate_jcl")
-        check("import cobol_xstate_jcl raises ModuleNotFoundError",
+        r = run(v, "-c", "import jcl_dependencies")
+        check("import jcl_dependencies raises ModuleNotFoundError",
               r.returncode != 0 and "ModuleNotFoundError" in r.stderr)
         r = run(v, "-m", "cobol_xstate", "cobol/examples/accum.cbl",
                 "--outdir", str(out / "d"), "-q")

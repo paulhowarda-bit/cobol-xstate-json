@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "cobol_xstate_jcl",
+    "jcl_dependencies",
     reason="the JCL half is an optional extra: pip install cobol-xstate[jcl]")
 
 from cobol_xstate.cli import run                                    # noqa: E402
@@ -48,7 +48,7 @@ def test_cli_autodetects_jcl_and_writes_both_views(tmp_path):
                      # cataloged PROC carries EXEC PGM= steps that are in no other file
                      "acctunld.jcl.prefetch.json", "acctunld.jcl.fetch.json"}
     art = json.loads((tmp_path / "acctunld.jcl.artifacts.json").read_text())
-    assert art["format"] == "cobol-xstate-jcl-artifacts"
+    assert art["format"] == "jcl-dependencies-artifacts"
 
 
 def test_cli_jcl_detection_does_not_misfire_on_cobol():

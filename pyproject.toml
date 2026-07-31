@@ -3,7 +3,7 @@
 #
 #   core/  cobol-xstate-core   the estate boundary and two-stage retrieval, shared
 #   cobol/ cobol-xstate        COBOL -> XState statechart      (depends on core)
-#   jcl/   cobol-xstate-jcl    JCL -> dataflow + dependencies  (depends on core)
+#   jcl/   jcl-dependencies    JCL -> dataflow + dependencies  (depends on core)
 #
 # What this file exists for is running the whole suite together, across all three, from
 # a checkout with nothing installed. Install them for real with:

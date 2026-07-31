@@ -22,7 +22,7 @@ it, and a hole one level down is still a hole.
 completely different means: COBOL is scanned lexically (``COPY X.`` names its member
 right there), JCL by record-and-replay (only the JCL parser resolves symbols, so the
 parse itself is replayed until it stops asking). Those two closures live with their
-languages, in ``cobol_xstate.prefetch`` and ``cobol_xstate_jcl.prefetch``. What lives
+languages, in ``cobol_xstate.prefetch`` and ``jcl_dependencies.prefetch``. What lives
 HERE is everything they do identically: deciding whether a name can be requested at all,
 checking the local search path before the network, calling the estate, and - above all -
 keeping the several distinct reasons a member did not arrive distinct from one another.

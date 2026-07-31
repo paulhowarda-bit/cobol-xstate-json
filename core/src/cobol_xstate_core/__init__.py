@@ -1,6 +1,6 @@
 """cobol_xstate_core - what the COBOL and JCL front-ends both need.
 
-The two front-ends (``cobol_xstate``, ``cobol_xstate_jcl``) answer different questions
+The two front-ends (``cobol_xstate``, ``jcl_dependencies``) answer different questions
 about different languages, but they reach the SAME estate the SAME way: one artifact
 service, one two-stage retrieval (close over the text, then fetch what the manifest
 names), one report vocabulary. That shared half lives here so neither front-end depends

@@ -12,7 +12,7 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 |---|---|---|---|
 | `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
 | `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) | core |
-| `jcl/` | `cobol-xstate-jcl` | JCL → dataflow + dependencies (`cobol-xstate-jcl`) | core |
+| `jcl/` | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) | core |
 
 The two front-ends are **peers**: neither imports the other, and a JCL install carries no
 COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
@@ -23,13 +23,13 @@ adds that one join.
 # Run from a checkout, no install needed (the root pyproject puts all three on sys.path)
 python -m pytest -q                                        # full suite (~670 tests)
 PYTHONPATH="core/src;cobol/src;jcl/src" python -m cobol_xstate cobol/examples/custrpt.cbl
-PYTHONPATH="core/src;cobol/src;jcl/src" python -m cobol_xstate_jcl jcl/examples/acctunld.jcl
+PYTHONPATH="core/src;cobol/src;jcl/src" python -m jcl_dependencies jcl/examples/acctunld.jcl
 
 # Or install them for real (editable), which is what gives you the console scripts
 python -m pip install -e core -e cobol -e jcl
 cobol-xstate prog.cbl --summary        # 8 JSON views into ./out/
 cobol-xstate prog.cbl --target js      # runnable ES module + cobolRuntime.mjs
-cobol-xstate-jcl job.jcl               # 2 views + both retrieval reports
+jcl-dependencies job.jcl               # 2 views + both retrieval reports
 
 # Gather where the estate is reachable, model where it is not
 cobol-xstate prog.cbl --gather-only ./bundle

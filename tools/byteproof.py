@@ -57,8 +57,8 @@ from cobol_xstate.business import build_business_view                 # noqa: E4
 from cobol_xstate.dynamic_calls import (annotate_artifacts,           # noqa: E402
                                         build_dynamic_calls)
 from cobol_xstate.emitter import emit_setup_module                    # noqa: E402
-from cobol_xstate_jcl.parser import parse_jcl                                # noqa: E402
-from cobol_xstate_jcl.views import (build_jcl_artifacts,              # noqa: E402
+from jcl_dependencies.parser import parse_jcl                       # noqa: E402
+from jcl_dependencies.views import (build_jcl_artifacts,              # noqa: E402
                                     build_jcl_lineage)
 from cobol_xstate.lineage import build_lineage                        # noqa: E402
 from cobol_xstate.normalizer import detect_source_format              # noqa: E402

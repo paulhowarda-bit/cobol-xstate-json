@@ -6,7 +6,7 @@ only thing in either front-end that knows the other exists, and it reaches for i
 LAZILY - so ``import cobol_xstate`` never touches the JCL package, and a COBOL install
 without it is a complete, working install that simply cannot do this one join.
 
-The join itself lives in the JCL package (``cobol_xstate_jcl.views.bind_cobol_artifacts``)
+The join itself lives in the JCL package (``jcl_dependencies.views.bind_cobol_artifacts``)
 even though it serves a COBOL feature, because it consumes a plain manifest **dict** plus
 parsed ``Job`` objects and imports nothing COBOL. Moving it here would drag ``Job`` into
 this package and make the dependency real in both directions.
@@ -27,10 +27,10 @@ from cobol_xstate_core.prefetch import PrefetchResult
 from .errors import CobolXstateError
 
 #: The distribution that provides the JCL half.
-JCL_DIST = "cobol-xstate-jcl"
+JCL_DIST = "jcl-dependencies"
 
 #: The COBOL-artifact-manifest contract this package binds against. Must match
-#: ``cobol_xstate_jcl.BIND_API_VERSION``.
+#: ``jcl_dependencies.BIND_API_VERSION``.
 BIND_API_VERSION = 1
 
 
@@ -50,19 +50,19 @@ def available() -> bool:
 def _jcl():
     """Import the JCL package, checking that it speaks the contract we bind against."""
     try:
-        import cobol_xstate_jcl
+        import jcl_dependencies
     except ImportError as exc:
         raise JclSupportMissing(
             f"--bind-jcl needs the {JCL_DIST} package, which is not installed "
             f"({exc}). Install it with:  pip install cobol-xstate[jcl]"
         ) from exc
-    theirs = getattr(cobol_xstate_jcl, "BIND_API_VERSION", None)
+    theirs = getattr(jcl_dependencies, "BIND_API_VERSION", None)
     if theirs != BIND_API_VERSION:
         raise JclSupportMissing(
             f"{JCL_DIST} speaks bind-contract version {theirs!r}, but this build binds "
             f"against version {BIND_API_VERSION}. Upgrade whichever is older - a skewed "
             f"pair would produce a manifest that looks bound and is not.")
-    return cobol_xstate_jcl
+    return jcl_dependencies
 
 
 def jcl_api():
@@ -72,7 +72,7 @@ def jcl_api():
     one release so existing scripts do not break, and delegates rather than reimplementing.
     """
     _jcl()                       # the install + contract check, with its own messages
-    from cobol_xstate_jcl import api
+    from jcl_dependencies import api
     return api
 
 
