@@ -18,28 +18,13 @@ from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
 from cobol_xstate_core.profiling import StageTimer
 
-# The JCL front-end. Imported directly for now; --bind-jcl moves behind a lazy,
-# version-checked orchestrator (bind.py) in the next stage, so that installing the COBOL
-# package without the JCL one stays a complete, working install.
-from cobol_xstate_jcl.parser import parse_jcl
-from cobol_xstate_jcl.prefetch import prefetch_jcl
-from cobol_xstate_jcl.views import (bind_cobol_artifacts, build_jcl_artifacts,
-                                    build_jcl_lineage)
-
 from . import PACKAGE_LOGGER
-from .artifacts import build_artifacts
-from .business import build_business_view
-from .dynamic_calls import annotate_artifacts, build_dynamic_calls
-from .emitter import emit_setup_module
+from .api import analyze
+from .bind import JclSupportMissing
+from .bind import jcl_api as _jcl_api
 from .errors import CobolXstateError
-from .lineage import build_lineage
-from .normalizer import SourceFormat, detect_source_format
-from .parser import parse_program
-from .prefetch import attribute_resolution, prefetch_cobol
-from .preprocessor import CopybookResolver
-from .reactive import build_reactive_view, emit_reactive_module
+from .normalizer import SourceFormat
 from .runtime_assets import read_runtime_asset
-from .statechart import build_machine
 
 # Explicit name, NOT __name__: this module is also run as `python -m cobol_xstate.cli`,
 # where __name__ == "__main__" would put the logger outside the cobol_xstate hierarchy and
@@ -252,25 +237,19 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     # which is where a cataloged PROC or INCLUDE member most often sits. Passing only the
     # -I list meant a PROC beside the job was never found locally, and every EXEC step and
     # DD inside it silently vanished from the model.
-    with timer.stage("prefetch"):
-        pre = prefetch_jcl(source, fetcher, paths=list(paths),
-                           dest=deps, source_name=source_name, unavailable=why,
-                           jobs=_jobs(args))
-
-    with timer.stage("parse"):
-        job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
-    with timer.stage("jcl-lineage"):
-        lineage = build_jcl_lineage(job)
-    with timer.stage("jcl-artifacts"):
-        artifacts = build_jcl_artifacts(job)
+    try:
+        jcl_api = _jcl_api()
+    except JclSupportMissing as exc:
+        _log.error(f"error: {exc}")
+        return 2
+    analysis = jcl_api.analyze(source, source_name=source_name, fetcher=fetcher,
+                               paths=list(paths), dest=deps, unavailable=why,
+                               jobs=_jobs(args), timer=timer)
+    job, pre, fetched = analysis.job, analysis.prefetch, analysis.fetch
     base = _artifact_base(args, default_stem, job.name or "job")
-    with timer.stage("fetch"):
-        fetched = fetch_dependencies(artifacts, fetcher, dest=deps,
-                                     prefetched=pre.store, unavailable=why,
-                                     jobs=_jobs(args))
 
-    for suffix, obj in ((".jcl.artifacts.json", artifacts),
-                        (".jcl.lineage.json", lineage),
+    for suffix, obj in ((".jcl.artifacts.json", analysis.artifacts()),
+                        (".jcl.lineage.json", analysis.lineage()),
                         (".jcl.prefetch.json", pre.report()),
                         (".jcl.fetch.json", fetched)):
         path = run_dir / f"{base}{suffix}"
@@ -279,6 +258,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     _report_stages(source_name, pre, fetched)
 
     if args.summary:
+        lineage = analysis.lineage()
         _log.info(f"[{job.name or 'JOB'}] {len(job.steps)} step(s), "
               f"{len(lineage['datasets'])} dataset(s), "
               f"{len(lineage['dataflow'])} dataflow edge(s), "
@@ -392,114 +372,46 @@ def _run(args, timing_sink=None) -> int:
                         timing_sink=timing_sink)
 
     timer = StageTimer(_log, args.timing, source_name, sink=timing_sink)
-    default_exts = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
-    fmt = _format(args.format)
-    if fmt is None:
-        det = detect_source_format(source)
-        fmt = det.format
-        # A silent wrong guess corrupts every downstream stage, so surface it: state
-        # what was picked, and warn (recommending --format) when confidence is low.
-        level = "detected" if det.is_confident else "WARNING: low-confidence"
-        _log.info(f"[{source_name}] {level} source format = {fmt.value} "
-              f"({det.confidence:.0%}: {det.reason})")
-        if not det.is_confident:
-            _log.warning("  -> if the output looks corrupted, re-run with "
-                  "--format fixed|free to override.")
 
-    # STAGE 1. Before the parse, because the parse is what produces the dependency
-    # manifest: a copybook that does not arrive takes its VALUE clauses out of the
-    # model, and a dynamic CALL target proved by one of those clauses then stays an
-    # unresolved runtime name - so the program it calls is never even a row to fetch.
+    # STAGE 1 runs before the parse, and it writes into the run directory - so the
+    # directory has to be settled first, before anything is parsed.
     fetcher, why = _service(args, source_name)
-    # The run directory has to be settled BEFORE stage 1, because stage 1 writes into it.
-    # Hence the PROGRAM-ID scan rather than machine.program_id, which does not exist yet.
     run_dir = _run_dir(args)
     err = _make_run_dir(run_dir)
     if err:
         _log.error(f"error: {err}")
         return 2
     deps = str(run_dir / "deps")
-    with timer.stage("prefetch"):
-        pre = prefetch_cobol(source, fetcher, paths=search_paths, dest=deps, fmt=fmt,
-                             source_name=source_name, unavailable=why,
-                             exts=tuple(args.copybook_ext) + default_exts,
-                             jobs=_jobs(args))
 
-    resolver = CopybookResolver(
-        paths=search_paths,
-        exts=tuple(args.copybook_ext) + default_exts,
-        fetcher=fetcher,
-        store=pre.store,        # everything stage 1 retrieved, already paid for
-    )
-    with timer.stage("parse"):
-        program = parse_program(source, fmt, resolver=resolver)
-    with timer.stage("build_machine"):
-        machine = build_machine(program, source_name=source_name)
-    # When timings are being collected, force the two memoized analyses now so each is
-    # attributed to its own line instead of to whichever companion writer happens to touch
-    # it first. Both run unconditionally later anyway (stage 2 builds the interface via
-    # build_artifacts and the lineage fixpoint via the dynamic-calls view), so pre-warming
-    # changes total work and emitted bytes by nothing.
-    if timer.enabled:
-        with timer.stage("interface"):
-            machine.interface()
-        with timer.stage("lineage-fixpoint"):
-            machine.lineage().run()
-
-    # A copybook fetcher that ERRORED is not the same as a member that does not exist:
-    # the model is missing logic for a fixable reason (bad credentials, service down),
-    # so say so loudly rather than letting it read as "not on the estate".
-    for member, err in getattr(resolver, "fetch_errors", []):
-        _log.warning(f"[{source_name}] WARNING: copybook fetcher failed for {member}: {err}")
-
-    # --bind-jcl: parse each JCL once; the artifacts view is then built through the
-    # binding join so its file rows carry the dataset their ddname resolves to. Each is
-    # prefetched first, into the SAME store: a ddname the program opens is very often
-    # contributed by a PROC rather than by the JCL file itself, so an unresolved PROC
-    # here does not merely lose steps - it loses the ddname->DSN binding that is the
-    # entire reason for passing the JCL.
-    bind_jobs = []
+    # Reading the --bind-jcl files is the CLI's business (paths, existence, exit codes);
+    # the join itself goes through the lazy orchestrator, so this package never imports
+    # the JCL one at module level.
+    jcl_sources = []
     for jf in args.bind_jcl:
         jp = Path(jf)
         if not jp.exists():
             _log.error(f"error: no such file: {jp} (--bind-jcl)")
             return 2
-        jtext = decode_member(jp.read_bytes())
-        prefetch_jcl(jtext, fetcher, paths=search_paths, dest=deps,
-                     source_name=jp.name, unavailable=why, result=pre,
-                     jobs=_jobs(args))
-        bind_jobs.append(parse_jcl(jtext, resolver=pre.resolver(),
-                                   source_name=jp.name))
+        jcl_sources.append((jp.name, decode_member(jp.read_bytes())))
 
-    # The true dynamic calls and where their targets are named. Built once: the artifact
-    # manifest is annotated FROM it (so the fetch plan inherits the pointer too), and it
-    # is written as its own view.
-    dyn_report = None
+    try:
+        analysis = analyze(source, source_name=source_name, fmt=_format(args.format),
+                           fetcher=fetcher, paths=search_paths,
+                           exts=tuple(args.copybook_ext), dest=deps, unavailable=why,
+                           jobs=_jobs(args), jcl=jcl_sources, timer=timer)
+    except JclSupportMissing as exc:
+        _log.error(f"error: {exc}")
+        return 2
 
-    def _dynamic_obj(art):
-        nonlocal dyn_report
-        if dyn_report is None:
-            dyn_report = build_dynamic_calls(machine, art)
-        return dyn_report
+    machine = analysis.machine
+    pre = analysis.prefetch
+    report = analysis.fetch
 
-    art_report = None
-
-    def _artifacts_obj():
-        # Memoized like its sibling above: a default run reaches this three times (stage
-        # 2, the .artifacts.json companion, the .dynamic-calls.json companion) and each
-        # call re-ran build_artifacts + bind + attribute + annotate over the whole
-        # machine to produce the same object.
-        nonlocal art_report
-        if art_report is None:
-            art = build_artifacts(machine)
-            if bind_jobs:
-                art = bind_cobol_artifacts(art, bind_jobs)
-            # Name the rows that exist only because stage 1 ran, so the improvement is
-            # visible rather than implied.
-            art = attribute_resolution(art, program, pre.store)
-            # ...and tell the rows that CANNOT be resolved where their answer lives.
-            art_report = annotate_artifacts(art, _dynamic_obj(art))
-        return art_report
+    # A copybook fetcher that ERRORED is not the same as a member that does not exist:
+    # the model is missing logic for a fixable reason (bad credentials, service down),
+    # so say so loudly rather than letting it read as "not on the estate".
+    for member, ferr in analysis.copybook_errors:
+        _log.warning(f"[{source_name}] WARNING: copybook fetcher failed for {member}: {ferr}")
 
     base = _artifact_base(args, default_stem, machine.program_id)
     out_path = _resolve_out_path(args, base, run_dir)
@@ -528,14 +440,14 @@ def _run(args, timing_sink=None) -> int:
         machine's events and fields, so the two are read together."""
         if args.machine_only or args.no_lineage:
             return
-        _companion(beside, ".lineage.json", build_lineage(machine))
+        _companion(beside, ".lineage.json", analysis.lineage())
 
     def _write_business_companion(beside: Path) -> None:
         """The business distillation: the same machine with scaffolding collapsed. It is
         the view a human reads, so a default run produces it beside the faithful one."""
         if args.machine_only or args.no_business:
             return
-        _companion(beside, ".business.json", build_business_view(machine))
+        _companion(beside, ".business.json", analysis.business())
 
     def _write_artifacts_companion(beside: Path) -> None:
         """The related-artifact manifest: the Db2 tables, files, called programs and
@@ -544,7 +456,7 @@ def _run(args, timing_sink=None) -> int:
         With --bind-jcl, file rows carry the dataset their ddname resolves to."""
         if args.machine_only or args.no_artifacts:
             return
-        _companion(beside, ".artifacts.json", _artifacts_obj())
+        _companion(beside, ".artifacts.json", analysis.artifacts())
 
     def _write_dynamic_companion(beside: Path) -> None:
         """The true dynamic calls: targets this program does NOT name, and the artifact
@@ -553,7 +465,7 @@ def _run(args, timing_sink=None) -> int:
         between that and the view not having run."""
         if args.machine_only or args.no_dynamic_calls:
             return
-        _companion(beside, ".dynamic-calls.json", _dynamic_obj(_artifacts_obj()))
+        _companion(beside, ".dynamic-calls.json", analysis.dynamic_calls())
 
     def _write_reactive_companion(beside: Path) -> None:
         """The event-driven view: the machine the modernized system is built from.
@@ -566,21 +478,14 @@ def _run(args, timing_sink=None) -> int:
         if args.machine_only or args.no_reactive:
             return
         try:
-            view = build_reactive_view(machine)
+            view = analysis.reactive()
         except NotImplementedError as exc:
             _log.info(f"[{source_name}] note: no reactive view - {exc}")
             return
         _companion(beside, ".reactive.json", view)
 
-    # STAGE 2. Unconditional: retrieving what this program depends on is not a mode of
-    # the tool, it is what the tool does. Run before the views are written so the two
-    # reports land even when a later view refuses.
-    with timer.stage("artifacts"):
-        _art = _artifacts_obj()
-    with timer.stage("fetch"):
-        report = fetch_dependencies(_art, fetcher, dest=deps, prefetched=pre.store,
-                                    unavailable=why, dynamic=_dynamic_obj(_art),
-                                    jobs=_jobs(args))
+    # Both retrieval stages already ran, inside analyze(): retrieving what this program
+    # depends on is not a mode of the tool, it is what the tool does.
     # --machine-only suppresses the REPORTS, never the retrieval: what was fetched
     # decides whether the machine is right, so skipping it to save two files would be
     # backwards.
@@ -593,17 +498,17 @@ def _run(args, timing_sink=None) -> int:
 
     _t_views = timer.start()
     if args.target in ("business", "lineage", "artifacts"):
-        obj = (build_lineage(machine) if args.target == "lineage"
-               else _artifacts_obj() if args.target == "artifacts"
-               else build_business_view(machine))
+        obj = (analysis.lineage() if args.target == "lineage"
+               else analysis.artifacts() if args.target == "artifacts"
+               else analysis.business())
         _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
         _log.info(f"[{source_name}] wrote {out_path}")
         if args.target == "business":
             _write_lineage_companion(out_path)
     elif args.target in ("js", "reactive"):
         try:
-            text = (emit_reactive_module(machine) if args.target == "reactive"
-                    else emit_setup_module(machine))
+            text = (analysis.reactive_module() if args.target == "reactive"
+                    else analysis.js_module())
         except NotImplementedError as exc:
             # An explicit --target reactive on a program the lowering refuses: report the
             # reason, not a traceback. The refusal is a fact about the program.
@@ -622,11 +527,12 @@ def _run(args, timing_sink=None) -> int:
         # beside the runnable module, like every other machine view.
         if args.target == "reactive":
             view = out_path.with_name(base + ".reactive.json")
-            _write(view, _json.dumps(build_reactive_view(machine),
+            _write(view, _json.dumps(analysis.reactive(),
                                      indent=args.indent) + "\n")
             _log.info(f"[{source_name}] wrote {view}")
     else:
-        text = machine.to_json(machine_only=args.machine_only, indent=args.indent)
+        text = analysis.machine_json(machine_only=args.machine_only,
+                                     indent=args.indent)
         _write(out_path, text + "\n")
         _log.info(f"[{source_name}] wrote {out_path}")
         # A plain run yields the six JSON views of one program, each answering a
