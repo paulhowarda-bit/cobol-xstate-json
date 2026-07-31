@@ -11,8 +11,8 @@ import json
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.dynamic_calls import annotate_artifacts, build_dynamic_calls
 from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
-from cobol_xstate_jcl.parser import parse_jcl
-from cobol_xstate_jcl.views import bind_cobol_artifacts
+from jcl_dependencies.parser import parse_jcl
+from jcl_dependencies.views import bind_cobol_artifacts
 from cobol_xstate.parser import parse_program
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.statechart import build_machine

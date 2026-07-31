@@ -14,7 +14,7 @@ keywords = ["cobol", "jcl", "mainframe", "modernization", "estate", "retrieval"]
 
 # Deliberately no dependencies, and deliberately no knowledge of its consumers. Core is
 # what BOTH front-ends need to reach the estate the same way; if something here started
-# importing cobol_xstate or cobol_xstate_jcl, the dependency would point the wrong way
+# importing cobol_xstate or jcl_dependencies, the dependency would point the wrong way
 # and a JCL install would begin carrying a COBOL modelling engine it never executes.
 dependencies = []
 

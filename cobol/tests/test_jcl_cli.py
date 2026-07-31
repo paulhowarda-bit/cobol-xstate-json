@@ -1,6 +1,6 @@
 """The JCL front-end's own command line.
 
-Two entry points reach the JCL views: this package's ``cobol-xstate-jcl``, and the COBOL
+Two entry points reach the JCL views: this package's ``jcl-dependencies``, and the COBOL
 command's auto-fork (``cobol-xstate job.jcl``), kept for one release so existing scripts
 keep working. They must not drift, so the first test here runs every JCL example through
 both and compares bytes - the auto-fork delegates rather than reimplementing, and this is
@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cobol_xstate.cli import run as cobol_run                      # noqa: E402
-from cobol_xstate_jcl.cli import run as jcl_run                    # noqa: E402
+from jcl_dependencies.cli import run as jcl_run                    # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 JCL = REPO.parent / "jcl" / "examples"
@@ -98,9 +98,9 @@ def test_python_dash_m_works():
     import os
     import subprocess
     proc = subprocess.run(
-        [sys.executable, "-m", "cobol_xstate_jcl", "--help"],
+        [sys.executable, "-m", "jcl_dependencies", "--help"],
         capture_output=True, text=True, cwd=str(REPO.parent),
         env={**__import__("os").environ, "PYTHONPATH": os.pathsep.join(
             str(REPO.parent / t) for t in ("core/src", "cobol/src", "jcl/src"))})
     assert proc.returncode == 0
-    assert "cobol-xstate-jcl" in proc.stdout
+    assert "jcl-dependencies" in proc.stdout
