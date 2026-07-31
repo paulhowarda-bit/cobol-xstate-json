@@ -565,3 +565,72 @@ def test_two_identical_perform_n_times_get_independent_exit_guards():
                 counters.add(tree["left"])
     # two loops -> two distinct counters, each governing its own loop exit
     assert len(counters) == 2, f"each loop must test its own counter, got {counters}"
+
+
+# -- EVALUATE / PERFORM control text: literals are data (audit #4, #5, #11, #15) ----
+
+def _guards_of(src: str):
+    machine = _machine(src)
+    return machine.semantics["guards"]
+
+
+def test_evaluate_when_literal_containing_thru_is_one_value():
+    """`WHEN 'MON THRU FRI'` torn at its inner THRU built the guard
+    `subj >= 'MON AND subj <= FRI'` - plausible-looking, wrong, and unflagged."""
+    guards = _guards_of(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-DAY  PIC X(12).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EVALUATE WS-DAY\n"
+        "             WHEN 'MON THRU FRI'\n"
+        "               DISPLAY 'A'\n"
+        "             WHEN 1 THRU 5\n"
+        "               DISPLAY 'C'\n"
+        "           END-EVALUATE\n"
+        "           STOP RUN.\n")
+    texts = {str(g) for g in guards.values()}
+    assert any("'MON THRU FRI'" in t and "'rel'" in t or
+               '"MON THRU FRI"' in t for t in texts) or \
+        any(g.get("op") == "rel" and g.get("right") == "'MON THRU FRI'"
+            for g in guards.values())
+    # The real numeric range still becomes a range.
+    assert any(g.get("op") == "and" for g in guards.values())
+
+
+def test_evaluate_when_literal_containing_also_is_one_object():
+    guards = _guards_of(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-K  PIC X(10).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EVALUATE WS-K\n"
+        "             WHEN 'X ALSO Y'\n"
+        "               DISPLAY 'B'\n"
+        "           END-EVALUATE\n"
+        "           STOP RUN.\n")
+    assert any(g.get("op") == "rel" and g.get("right") == "'X ALSO Y'"
+               for g in guards.values())
+
+
+def test_until_condition_keeps_a_literal_containing_after():
+    """Truncated at the AFTER inside its literal, the loop's exit became a comparison
+    against a field named STOP - parsed cleanly, silently wrong."""
+    from cobol_xstate.statechart import _until_text
+    assert _until_text("UNTIL WS-CMD = 'STOP AFTER CYCLE'") == \
+        "WS-CMD = 'STOP AFTER CYCLE'"
+    # The real AFTER clause still bounds the condition.
+    assert _until_text("VARYING I FROM 1 BY 1 UNTIL I > 5 AFTER J FROM 1 BY 1") == "I > 5"
+
+
+def test_varying_is_not_conjured_from_inside_a_literal():
+    from cobol_xstate.statechart import _parse_varying
+    assert _parse_varying("UNTIL WS-X = 'AFTER Y FROM 1 BY 2'") == []
+    assert _parse_varying("VARYING I FROM 1 BY 1 AFTER J FROM 1 BY 2") == [
+        ("I", "1", "1"), ("J", "1", "2")]

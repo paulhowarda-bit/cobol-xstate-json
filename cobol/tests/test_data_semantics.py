@@ -543,3 +543,44 @@ def test_real_layout_clauses_still_parse_beside_a_value():
     program = parse_program(src)
     assert program.data_by_name["WS-B"].redefines == "WS-A"
     assert program.data_by_name["WS-CELL"].occurs == 5
+
+
+# -- statement text: literals are data, not clauses (audit #2, #3, #14) -----
+
+def test_size_error_inside_a_literal_does_not_swallow_the_move():
+    """_strip_arith_clauses sees EVERY statement. Truncating this MOVE at the phrase
+    inside its own literal made it unparseable - the assignment silently VANISHED from
+    the model, with no flag."""
+    op = parse_operation("MOVE 'ON SIZE ERROR IN STEP2' TO WS-HELP")
+    assert op is not None
+    assert op["assignments"] == [
+        {"target": "WS-HELP", "expr": "'ON SIZE ERROR IN STEP2'"}]
+    assert "onSizeError" not in op
+
+
+def test_rounded_inside_a_literal_is_not_deleted_from_the_moved_value():
+    op = parse_operation("MOVE 'ROUNDED' TO WS-FMT")
+    assert op["assignments"] == [{"target": "WS-FMT", "expr": "'ROUNDED'"}]
+    assert "rounded" not in op
+
+
+def test_real_rounded_and_size_error_still_strip_and_annotate():
+    op = parse_operation("COMPUTE X ROUNDED = A / B ON SIZE ERROR MOVE 1 TO E")
+    assert op["assignments"] == [{"target": "X", "expr": "A / B"}]
+    assert op["rounded"] is True and op["onSizeError"] is True
+
+
+def test_subscript_normalizer_never_edits_literal_content():
+    """Collapsing `'TBL (1)'` to `'TBL(1)'` changes the moved bytes - a real behavioral
+    difference in fixed-layout COBOL data."""
+    op = parse_operation("MOVE 'TBL (1)' TO WS-X")
+    assert op["assignments"] == [{"target": "WS-X", "expr": "'TBL (1)'"}]
+    # ...while a real spaced subscript still tightens.
+    op = parse_operation("MOVE TBL (1) TO WS-X")
+    assert op["assignments"] == [{"target": "WS-X", "expr": "TBL(1)"}]
+
+
+def test_initialize_replacing_clause_is_not_a_list_of_targets():
+    op = parse_operation("INITIALIZE WS-REC REPLACING ALPHANUMERIC DATA BY 'A B'")
+    assert [a["target"] for a in op["assignments"]] == ["WS-REC"]
+    assert any("REPLACING" in n for n in op["notes"])

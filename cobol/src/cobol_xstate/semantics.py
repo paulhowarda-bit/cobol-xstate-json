@@ -34,16 +34,44 @@ _NUM = re.compile(r"^[+-]?\d+(\.\d+)?$")
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
+def mask_literals(text: str) -> str:
+    """A copy of ``text`` with every quoted literal replaced by same-length,
+    non-whitespace filler.
+
+    LENGTH-PRESERVING on purpose: a scan runs over the mask, and the positions it finds
+    are then used to slice the ORIGINAL text - so the literal itself survives intact in
+    whatever piece it belongs to. (``\\x00`` is not ``\\s`` and not a word character, so
+    neither whitespace-delimited keywords nor ``\\b`` boundaries can fire inside a
+    masked span.)
+    """
+    return _QUOTED.sub(lambda m: "\x00" * (m.end() - m.start()), text)
+
+
+def sub_outside_literals(pattern, repl: str, text: str) -> str:
+    """``pattern.sub(repl, ...)`` applied only OUTSIDE quoted literals.
+
+    The pattern is matched against the masked copy (so it cannot see into literals) and
+    each matched span is rewritten in the original; everything else - literals above
+    all - is carried through verbatim.
+    """
+    out: List[str] = []
+    pos = 0
+    for m in pattern.finditer(mask_literals(text)):
+        out.append(text[pos:m.start()])
+        out.append(m.expand(repl) if "\\" in repl else repl)
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def split_outside_literals(text: str, keyword: str) -> Optional[Tuple[str, str]]:
     """Split ``text`` at the first whitespace-delimited ``keyword`` OUTSIDE any quoted
     literal; ``None`` when no such keyword exists.
 
-    The scan runs over a copy with every literal masked to non-whitespace filler (same
-    length, so positions carry back to the real text); the split then slices the
-    ORIGINAL text, literals intact.
+    The scan runs over the masked copy; the split then slices the ORIGINAL text,
+    literals intact.
     """
-    masked = _QUOTED.sub(lambda m: "\x00" * (m.end() - m.start()), text)
-    m = re.search(rf"\s+{re.escape(keyword)}\s+", masked, flags=re.I)
+    m = re.search(rf"\s+{re.escape(keyword)}\s+", mask_literals(text), flags=re.I)
     if m is None:
         return None
     return text[:m.start()], text[m.end():]
@@ -76,7 +104,17 @@ def _norm_subscripts(s: str) -> str:
             return m.group(0)
         content = _SUB_COMMA.sub(",", content)   # tighten a subscript list: I, J -> I,J
         return f"{name}({content})"
-    return _SUBNORM.sub(repl, s)
+    # Segment-wise, never inside a literal: collapsing `MOVE 'TBL (1)' TO X` to
+    # `'TBL(1)'` EDITS THE MOVED VALUE - a one-byte change in fixed-layout COBOL data.
+    # A real subscript cannot span a literal, so per-segment application loses nothing.
+    out: List[str] = []
+    pos = 0
+    for m in _QUOTED.finditer(s):
+        out.append(_SUBNORM.sub(repl, s[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_SUBNORM.sub(repl, s[pos:]))
+    return "".join(out)
 
 
 def _operands(s: str) -> List[str]:
@@ -113,6 +151,7 @@ _FIGURATIVE = {"ZERO", "ZEROS", "ZEROES", "SPACE", "SPACES", "HIGH-VALUE",
 
 _ROUNDED = re.compile(r"\bROUNDED\b", re.I)
 _SIZE_ERROR = re.compile(r"\bON\s+SIZE\s+ERROR\b", re.I)
+_WS_RUN = re.compile(r"\s{2,}")
 # Matches the NOT form too, so `... NOT ON SIZE ERROR ...` does not leave a dangling
 # "NOT" on the end of the core statement.
 _SIZE_ERROR_CLAUSE = re.compile(r"\b(?:NOT\s+)?ON\s+SIZE\s+ERROR\b", re.I)
@@ -123,21 +162,39 @@ def _strip_arith_clauses(s: str):
 
     Gated on a cheap substring test first: this runs for EVERY statement, and MOVE -
     by far the most common verb - can carry none of these clauses, so the common case
-    should not pay for three full case-insensitive scans of the statement text."""
+    should not pay for three full case-insensitive scans of the statement text.
+
+    The real scans run over the MASKED text, because this function sees every
+    statement, not just arithmetic: `MOVE 'ON SIZE ERROR IN STEP2' TO WS-HELP` was
+    truncated at the phrase inside its own literal - the MOVE then failed to parse and
+    the assignment silently VANISHED from the model, unflagged - and `MOVE 'ROUNDED'
+    TO WS-FMT` had ROUNDED deleted from inside the moved value, storing ' ' and
+    stamping the operation rounded. When the words appear only inside literals, the
+    statement passes through untouched.
+    """
     up = s.upper()
     if "ROUNDED" not in up and "SIZE ERROR" not in up:
         return s.strip(), False, False
-    rounded = bool(_ROUNDED.search(s))
-    size_err = bool(_SIZE_ERROR.search(s))
+    masked = mask_literals(s)
+    rounded = bool(_ROUNDED.search(masked))
+    size_err = bool(_SIZE_ERROR.search(masked))
+    if not rounded and not size_err:
+        # The words live only inside literals: they are data, and nothing is stripped.
+        return s.strip(), False, False
     # The two clauses are not the same shape. ON SIZE ERROR opens a HANDLER: everything
     # after it is a separate statement list and is not part of the operation, so it
     # truncates. ROUNDED is an inline modifier attached to a receiver, so it has to be
     # DELETED from the text. Truncating on it too turned `COMPUTE X ROUNDED = A / B`
     # into `COMPUTE X`, which then failed to match and dropped the assignment from the
     # model altogether - the statement was emitted as an empty function.
-    core = _SIZE_ERROR_CLAUSE.split(s)[0]
-    core = _ROUNDED.sub(" ", core)
-    return " ".join(core.split()), rounded, size_err
+    cm = _SIZE_ERROR_CLAUSE.search(masked)
+    core = s[:cm.start()] if cm else s
+    core = sub_outside_literals(_ROUNDED, " ", core)
+    # The historical whitespace collapse, minus its one hazard: runs of spaces are
+    # tightened only OUTSIDE literals, so a multi-space literal in (say) a COMPUTE
+    # FUNCTION argument keeps its exact bytes.
+    core = sub_outside_literals(_WS_RUN, " ", core)
+    return core.strip(), rounded, size_err
 
 
 def parse_operation(text: str, data: Optional[Dict] = None) -> Optional[dict]:
@@ -192,10 +249,20 @@ def parse_operation(text: str, data: Optional[Dict] = None) -> Optional[dict]:
     elif verb == "SET":
         return _set(core, data, spec)
     elif verb == "INITIALIZE":
-        targets = _operands(re.sub(r"^INITIALIZE\s+", "", core, flags=re.I))
+        # Targets end at the REPLACING clause (found outside literals): everything after
+        # it is `<category> DATA BY <value>`, whose keywords - and whose value literal,
+        # torn open by the whitespace split - used to come back as phantom targets.
+        tail = re.sub(r"^INITIALIZE\s+", "", core, flags=re.I)
+        parts = split_outside_literals(tail, "REPLACING")
+        notes = ["INITIALIZE sets each item to its category default"]
+        if parts:
+            tail = parts[0]
+            notes.append(f"REPLACING {parts[1].strip()} overrides the default for "
+                         f"that category")
+        targets = _operands(tail)
         return spec("initialize",
                     [{"target": t, "expr": "<type default>"} for t in targets],
-                    notes=["INITIALIZE sets each item to its category default"])
+                    notes=notes)
     elif verb in ("ACCEPT",):
         m = re.match(r"ACCEPT\s+([A-Z0-9-]+)", core, re.I)
         if m:
