@@ -61,6 +61,21 @@ def test_move_is_an_assignment():
     assert op["assignments"] == [{"target": "WS-EOF", "expr": "'Y'"}]
 
 
+def test_move_splits_at_the_keyword_to_not_one_inside_the_literal():
+    # 'CALL TO FRCEMAIL FAILED' contains ' TO ' as data. Splitting there produced four
+    # assignments - to FRCEMAIL, to `FAILED'`, to the keyword TO itself, and to the real
+    # target - each carrying the truncated expression `'CALL`.
+    op = parse_operation("MOVE 'CALL TO FRCEMAIL FAILED' TO WS-ERR-MSG")
+    assert op["assignments"] == [
+        {"target": "WS-ERR-MSG", "expr": "'CALL TO FRCEMAIL FAILED'"}]
+
+
+def test_move_with_multiple_targets_still_fans_out():
+    op = parse_operation("MOVE 'Y' TO WS-A WS-B")
+    assert op["assignments"] == [{"target": "WS-A", "expr": "'Y'"},
+                                 {"target": "WS-B", "expr": "'Y'"}]
+
+
 def test_add_to_is_accumulate_expression():
     op = parse_operation("ADD CUST-AMT TO WS-TOTAL")
     assert op["kind"] == "arith"

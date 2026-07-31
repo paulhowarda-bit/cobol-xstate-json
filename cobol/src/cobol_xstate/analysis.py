@@ -19,8 +19,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
 from .model import Action, Program, walk_statements
+from .semantics import split_outside_literals
 
-_MOVE_RE = re.compile(r"^MOVE\s+(.+?)\s+TO\s+(.+)$", re.I)
+_MOVE_RE = re.compile(r"^MOVE\s+(.+)$", re.I)
+# SET's pre-TO operands are condition-names/indexes - never quoted literals - so this
+# split cannot land inside one and needs no literal masking.
 _SET_TRUE_RE = re.compile(r"^SET\s+(.+?)\s+TO\s+TRUE\b", re.I)
 _NAME_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]*$", re.I)
 # Runs for every MOVE / SET in the program - compiled once, like its neighbours.
@@ -128,10 +131,16 @@ def analyze_calls(program: Program) -> CallAnalysis:
             verb = st.verb.upper()
             if verb == "MOVE":
                 m = _MOVE_RE.match(st.text.strip())
-                if not m:
+                # Split at the KEYWORD TO, never at a ` TO ` inside the moved literal:
+                # `MOVE 'CALL TO FRCEMAIL FAILED' TO WS-ERR-MSG` torn at the first TO
+                # records the phantom assignment FRCEMAIL := 'CALL', and a dynamic
+                # `CALL FRCEMAIL` then resolves - confidently - to a program named
+                # CALL. The one wrong answer this whole analysis exists not to give.
+                parts = split_outside_literals(m.group(1), "TO") if m else None
+                if parts is None:
                     continue
-                source = m.group(1).strip()
-                targets = [t for t in _SPLIT_OPERANDS.split(m.group(2).strip())
+                source = parts[0].strip()
+                targets = [t for t in _SPLIT_OPERANDS.split(parts[1].strip())
                            if _NAME_RE.match(t)]
                 if source[:1] in ("'", '"'):
                     lit = source.strip("'\"").rstrip()

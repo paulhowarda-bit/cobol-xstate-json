@@ -17,11 +17,36 @@ float - are captured as annotations on the operation, not silently dropped.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # data_division.DataItem, but we only touch a few attributes - keep it duck-typed.
 
 _NUM = re.compile(r"^[+-]?\d+(\.\d+)?$")
+
+# A quoted alphanumeric literal is DATA, not syntax - the words inside it must never be
+# read as keywords. Same rule, same idiom as `data_division._QUOTED` (a VALUE literal
+# must not be read as a clause) and `naming._QUOTED` (a literal's case is data). The
+# canonical failure this exists for: `MOVE 'CALL TO FRCEMAIL FAILED' TO WS-ERR-MSG`
+# torn at the ` TO ` INSIDE the message, which manufactures a literal assignment
+# `FRCEMAIL := 'CALL'` - and a dynamic `CALL FRCEMAIL` then "resolves", confidently, to
+# a program named CALL. A doubled quote inside a literal (`'DON''T'`) parses as two
+# adjacent literals here, which masks the same span, so it needs no special case.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def split_outside_literals(text: str, keyword: str) -> Optional[Tuple[str, str]]:
+    """Split ``text`` at the first whitespace-delimited ``keyword`` OUTSIDE any quoted
+    literal; ``None`` when no such keyword exists.
+
+    The scan runs over a copy with every literal masked to non-whitespace filler (same
+    length, so positions carry back to the real text); the split then slices the
+    ORIGINAL text, literals intact.
+    """
+    masked = _QUOTED.sub(lambda m: "\x00" * (m.end() - m.start()), text)
+    m = re.search(rf"\s+{re.escape(keyword)}\s+", masked, flags=re.I)
+    if m is None:
+        return None
+    return text[:m.start()], text[m.end():]
 
 # A subscripted / reference-modified reference: collapse the space between the name and
 # its `(` so `NAME ( ... )` survives downstream whitespace splitting as one token. The
@@ -140,10 +165,15 @@ def parse_operation(text: str, data: Optional[Dict] = None) -> Optional[dict]:
         return d
 
     if verb == "MOVE":
-        m = re.match(r"MOVE\s+(.+?)\s+TO\s+(.+)$", core, re.I)
-        if m:
-            src = m.group(1).strip()
-            targets = _operands(m.group(2))
+        # Split at the KEYWORD TO, not the first ` TO ` - the first one may sit inside
+        # the moved literal (`MOVE 'CALL TO FRCEMAIL FAILED' TO WS-ERR-MSG`), and tearing
+        # there emitted assignments to phantom targets (FRCEMAIL, TO, even `FAILED'`)
+        # with the truncated expression `'CALL`.
+        m = re.match(r"MOVE\s+(.+)$", core, re.I)
+        parts = split_outside_literals(m.group(1), "TO") if m else None
+        if parts:
+            src = parts[0].strip()
+            targets = _operands(parts[1])
             return spec("assign", [{"target": t, "expr": src} for t in targets])
     elif verb == "ADD":
         return _arith_add(core, spec)

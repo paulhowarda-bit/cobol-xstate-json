@@ -146,6 +146,34 @@ def test_dynamic_call_from_variable_stays_flagged():
     assert "runtime-determined" in msgs
 
 
+def test_keywords_inside_moved_literals_are_data_not_syntax():
+    """The words inside a quoted literal must never be read as the MOVE's own TO.
+
+    `MOVE 'CALL TO FRCEMAIL FAILED' TO WS-ERR-MSG` torn at the ` TO ` INSIDE the
+    message manufactured the phantom assignment FRCEMAIL := 'CALL', and the dynamic
+    `CALL FRCEMAIL` then resolved - confidently - to a program named CALL. The one
+    wrong answer the analysis exists not to give: it asserted, it did not flag.
+    """
+    machine = _machine((EXAMPLES / "errlit.cbl").read_text())
+    actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
+    # FRCEMAIL's only real assignment is MOVE 'PGMEMAIL'; the message contributes
+    # nothing, so the call resolves to PGMEMAIL - not to CALL, and not to a
+    # two-candidate flag.
+    assert "call_PGMEMAIL" in actions
+    assert not any("call_CALL" == a for a in actions)
+    # The end-of-literal shape ('UNABLE TO REACH PAYCALC') must not poison the
+    # VALUE-clause resolution either.
+    assert "call_PAYCALC" in actions
+    # And the messages themselves survive whole: the MOVE assigns the full literal to
+    # its one real target, no phantom targets, no truncated 'CALL expression.
+    ops = machine.semantics["actions"]
+    moves = [a for op in ops.values() if op.get("verb") == "MOVE"
+             for a in op.get("assignments", [])]
+    assert {"target": "WS-ERR-MSG", "expr": "'CALL TO FRCEMAIL FAILED'"} in moves
+    assert not any(a["target"] in ("FRCEMAIL", "TO", "REACH", "FAILED'")
+                   for a in moves if a["expr"].startswith("'CALL"))
+
+
 _CICS_LINK_SRC = (
     "       IDENTIFICATION DIVISION.\n"
     "       PROGRAM-ID. LNKT.\n"
