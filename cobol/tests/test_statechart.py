@@ -634,3 +634,31 @@ def test_varying_is_not_conjured_from_inside_a_literal():
     assert _parse_varying("UNTIL WS-X = 'AFTER Y FROM 1 BY 2'") == []
     assert _parse_varying("VARYING I FROM 1 BY 1 AFTER J FROM 1 BY 2") == [
         ("I", "1", "1"), ("J", "1", "2")]
+
+
+def test_overflow_inside_a_string_literal_is_not_flagged():
+    """STRING exists to build messages, and 'BUFFER OVERFLOW IN ...' is exactly the
+    message it builds - flagging the literal's own words is noise that erodes trust in
+    the flag channel. The REAL ON OVERFLOW handler must still flag."""
+    machine = _machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-MOD  PIC X(8).\n"
+        "       01  WS-MSG  PIC X(40).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           STRING 'BUFFER OVERFLOW IN ' WS-MOD DELIMITED BY SIZE\n"
+        "               INTO WS-MSG\n"
+        "           END-STRING\n"
+        "           STRING WS-MOD INTO WS-MSG ON OVERFLOW DISPLAY 'X'\n"
+        "           END-STRING\n"
+        "           STOP RUN.\n")
+    overflow_flags = [f for f in machine.flags if "OVERFLOW" in f["message"]]
+    # One flag, and ON THE REAL HANDLER's line. The count alone cannot tell noise from
+    # signal here: identical flag messages dedupe, so the pre-fix code ALSO produced
+    # exactly one - attached to the message literal (line 9), with the real handler's
+    # flag swallowed by the dedupe. The line is the discriminating fact.
+    assert len(overflow_flags) == 1
+    assert overflow_flags[0]["line"] == 12   # the STRING with the real ON OVERFLOW

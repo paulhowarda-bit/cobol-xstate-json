@@ -526,3 +526,38 @@ def test_find_program_id_ignores_a_hyphenated_data_name():
         "       01  WS-SAVED-PROGRAM-ID PIC X(8).\n"
         "       PROGRAM-ID. REALPGM.\n")
     assert _find_program_id(lines) == "REALPGM"
+
+
+# -- a literal is data, not clause boundaries (audit finding #12) -----------
+
+def test_select_clause_survives_a_dataset_literal_containing_select():
+    """`ASSIGN TO 'PROD.SELECT.DATA'` cut THIS entry's body at the SELECT inside its own
+    literal - losing the dataset, the ORGANIZATION, and the FILE STATUS binding that
+    the JCL join and the perimeter both need."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT F1 ASSIGN TO 'PROD.SELECT.DATA'\n"
+        "               ORGANIZATION IS SEQUENTIAL\n"
+        "               FILE STATUS IS WS-FS1.\n"
+        "           SELECT F2 ASSIGN TO OUTDD.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  F1.\n"
+        "       01  R1  PIC X(10).\n"
+        "       FD  F2.\n"
+        "       01  R2  PIC X(10).\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-FS1  PIC XX.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           STOP RUN.\n")
+    files = parse_program(src).files
+    assert files["F1"]["assign"] == "PROD.SELECT.DATA"
+    assert files["F1"]["organization"] == "SEQUENTIAL"
+    assert files["F1"]["statusField"] == "WS-FS1"
+    # ...and the literal did not swallow the NEXT entry either.
+    assert files["F2"]["assign"] == "OUTDD"
