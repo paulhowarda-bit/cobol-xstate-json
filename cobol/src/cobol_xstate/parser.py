@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
 from .data_division import parse_data_division
+from .semantics import mask_literals
 from .preprocessor import CopybookResolver, preprocess
 from .model import (
     Action,
@@ -278,9 +279,13 @@ def _parse_file_control(lines: List[CodeLine]) -> Dict[str, dict]:
         return {}
     text = " ".join(cl.text for cl in lines[start:end if end is not None else len(lines)])
     files: Dict[str, dict] = {}
-    for m in _SELECT_RE.finditer(text):
+    # Clause boundaries found on the MASKED text, bodies sliced from the original: an
+    # ASSIGN literal can legally contain the word SELECT (`ASSIGN TO 'PROD.SELECT.DATA'`),
+    # and the lookahead used to cut this entry's body there - losing the dataset, the
+    # ORGANIZATION, and the FILE STATUS binding that the JCL join and the perimeter need.
+    for m in _SELECT_RE.finditer(mask_literals(text)):
         name = m.group(1).upper()
-        body = m.group(2)
+        body = text[m.start(2):m.end(2)]
         entry: Dict[str, object] = {"file": name}
         am = re.search(r"\bASSIGN\s+(?:TO\s+)?([A-Z0-9$#@.-]+|'[^']*'|\"[^\"]*\")",
                        body, re.I)

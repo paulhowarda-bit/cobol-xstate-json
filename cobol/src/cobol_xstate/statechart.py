@@ -498,7 +498,11 @@ class _ParaCompiler:
             # STRING/UNSTRING are consumed opaquely up to their END- terminator; an inner
             # ON OVERFLOW is a conditional branch we fold away - flag it so it is not
             # silently lost (SEARCH is modeled as real structure, see compile_search).
-            if st.verb in ("STRING", "UNSTRING") and re.search(r"\bOVERFLOW\b", st.text, re.I):
+            # Masked: STRING exists to build messages, and 'BUFFER OVERFLOW IN ...' is
+            # exactly the message it builds - a flag on the literal's own words is
+            # noise that erodes trust in the flag channel.
+            if st.verb in ("STRING", "UNSTRING") and \
+                    re.search(r"\bOVERFLOW\b", mask_literals(st.text), re.I):
                 self.ctx.flag(self.pname, st.line,
                               f"{st.verb} ON OVERFLOW handler is folded into the opaque "
                               f"action; its conditional branch is not modeled - verify")
