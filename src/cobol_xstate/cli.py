@@ -11,15 +11,21 @@ from typing import List, Optional
 
 # Shared with the JCL front-end: the estate boundary, retrieval, and the CLI plumbing
 # both CLIs repeat. Core never imports back into this package.
-from cobol_xstate_core.artifact_service import (DEFAULT_FETCHER, decode_member,
-                                                load_fetcher)
-from cobol_xstate_core.fetch import fetch_dependencies
+from cobol_xstate_core.artifact_service import decode_member, load_fetcher
+from cobol_xstate_core.bundle import open_bundle
+from cobol_xstate_core.cliargs import (add_logging_args, add_output_args,
+                                       add_retrieval_args, jobs as _jobs)
+from cobol_xstate_core.detect import looks_like_jcl as _looks_like_jcl
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
+from cobol_xstate_core.output import make_run_dir as _make_run_dir
+from cobol_xstate_core.output import run_dir as _run_dir_of
+from cobol_xstate_core.output import write_json, write_text
 from cobol_xstate_core.profiling import StageTimer
+from cobol_xstate_core.report import report_stages as _report_stages
 
 from . import PACKAGE_LOGGER
-from .api import analyze
+from .api import analyze, gather
 from .bind import JclSupportMissing
 from .bind import jcl_api as _jcl_api
 from .errors import CobolXstateError
@@ -56,42 +62,6 @@ def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
     return default_stem or program_id or "machine"
 
 
-def _jobs(args) -> int:
-    """How many members may be in flight at once, floored at 1.
-
-    Clamped rather than rejected: ``--jobs 0`` means "do not overlap", which is a
-    coherent thing to ask for and is what 1 does. It reaches every retrieval call site in
-    both run paths - a flag that got as far as one stage and not the other would leave
-    half a run sequential while the help text said otherwise, which is how --copybook-ext
-    was wrong before it."""
-    return max(1, int(getattr(args, "jobs", 1) or 1))
-
-
-def _run_dir(args) -> Path:
-    """The one directory this run writes into: exactly ``--outdir``, as given.
-
-    Everything lands here - the bundle, every companion view, both retrieval reports, the
-    retrieved artifacts (under ``deps/``), and the JS runtime. ``--outdir`` is taken
-    literally: the path you give is the path files appear in, with nothing appended.
-    There is deliberately no second mechanism that can place a file somewhere else."""
-    return Path(args.outdir)
-
-
-def _make_run_dir(run_dir: Path) -> Optional[str]:
-    """Create the run directory, or return the message explaining why we cannot.
-
-    ``exist_ok=True`` only forgives an existing DIRECTORY, so pointing --outdir at an
-    existing regular file raised FileExistsError out of main() as a raw traceback -
-    while the neighbouring bad-path cases all report cleanly and exit 2."""
-    try:
-        run_dir.mkdir(parents=True, exist_ok=True)
-    except (FileExistsError, NotADirectoryError):
-        return f"--outdir {run_dir} exists and is not a directory"
-    except OSError as exc:
-        return f"cannot create --outdir {run_dir}: {exc}"
-    return None
-
-
 def _resolve_out_path(args, base: str, run_dir: Path) -> Path:
     """Where this run's primary artifact goes."""
     return run_dir / f"{base}{_TARGET_EXT.get(args.target, '.json')}"
@@ -104,12 +74,6 @@ def build_parser() -> argparse.ArgumentParser:
                     "XState v5 JSON Harel statechart (a modernization rewrite contract).",
     )
     p.add_argument("source", help="path to a COBOL source file ('-' for stdin)")
-    p.add_argument("--outdir", default="out", metavar="DIR",
-                   help="directory for output (default: ./out). EVERY file this run "
-                        "produces goes here, exactly as given with nothing appended - "
-                        "the bundle, all six views, both retrieval reports, and the "
-                        "artifacts retrieved from the estate (under deps/). Created "
-                        "with parents if it does not exist.")
     p.add_argument("--target",
                    choices=["json", "js", "reactive", "business", "lineage",
                             "artifacts"],
@@ -140,14 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar="DIR", help="copybook search directory (repeatable)")
     p.add_argument("--copybook-ext", action="append", default=[], metavar="EXT",
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
-    p.add_argument("--copybook-fetcher", "--fetcher", dest="copybook_fetcher",
-                   metavar="MODULE:FUNC",
-                   help=f"override the estate artifact service. Every run retrieves its "
-                        f"dependencies through {DEFAULT_FETCHER} by default - only the "
-                        f"estate knows where its members live - so this is needed only "
-                        f"for a differently-named client. FUNC(name, type=, copy=) may "
-                        f"return the member text, (text, source), or a dict with "
-                        f"text/path/copied_to/detected_type/alternatives")
+    add_retrieval_args(p)
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--no-lineage", action="store_true",
@@ -171,43 +128,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolves gains 'dataset' and 'boundBy' (job/step, with the "
                         "step's run conditions) in the artifacts view - the ddname->DSN "
                         "join closed.")
-    p.add_argument("--jobs", type=int, default=8, metavar="N",
-                   help="how many members to request from the estate service at once "
-                        "(default: 8). Retrieval is most of a run's wall clock and the "
-                        "requests do not depend on each other, so they overlap. The "
-                        "reports are byte-identical at any N - row order follows the "
-                        "plan, never the order answers arrive. Use --jobs 1 for a "
-                        "strictly sequential run (no threads at all) if your estate "
-                        "client is not thread-safe or you must not load it up.")
-    p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
-    p.add_argument("--summary", action="store_true",
-                   help="print a human-readable summary to stderr")
-    p.add_argument("--timing", action="store_true",
-                   help="print per-stage wall-clock timings to stderr (diagnostic; "
-                        "does not affect any output file)")
-    p.add_argument("-v", "--verbose", action="count", default=0,
-                   help="increase log detail: -v adds DEBUG (swallowed tracebacks and "
-                        "internal steps). Diagnostics go to stderr; stdout is unaffected.")
-    p.add_argument("-q", "--quiet", action="count", default=0,
-                   help="reduce log detail: -q shows only warnings and errors (hides "
-                        "progress), -qq shows only errors.")
-    p.add_argument("--debug", action="store_true",
-                   help="on an unexpected internal error, print the full Python traceback "
-                        "instead of a one-line message (for bug reports). Implies -v.")
+    add_output_args(p, outdir_help=(
+        "directory for output (default: ./out). EVERY file this run produces goes here, "
+        "exactly as given with nothing appended - the bundle, all six views, both "
+        "retrieval reports, and the artifacts retrieved from the estate (under deps/). "
+        "Created with parents if it does not exist."))
+    add_logging_args(p)
     return p
-
-
-def _looks_like_jcl(source_name: str, source: str) -> bool:
-    """JCL by extension, or by a leading ``//NAME JOB/PROC`` statement (a COBOL source
-    never begins that way, so this does not misfire on COBOL)."""
-    if source_name.lower().rsplit(".", 1)[-1] in ("jcl", "prc", "proc"):
-        return True
-    for line in source.splitlines():
-        s = line.strip()
-        if not s or s.startswith("//*"):
-            continue
-        return bool(re.match(r"^//\S*\s+(JOB|PROC)\b", s, re.I))
-    return False
 
 
 def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
@@ -227,7 +154,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
     # Same ordering constraint as the COBOL path: prefetch writes into the run directory,
     # so the directory's name must be known before anything is parsed. The JOB/PROC name
     # is on the first statement, so scan for it.
-    run_dir = _run_dir(args)
+    run_dir = _run_dir_of(args.outdir)
     err = _make_run_dir(run_dir)
     if err:
         _log.error(f"error: {err}")
@@ -255,7 +182,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
         path = run_dir / f"{base}{suffix}"
         path.write_text(_json.dumps(obj, indent=args.indent) + "\n", encoding="utf-8")
         _log.info(f"[{source_name}] wrote {path}")
-    _report_stages(source_name, pre, fetched)
+    _report_stages(_log, source_name, pre, fetched)
 
     if args.summary:
         lineage = analysis.lineage()
@@ -268,31 +195,6 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
             _log.info(f"  FLAG {f}")
     timer.report()
     return 0
-
-
-def _report_stages(source_name: str, pre, fetched: dict) -> None:
-    """One line per stage on stderr, plus the holes named individually.
-
-    The holes get named rather than counted because every downstream view is read as if
-    it were complete. A member that did not arrive is the reason a dynamic CALL stayed
-    unresolved or a job looks like it has fewer steps than it runs, and a reader who
-    cannot see which member that was has no way to tell an accurate model from a short
-    one."""
-    pc, fc = pre.counts, fetched.get("counts", {})
-    _log.info(f"[{source_name}] prefetch: "
-          f"{pc.get('fetched', 0)} fetched, {pc.get('local', 0)} local, "
-          f"{pc.get('not-found', 0)} not-found, {pc.get('error', 0)} error"
-          + (f", {pc.get('no-service', 0)} never looked for"
-             if pc.get("no-service") else ""))
-    _log.info(f"[{source_name}] fetch: "
-          f"{fc.get('fetched', 0)} fetched, {fc.get('prefetched', 0)} already in hand, "
-          f"{fc.get('not-found', 0)} not-found, {fc.get('error', 0)} error, "
-          f"{fc.get('skipped', 0)} not fetchable")
-    for member in pre.missing:
-        _log.warning(f"  MISSING {member}: the source text is incomplete without it - data "
-              f"items or steps it defines are NOT in the model")
-    for err in fetched.get("errors", []):
-        _log.warning(f"  FETCH ERROR {err['artifact']}: {err['error']}")
 
 
 def _service(args, source_name: str):
@@ -373,10 +275,30 @@ def _run(args, timing_sink=None) -> int:
 
     timer = StageTimer(_log, args.timing, source_name, sink=timing_sink)
 
+    if args.gather_only and args.from_bundle:
+        _log.error("error: --gather-only writes a bundle and --from-bundle reads one; "
+                   "they cannot both apply to a single run")
+        return 2
+
+    bundle = None
+    if args.from_bundle:
+        try:
+            bundle = open_bundle(args.from_bundle)
+        except CobolXstateError as exc:
+            _log.error(f"error: {exc}")
+            return 2
+        # Not fatal: re-modelling an edited source against the same estate is a
+        # legitimate thing to do. But if the program changed enough to COPY something
+        # new, the bundle will have no record of it, and knowing why is worth a line.
+        if bundle.source() != source:
+            _log.warning(f"[{source_name}] WARNING: this source differs from the one "
+                         f"the bundle was gathered for ({bundle.subject_name}); any "
+                         f"member it did not ask for is not in the bundle")
+
     # STAGE 1 runs before the parse, and it writes into the run directory - so the
     # directory has to be settled first, before anything is parsed.
-    fetcher, why = _service(args, source_name)
-    run_dir = _run_dir(args)
+    fetcher, why = (None, None) if bundle is not None else _service(args, source_name)
+    run_dir = _run_dir_of(args.outdir)
     err = _make_run_dir(run_dir)
     if err:
         _log.error(f"error: {err}")
@@ -394,11 +316,26 @@ def _run(args, timing_sink=None) -> int:
             return 2
         jcl_sources.append((jp.name, decode_member(jp.read_bytes())))
 
+    # --gather-only: the retrieval half alone, on the box that can reach the estate.
+    # Both stages still run - stage 2's plan needs the parse - but no view is written,
+    # because the product of this mode is the bundle.
+    if args.gather_only:
+        gathered = gather(source, source_name=source_name, fmt=_format(args.format),
+                          fetcher=fetcher, paths=search_paths,
+                          exts=tuple(args.copybook_ext), dest=args.gather_only,
+                          unavailable=why, jobs=_jobs(args))
+        _log.info(f"[{source_name}] wrote estate bundle {gathered}")
+        _log.info(f"[{source_name}] model from it with: --from-bundle "
+                  f"{args.gather_only}")
+        timer.report()
+        return 0
+
     try:
         analysis = analyze(source, source_name=source_name, fmt=_format(args.format),
                            fetcher=fetcher, paths=search_paths,
                            exts=tuple(args.copybook_ext), dest=deps, unavailable=why,
-                           jobs=_jobs(args), jcl=jcl_sources, timer=timer)
+                           jobs=_jobs(args), jcl=jcl_sources, timer=timer,
+                           bundle=bundle, retrieve=not args.no_fetch)
     except JclSupportMissing as exc:
         _log.error(f"error: {exc}")
         return 2
@@ -494,7 +431,7 @@ def _run(args, timing_sink=None) -> int:
             path = out_path.with_name(f"{base}{suffix}")
             _write(path, _json.dumps(obj, indent=args.indent) + "\n")
             _log.info(f"[{source_name}] wrote {path}")
-    _report_stages(source_name, pre, report)
+    _report_stages(_log, source_name, pre, report)
 
     _t_views = timer.start()
     if args.target in ("business", "lineage", "artifacts"):
