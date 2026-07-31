@@ -344,3 +344,84 @@ def test_a_data_item_named_title_is_not_eaten():
         "       0000-MAIN.\n"
         "           MOVE 'X' TO TITLE-LINE.\n")
     assert "TITLE-LINE" in prog.data_by_name
+
+
+# -- literals are data, not syntax (audit findings #7 + COPY-hyphen) -------
+
+def test_replacing_never_rewrites_inside_a_quoted_literal(tmp_path):
+    """COPY REPLACING matches text-words, and a quoted literal is ONE text-word: the
+    compiler never substitutes inside it. Doing so rewrote VALUE literals - and since
+    VALUE literals feed dynamic-CALL constant propagation, a rewritten one could make a
+    CALL "resolve", confidently, to a program that does not exist."""
+    resolver = _write(tmp_path, "MSGS.cpy",
+                      "       01  MSG-AREA.\n"
+                      "           05  MSG-TXT   PIC X(20) VALUE 'ABC FAILED'.\n"
+                      "           05  ABC       PIC X(3).\n")
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY MSGS REPLACING ABC BY XYZ.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-X.\n"
+        "           STOP RUN.\n"
+    )
+    program = parse_program(src, resolver=resolver)
+    # The text-word ABC (the field name) is replaced ...
+    assert "XYZ" in program.data_by_name
+    assert "ABC" not in program.data_by_name
+    # ... but the literal's contents are untouched.
+    assert program.data_by_name["MSG-TXT"].value == "'ABC FAILED'"
+
+
+def test_replacing_a_literal_operand_still_replaces_whole_literals(tmp_path):
+    """An operand that is ITSELF a literal can only ever match a whole literal (quotes
+    included), so it must keep working."""
+    resolver = _write(tmp_path, "LITS.cpy",
+                      "       01  LIT-FLD   PIC X(7) VALUE 'DEFAULT'.\n")
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY LITS REPLACING 'DEFAULT' BY 'SPECIAL'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-X.\n"
+        "           STOP RUN.\n"
+    )
+    program = parse_program(src, resolver=resolver)
+    assert program.data_by_name["LIT-FLD"].value == "'SPECIAL'"
+
+
+def test_a_hyphenated_name_ending_in_copy_is_not_a_copy_statement():
+    """`\b` fires after a hyphen, so `\bCOPY\b` read `ADD 1 TO CTR-COPY TOTALS.` as
+    `COPY TOTALS.` - discovering a phantom copybook (prefetched from the estate by
+    name) AND consuming the ADD statement. Same defect class as the PROGRAM-ID fix
+    (5f787a9): a hyphen is a word character in COBOL."""
+    from cobol_xstate.preprocessor import scan_copy_members
+    assert scan_copy_members("       ADD 1 TO CTR-COPY TOTALS.\n") == []
+    # The real statement still parses - and is still an ADD, not a COPY.
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  CTR-COPY   PIC 9(4) VALUE 0.\n"
+        "       01  TOTALS     PIC 9(4) VALUE 0.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-X.\n"
+        "           ADD 1 TO CTR-COPY.\n"
+        "           STOP RUN.\n"
+    )
+    program = parse_program(src)
+    assert program.copybooks == []
+    texts = " ".join(getattr(st, "text", "") for p in program.paragraphs
+                     for st in p.statements)
+    assert "ADD 1 TO CTR-COPY" in texts
+
+
+def test_real_copy_statements_still_resolve():
+    from cobol_xstate.preprocessor import scan_copy_members
+    assert scan_copy_members("       COPY CUSTREC.\n") == ["CUSTREC"]
+    assert scan_copy_members("       COPY 'MYLIB'.\n") == ["MYLIB"]

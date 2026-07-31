@@ -128,8 +128,13 @@ class PreprocessResult:
     copybooks: List[dict] = field(default_factory=list)
 
 
+# `(?<![A-Z0-9-])`: `\b` alone fires after a hyphen, so `\bCOPY\b` matched the tail of a
+# data name - `ADD 1 TO CTR-COPY TOTALS.` read as `COPY TOTALS.`, which both discovered
+# a phantom copybook (prefetched from the estate by name) and CONSUMED the ADD statement.
+# Same defect and same guard as the PROGRAM-ID fix (5f787a9): a hyphen is a word
+# character in COBOL even though the regex engine says otherwise.
 _COPY_RE = re.compile(
-    r"\bCOPY\b\s+([A-Z0-9$#@_.-]+|'[^']*'|\"[^\"]*\")"
+    r"(?<![A-Z0-9-])COPY\b\s+([A-Z0-9$#@_.-]+|'[^']*'|\"[^\"]*\")"
     r"(?:\s+(?:OF|IN)\s+[A-Z0-9$#@_-]+)?"
     r"(?:\s+REPLACING\s+(?P<rep>.*?))?\s*\.\s*$",
     re.I | re.S,
@@ -172,11 +177,39 @@ def _replacing_pattern(a: str):
     return re.compile(re.escape(a).replace(r"\ ", r"\s+"), re.I)
 
 
+# A quoted literal is ONE text-word to COPY REPLACING, exactly as it is one token to
+# the compiler - shared spelling of the rule data_division/_naming/semantics already
+# apply: the words inside a literal are data, not syntax.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
 def _apply_replacing(text: str, pairs: List[Tuple[str, str]]) -> str:
+    """Apply REPLACING pairs the way the compiler does: to text-words, never inside a
+    quoted literal.
+
+    ``REPLACING ABC BY XYZ`` over the copybook line ``05 X PIC X(9) VALUE 'ABC MSG'.``
+    must leave the literal alone - substituting inside it rewrote the VALUE, and since
+    VALUE literals feed dynamic-CALL constant propagation, that could make a CALL
+    "resolve", confidently, to a program that does not exist. An operand that is
+    ITSELF a literal (``REPLACING 'ABC' BY 'XYZ'``) still works: quotes included, it
+    can only ever match a whole literal, so it runs over the full text.
+    """
     for a, b in pairs:
         if not a:
             continue
-        text = _replacing_pattern(a).sub(b.replace("\\", r"\\"), text)
+        pat = _replacing_pattern(a)
+        rb = b.replace("\\", r"\\")
+        if a[:1] in ("'", '"'):
+            text = pat.sub(rb, text)
+            continue
+        out: List[str] = []
+        pos = 0
+        for m in _QUOTED.finditer(text):
+            out.append(pat.sub(rb, text[pos:m.start()]))
+            out.append(m.group(0))          # the literal, verbatim
+            pos = m.end()
+        out.append(pat.sub(rb, text[pos:]))
+        text = "".join(out)
     return text
 
 
