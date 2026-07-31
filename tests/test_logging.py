@@ -15,7 +15,7 @@ import logging
 
 import pytest
 
-from cobol_xstate import cli
+from cobol_xstate import api, cli
 from cobol_xstate.cli import run
 from cobol_xstate.errors import (
     CobolXstateError,
@@ -200,7 +200,7 @@ def _raise(exc):
 
 
 def test_unexpected_error_is_reported_without_a_traceback(pkg_logger, tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(cli, "build_machine", _raise(ValueError("kaboom")))
+    monkeypatch.setattr(api, "build_machine", _raise(ValueError("kaboom")))
     rc = run([_src(tmp_path), "--outdir", str(tmp_path / "o")])
     err = capsys.readouterr().err
     assert rc == 1
@@ -209,13 +209,13 @@ def test_unexpected_error_is_reported_without_a_traceback(pkg_logger, tmp_path, 
 
 
 def test_debug_flag_reraises_the_full_traceback(pkg_logger, tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "build_machine", _raise(ValueError("kaboom")))
+    monkeypatch.setattr(api, "build_machine", _raise(ValueError("kaboom")))
     with pytest.raises(ValueError):
         run([_src(tmp_path), "--outdir", str(tmp_path / "o"), "--debug"])
 
 
 def test_expected_error_reports_its_message_not_a_traceback(pkg_logger, tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(cli, "build_machine",
+    monkeypatch.setattr(api, "build_machine",
                         _raise(CobolXstateError("no PROCEDURE DIVISION found")))
     rc = run([_src(tmp_path), "--outdir", str(tmp_path / "o")])
     err = capsys.readouterr().err
