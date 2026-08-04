@@ -26,8 +26,15 @@ from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
-FIXTURE = (Path(__file__).resolve().parents[2] / "jcl" / "tests" / "fixtures"
-           / "sqlunld.artifacts.json")
+# The consumer's copy lives in the jcl-dependencies REPOSITORY now (a sibling checkout
+# by default; point JCL_DEPENDENCIES_REPO elsewhere). Absent checkout -> the drift
+# check skips - the fast in-suite guard is the subset/join tests below, and the drift
+# check still runs wherever both repos are checked out together.
+import os
+
+FIXTURE = (Path(os.environ.get("JCL_DEPENDENCIES_REPO",
+                               Path(__file__).resolve().parents[3] / "jcl-dependencies"))
+           / "tests" / "fixtures" / "sqlunld.artifacts.json")
 
 
 def _manifest():
@@ -36,7 +43,7 @@ def _manifest():
 
 
 @pytest.mark.skipif(not FIXTURE.exists(),
-                    reason="the JCL package is not in this checkout")
+                    reason="no jcl-dependencies checkout beside this repo")
 def test_the_consumers_fixture_still_matches_what_this_package_produces():
     expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert _manifest() == expected, (

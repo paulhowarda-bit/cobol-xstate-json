@@ -19,7 +19,10 @@ dependencies = ["cobol-xstate-core>=0.1,<0.2"]
 # rather than a dependency because a COBOL install without it is a complete, working
 # install that simply cannot do that one join - and because the two are peers, so making
 # one require the other would settle a hierarchy that does not exist.
-jcl = ["jcl-dependencies>=0.1,<0.2"]
+# A direct git reference while jcl-dependencies is not on an index. Swap to a
+# version pin ("jcl-dependencies>=0.1,<0.2") when it is published - PyPI rejects
+# direct references in uploaded metadata.
+jcl = ["jcl-dependencies @ git+https://github.com/paulhowarda-bit/jcl-dependencies"]
 dev = ["pytest>=7"]
 
 [project.scripts]

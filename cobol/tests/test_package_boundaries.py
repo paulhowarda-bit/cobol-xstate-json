@@ -25,7 +25,7 @@ import pytest
 # is exactly the kind of cleverness that ends in a vacuous pass.
 _PREAMBLE = textwrap.dedent("""
     import sys
-    for _tree in ("core/src", "cobol/src", "jcl/src"):
+    for _tree in ("core/src", "cobol/src"):
         sys.path.insert(0, _tree)
 
     class Blocker:
@@ -66,21 +66,6 @@ def test_core_needs_neither_front_end():
     assert "OK" in proc.stdout
 
 
-def test_the_jcl_package_needs_no_cobol_modelling_engine():
-    """The environment-separation claim, at the code level: a JCL box that never
-    installed the COBOL package can still parse a job and build both of its views."""
-    proc = _run_isolated(["cobol_xstate"], """
-        from jcl_dependencies.api import analyze
-        a = analyze("//J JOB\\n//S EXEC PGM=IEFBR14\\n//D DD DSN=A.B,DISP=SHR\\n",
-                    retrieve=False)
-        assert len(a.job.steps) == 1
-        assert a.lineage()["datasets"]
-        assert a.artifacts()["artifacts"]
-        print("OK")
-    """)
-    assert proc.returncode == 0, proc.stderr
-    assert "OK" in proc.stdout
-
 
 def test_a_cobol_install_without_the_jcl_package_is_a_complete_install(tmp_path):
     """Everything except the one join keeps working, and a default run still writes all
@@ -103,13 +88,18 @@ def test_a_cobol_install_without_the_jcl_package_is_a_complete_install(tmp_path)
 def test_bind_jcl_without_the_jcl_package_says_exactly_what_to_install(tmp_path):
     """The failure has to be loud. A manifest that was never bound looks FINE - its file
     rows say exactly what an unbound run's rows say - so this must not degrade quietly."""
+    # The job file must EXIST: --bind-jcl checks the path before reaching for the JCL
+    # package, and a missing file is its own exit-2 with a different (wrong, for this
+    # test) message. Any job text will do - the point is the missing PACKAGE.
+    job = tmp_path / "some.jcl"
+    job.write_text("//J JOB\n//S EXEC PGM=IEFBR14\n", encoding="utf-8")
     proc = _run_isolated(["jcl_dependencies"], f"""
         import io, contextlib
         from cobol_xstate.cli import run
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = run(["cobol/examples/accum.cbl", "--outdir", {str(tmp_path / "o")!r},
-                      "--bind-jcl", "jcl/examples/acctunld.jcl", "-q"])
+                      "--bind-jcl", {str(job)!r}, "-q"])
         print("RC", rc)
         print(err.getvalue())
     """)
@@ -135,15 +125,3 @@ def test_importing_the_cobol_package_does_not_pull_in_the_jcl_one():
     assert "OK" in proc.stdout
 
 
-@pytest.mark.parametrize("module", ["parser", "views", "prefetch", "api"])
-def test_no_jcl_module_imports_a_front_end(module):
-    """Read the source rather than the runtime: an import inside a rarely-taken branch
-    would not show up in a passing import test."""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[2] / "jcl" / "src" / "jcl_dependencies"
-           / f"{module}.py").read_text(encoding="utf-8")
-    for line in src.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("import ", "from ")):
-            assert "cobol_xstate." not in stripped and "import cobol_xstate\n" not in stripped + "\n", \
-                f"jcl_dependencies/{module}.py imports the COBOL package: {stripped}"

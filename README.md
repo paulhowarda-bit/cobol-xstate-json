@@ -22,20 +22,21 @@ on runtime data is *flagged*, never smoothed over.
 
 ## Install
 
-**Three distributions ship from this repository** — a shared retrieval core and two
-peer front-ends. Neither front-end imports the other; a JCL install carries no COBOL
-modelling engine:
+**Two distributions ship from this repository** — a shared retrieval core and the COBOL
+front-end. The JCL front-end, [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies),
+lives in its own repository and depends only on the core. The two front-ends are peers:
+neither imports the other, and a JCL install carries no COBOL modelling engine:
 
-| Directory | Distribution | What it is |
+| Where | Distribution | What it is |
 |---|---|---|
 | `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle |
 | `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) |
-| `jcl/` | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`; also its own repository) |
+| its own repo | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) |
 
 ```bash
-python -m pip install -e core -e cobol    # COBOL work (core comes with it)
-python -m pip install -e jcl              # add the JCL front-end
-# from an index: pip install cobol-xstate[jcl]  adds the --bind-jcl join
+python -m pip install -e core -e cobol        # COBOL work (core comes with it)
+python -m pip install -e ../jcl-dependencies  # optional: the JCL front-end
+# or: pip install cobol-xstate[jcl]           # adds the --bind-jcl join
 
 cobol-xstate <file.cbl>            # the console scripts
 jcl-dependencies <job.jcl>
@@ -112,8 +113,9 @@ and a note — the other five still land.
 ### JCL / PROC
 
 The COBOL tells you what a program does, not the dataset it does it *to* — that binding lives
-in the JCL. The JCL side is its own front-end, **`jcl-dependencies`** (its own distribution
-and repository), emitting two views plus both retrieval reports:
+in the JCL. The JCL side is its own front-end, **[`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies)**
+(its own distribution and repository — that is where the JCL parser, its examples and its
+tests live), emitting two views plus both retrieval reports:
 
 ```bash
 jcl-dependencies acctunld.jcl    # -> out/acctunld.jcl.artifacts.json + .lineage.json
@@ -397,8 +399,9 @@ parsed carelessly.
 ## Development
 
 ```bash
-python -m pytest -q     # ~705 tests across core/tests, cobol/tests and jcl/tests
-                        # (the root pyproject puts all three src trees on sys.path)
+python -m pytest -q     # ~654 tests across core/tests and cobol/tests (the JCL suite
+                        # lives in the jcl-dependencies repository; the bridge tests
+                        # here find a sibling ../jcl-dependencies checkout automatically)
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -424,15 +427,15 @@ cobol/src/cobol_xstate/runtime/   package data, emitted alongside `--target js` 
                     (never executed by the converter itself):
                     cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
                     cobolDriver.mjs  (reference driver for the golden master)
-jcl/src/jcl_dependencies/     parser · views · prefetch · api · cli  (also maintained
-                    as its own repository)
 cobol/examples/     custrpt.cbl (canonical batch loop) · banktran.cbl (EVALUATE +
                     dynamic CALL) · altswitch.cbl (ALTER) · errlit.cbl (keywords
                     inside literals) · ... one fixture per construct
-jcl/examples/       acctunld.jcl · dailypost.jcl · condflow.jcl · copyrepr.jcl ·
-                    edvalid.prc
 goldens/ + tools/   the byte-stability ratchet (gate.py, byteproof*.py) and the
-                    separation proof (prove_separation.py)
+                    separation proof (prove_separation.py, which installs
+                    jcl-dependencies from its sibling checkout)
+
+The JCL front-end (parser · views · prefetch · api · cli, plus its examples, tests and
+its own ratchet) lives in the jcl-dependencies repository.
 ```
 
 ## License

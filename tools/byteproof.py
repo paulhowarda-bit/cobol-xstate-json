@@ -27,7 +27,9 @@ Deliberately estate-free: every example resolves its copybooks from examples/ al
 with no fetcher. That keeps the ratchet runnable on a laptop with no mainframe
 connection, and keeps the hashes from depending on what an estate happened to answer.
 The retrieval REPORTS (.prefetch.json / .fetch.json), which do depend on that, are
-covered separately by tools/byteproof_reports.py against a recorded fake client.
+covered separately by tools/byteproof_reports.py against a recorded fake client. The
+JCL views and reports are covered by the jcl-dependencies repository's own ratchet -
+that parser has exactly one source now, and its goldens live beside it.
 
 Usage:
     python tools/byteproof.py --record goldens/views.sha256
@@ -47,9 +49,8 @@ from typing import Callable, Dict, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "cobol" / "examples"
-JCL_EXAMPLES = REPO / "jcl" / "examples"
 
-for _tree in ("core/src", "cobol/src", "jcl/src"):
+for _tree in ("core/src", "cobol/src"):
     sys.path.insert(0, str(REPO / _tree))
 
 from cobol_xstate.artifacts import build_artifacts                    # noqa: E402
@@ -57,9 +58,6 @@ from cobol_xstate.business import build_business_view                 # noqa: E4
 from cobol_xstate.dynamic_calls import (annotate_artifacts,           # noqa: E402
                                         build_dynamic_calls)
 from cobol_xstate.emitter import emit_setup_module                    # noqa: E402
-from jcl_dependencies.parser import parse_jcl                       # noqa: E402
-from jcl_dependencies.views import (build_jcl_artifacts,              # noqa: E402
-                                    build_jcl_lineage)
 from cobol_xstate.lineage import build_lineage                        # noqa: E402
 from cobol_xstate.normalizer import detect_source_format              # noqa: E402
 from cobol_xstate.parser import parse_program                         # noqa: E402
@@ -88,8 +86,7 @@ def normalize(text: str) -> str:
     Most specific root first: the examples directories sit under the repo root, so
     replacing the repo root first would leave their tails unnormalized.
     """
-    for root, token in ((EXAMPLES, "<EXAMPLES>"), (JCL_EXAMPLES, "<JCL_EXAMPLES>"),
-                        (REPO, "<REPO>")):
+    for root, token in ((EXAMPLES, "<EXAMPLES>"), (REPO, "<REPO>")):
         for form in (str(root), str(root).replace("\\", "/"),
                      str(root).replace("\\", "\\\\")):
             text = text.replace(form, token)
@@ -157,16 +154,6 @@ def cobol_views(path: Path) -> Dict[str, str]:
     }
 
 
-def jcl_views(path: Path) -> Dict[str, str]:
-    """The JCL views, parsed with NO resolver - so an unresolved PROC stays unresolved
-    and is hashed as such. Supplying one would make the hashes depend on the estate."""
-    source = path.read_text(encoding="utf-8", errors="replace")
-    job = parse_jcl(source, resolver=None, source_name=path.name)
-    return {
-        "jcl.lineage": guarded(lambda: json_text(build_jcl_lineage(job))),
-        "jcl.artifacts": guarded(lambda: json_text(build_jcl_artifacts(job))),
-    }
-
 
 def build_manifest() -> Dict[str, str]:
     """key -> sha256, over every example. Sorted so the file is diff-friendly and the
@@ -175,11 +162,6 @@ def build_manifest() -> Dict[str, str]:
     for src in sorted(EXAMPLES.glob("*.cbl")):
         for view, text in cobol_views(src).items():
             out[f"{src.name}::{view}"] = digest(text)
-    for src in sorted(JCL_EXAMPLES.iterdir()) if JCL_EXAMPLES.is_dir() else []:
-        if src.suffix.lower() not in (".jcl", ".prc", ".proc"):
-            continue
-        for view, text in jcl_views(src).items():
-            out[f"jcl/{src.name}::{view}"] = digest(text)
     return dict(sorted(out.items()))
 
 

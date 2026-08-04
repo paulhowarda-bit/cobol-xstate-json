@@ -11,11 +11,8 @@ import json
 
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
-from jcl_dependencies.parser import parse_jcl
-from jcl_dependencies.views import build_jcl_artifacts
 from cobol_xstate.parser import parse_program
 from cobol_xstate.prefetch import attribute_resolution, prefetch_cobol
-from jcl_dependencies.prefetch import prefetch_jcl
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.statechart import build_machine
 
@@ -41,25 +38,10 @@ CALLER = (
     "           GOBACK.\n"
 )
 
-# A job whose only step EXECs a cataloged PROC. Everything real is inside the PROC.
-JOB = (
-    "//PAYJOB   JOB (ACCT),'PAYROLL'\n"
-    "//STEP1    EXEC PAYPROC\n"
-)
-PAYPROC = (
-    "//PAYPROC  PROC\n"
-    "//PS1      EXEC PGM=DCIOC104\n"
-    "//SYSIN    DD DSN=PARM.LIB(SORTCRD),DISP=SHR\n"
-    "//OUT      DD DSN=PROD.PAY.MASTER,DISP=SHR\n"
-    "//         PEND\n"
-)
-SORTCRD = "  SORT FIELDS=(1,8,CH,A)\n"
 
 ESTATE = {
     "SUBPGMS": SUBPGM_CPY,
     "RATESCPY": RATES_CPY,
-    "PAYPROC": PAYPROC,
-    "SORTCRD": SORTCRD,
 }
 
 
@@ -135,21 +117,6 @@ def test_the_manifest_says_which_rows_it_owes_to_prefetch():
     assert row["resolvedBy"]["member"] == "SUBPGMS"
 
 
-def test_a_jcl_step_inside_a_cataloged_proc_appears_only_after_prefetch():
-    """The control-file half of the same failure. Every real step of PAYJOB lives in
-    PAYPROC; parsed without it the job has no programs and no datasets at all."""
-    blind = build_jcl_artifacts(parse_jcl(JOB, resolver=None))
-    assert not [r for r in blind["artifacts"] if r["kind"] == "program"]
-
-    pre = prefetch_jcl(JOB, _mf())
-    job = parse_jcl(JOB, resolver=pre.resolver())
-    seeing = build_jcl_artifacts(job)
-    assert "DCIOC104" in {r["artifact"] for r in seeing["artifacts"]
-                          if r["kind"] == "program"}
-    assert "PROD.PAY.MASTER" in {r["artifact"] for r in seeing["artifacts"]
-                                 if r["kind"] == "dataset"}
-
-
 # --------------------------------------------------------------------------- #
 # the closure
 # --------------------------------------------------------------------------- #
@@ -161,17 +128,6 @@ def test_the_cobol_closure_follows_nested_copy():
     assert _row(pre, "SUBPGMS")["status"] == "fetched"
     assert _row(pre, "RATESCPY")["status"] == "fetched"
     assert _row(pre, "RATESCPY")["for"] == "COPY inside SUBPGMS"
-
-
-def test_the_jcl_closure_reaches_a_control_card_named_inside_a_proc():
-    """SORTCRD is named by a DD inside PAYPROC - so it cannot be discovered until
-    PAYPROC has been retrieved. A single-pass scan of the JCL file finds neither."""
-    log = []
-    pre = prefetch_jcl(JOB, _mf(log=log))
-    assert [n for n, _ in log] == ["PAYPROC", "SORTCRD"]     # in that order, necessarily
-    row = _row(pre, "SORTCRD")
-    assert row["status"] == "fetched"
-    assert row["dataset"] == "PARM.LIB(SORTCRD)"     # requested as the member within
 
 
 def test_a_member_reached_many_ways_is_fetched_once():

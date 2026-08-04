@@ -6,30 +6,34 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 
 ## Commands
 
-**Three distributions ship from this repo**, each with its own `pyproject.toml`:
+**Two distributions ship from this repo**, each with its own `pyproject.toml`; the JCL
+front-end is its **own repository**:
 
 | Directory | Distribution | What it is | Depends on |
 |---|---|---|---|
 | `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
 | `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) | core |
-| `jcl/` | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) | core |
+| *(sibling repo)* | [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies) | JCL → dataflow + dependencies (`jcl-dependencies`) | core only |
 
 The two front-ends are **peers**: neither imports the other, and a JCL install carries no
 COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
 the lazy orchestrator in `cobol/src/cobol_xstate/bind.py`. `pip install cobol-xstate[jcl]`
-adds that one join.
+adds that one join. There used to be a `jcl/` directory here — it was lifted out and the
+duplicate deleted, so that parser has exactly one source. The suite finds a sibling
+`../jcl-dependencies` checkout automatically (see `cobol/tests/conftest.py`; override with
+`JCL_DEPENDENCIES_REPO`); without one, the bridge tests skip with the pip command.
 
 ```bash
-# Run from a checkout, no install needed (the root pyproject puts all three on sys.path)
-python -m pytest -q                                        # full suite (~670 tests)
-PYTHONPATH="core/src;cobol/src;jcl/src" python -m cobol_xstate cobol/examples/custrpt.cbl
-PYTHONPATH="core/src;cobol/src;jcl/src" python -m jcl_dependencies jcl/examples/acctunld.jcl
+# Run from a checkout, no install needed (the root pyproject puts both on sys.path)
+python -m pytest -q                                        # this repo's suite (~654 tests)
+PYTHONPATH="core/src;cobol/src" python -m cobol_xstate cobol/examples/custrpt.cbl
 
-# Or install them for real (editable), which is what gives you the console scripts
-python -m pip install -e core -e cobol -e jcl
+# Or install for real (editable), which is what gives you the console scripts
+python -m pip install -e core -e cobol
+python -m pip install -e ../jcl-dependencies      # optional: the JCL front-end + --bind-jcl
 cobol-xstate prog.cbl --summary        # 8 JSON views into ./out/
 cobol-xstate prog.cbl --target js      # runnable ES module + cobolRuntime.mjs
-jcl-dependencies job.jcl               # 2 views + both retrieval reports
+jcl-dependencies job.jcl               # 2 views + both retrieval reports (its own repo)
 
 # Gather where the estate is reachable, model where it is not
 cobol-xstate prog.cbl --gather-only ./bundle
@@ -79,7 +83,7 @@ Every state/guard/action expression is a faithful translation of the COBOL its `
 
 ### Two-stage dependency retrieval, and the JCL axis
 
-Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `fetch.py`, via `artifact_service.py`; `network_drive.mf_fetch` is the default estate client). Order matters: a copybook that doesn't arrive drops its `VALUE` clauses, which turns a resolvable dynamic `CALL` into an unresolved name — so it never becomes a fetchable row. The COBOL says *what* a program does, not *what dataset* it does it to — that binding lives in JCL: `jcl.py` + `jcl_views.py` parse jobs/PROCs, and `--bind-jcl` joins a program's file ddnames to real datasets.
+Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `fetch.py`, via `artifact_service.py`; `network_drive.mf_fetch` is the default estate client). Order matters: a copybook that doesn't arrive drops its `VALUE` clauses, which turns a resolvable dynamic `CALL` into an unresolved name — so it never becomes a fetchable row. The COBOL says *what* a program does, not *what dataset* it does it to — that binding lives in JCL: the `jcl-dependencies` repository parses jobs/PROCs, and `--bind-jcl` joins a program's file ddnames to real datasets through its `bind_cobol_artifacts`.
 
 ### The decimal runtime ships but is never executed by the converter
 
