@@ -127,7 +127,7 @@ yours to confirm.
 
 ### JCL — the hazards that matter
 
-`[repo]` A first JCL reader now exists — `jcl.py` / `jcl_views.py`, `parse_jcl` +
+`[repo]` A JCL reader now exists — the `jcl-dependencies` distribution (`jcl_dependencies.parser` / `.views`), `parse_jcl` +
 `build_jcl_lineage` / `build_jcl_artifacts` (see [jcl-target.md](jcl-target.md)). It resolves
 symbolics (SET / PROC default / EXEC override), expands PROCs and INCLUDE, parses `SORT` /
 `IDCAMS` control cards to byte-field lineage, keys GDGs on their base, and emits `ddBindings`

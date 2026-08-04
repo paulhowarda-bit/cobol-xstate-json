@@ -29,7 +29,7 @@ list but never get confused.
 ## It re-projects, it does not re-parse
 
 The manifest is a projection of the external-interface overlay
-([`interface.py`](../src/cobol_xstate/interface.py)) that the faithful bundle already
+([`interface.py`](../cobol/src/cobol_xstate/interface.py)) that the faithful bundle already
 carries. Every artifact here is an *endpoint* there; this view groups the endpoints by the
 thing they touch, aggregates the verbs and source lines, and attaches the resolution chain.
 It invents nothing the interface did not already recover.

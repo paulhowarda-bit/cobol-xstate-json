@@ -67,22 +67,36 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 
 ## 2. Install and first run
 
-A normal Python package: install it, then run it. Pure standard library — **no runtime
-dependencies**, no build step. Python ≥ 3.9. `pytest` only for the tests.
+**Three distributions ship from this repository**, each a normal Python package. Pure
+standard library — **no runtime dependencies**, no build step. Python ≥ 3.9. `pytest`
+only for the tests.
+
+| Directory | Distribution | What it is |
+|---|---|---|
+| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by both front-ends |
+| `cobol/` | `cobol-xstate` | COBOL → statechart and every view (this manual's main subject) |
+| `jcl/` | `jcl-dependencies` | JCL → dataflow + dependency manifest (also maintained as its own repository) |
+
+The two front-ends are **peers**: neither imports the other, and a JCL install carries
+no COBOL modelling engine. They meet only at `--bind-jcl`, and that one join is an
+optional extra.
 
 ```bash
-python -m pip install -e .        # editable (development)
-python -m pip install .           # regular
+python -m pip install -e core -e cobol      # COBOL work (core comes with it)
+python -m pip install -e jcl                # add the JCL front-end
+# or, installing cobol-xstate from an index:  pip install cobol-xstate[jcl]
 ```
 
-That gives you two equivalent ways to run it:
+That gives you two console scripts, each with an interpreter-explicit equivalent:
 
 ```bash
-cobol-xstate prog.cbl             # the console script
-python -m cobol_xstate prog.cbl   # interpreter-explicit
+cobol-xstate prog.cbl               # COBOL front-end
+python -m cobol_xstate prog.cbl
+jcl-dependencies job.jcl            # JCL front-end
+python -m jcl_dependencies job.jcl
 ```
 
-Prefer `python -m cobol_xstate` in scripts and CI: it bypasses PATH and Windows
+Prefer the `python -m` forms in scripts and CI: they bypass PATH and Windows
 file-association surprises entirely.
 
 ### First run
@@ -126,11 +140,27 @@ cobol-xstate [-h] [--outdir DIR]
              [--target {json,js,reactive,business,lineage,artifacts}]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
              [--copybook-fetcher MODULE:FUNC]
+             [--gather-only DIR] [--from-bundle DIR] [--no-fetch]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
              [--no-dynamic-calls] [--bind-jcl FILE]
              [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
              source
 ```
+
+The JCL front-end has its own command with the same retrieval/output/logging flags plus
+two of its own (`--target {both,artifacts,lineage}` and `--max-rounds N`, the
+PROC/INCLUDE closure bound, default 12):
+
+```
+jcl-dependencies [-h] [--outdir DIR] [--target {both,artifacts,lineage}]
+                 [-I DIR] [--max-rounds N] [--copybook-fetcher MODULE:FUNC]
+                 [--gather-only DIR] [--from-bundle DIR] [--no-fetch]
+                 [--jobs N] [--indent N] [--summary] [--timing]
+                 source
+```
+
+(`cobol-xstate job.jcl` still auto-detects JCL and delegates to the JCL front-end when
+it is installed — kept for one release so existing scripts keep working.)
 
 ### `source` (positional, required)
 
@@ -280,12 +310,15 @@ prog = parse_program(src, resolver=CopybookResolver(
     paths=["copybooks"], fetcher=fetch_artifact))
 ```
 
-### Dependency retrieval (always on)
+### Dependency retrieval (on by default)
 
 Every run retrieves what the source depends on, in two stages, with no flag to turn
-either on. Full rationale in [docs/fetch-stages.md](docs/fetch-stages.md); the short
-version is that the dependency manifest is a *product of the parse*, so anything the
-parse could not see is not in it:
+either on — retrieval is what the tool does, not a mode of it. What CAN be changed is
+*where the answers come from*: `--no-fetch` turns the estate off explicitly (and the
+reports say so, per member), and `--gather-only` / `--from-bundle` split a run across
+two machines (below). Full rationale in [docs/fetch-stages.md](docs/fetch-stages.md);
+the short version is that the dependency manifest is a *product of the parse*, so
+anything the parse could not see is not in it:
 
 **Stage 1 — prefetch**, before the parse. The members that complete the source text:
 `COPY` / `EXEC SQL INCLUDE` members for COBOL; cataloged PROCs, `INCLUDE` members and
@@ -346,9 +379,41 @@ file if fetched blindly:
   worse, an unrelated member that happens to share the name.
 - **`CALLER` / `SYSOUT` / `<dynamic-sql>`**, which are not stored artifacts at all.
 
-In Python, `fetch_dependencies(manifest, fetcher, dest=..., depth=...)` from
-`cobol_xstate.fetch`; `build_fetch_plan(manifest)` returns the same plan without making
-any calls, so you can review it before hitting a service.
+In Python, `fetch_dependencies(manifest, fetcher, dest=...)` from
+`cobol_xstate_core.fetch`; `build_fetch_plan(manifest)` returns the same plan without
+making any calls, so you can review it before hitting a service.
+
+### `--no-fetch`
+
+Do not contact the estate at all. Members already on the `-I` search path still
+resolve; everything else is reported as *"retrieval was disabled for this run"* — which
+is deliberately NOT the same row as `not-found` (the estate asked and empty) or
+`no-service` (no client importable). Turning retrieval off is a statement about this
+run, not about the estate, and the report keeps the two apart.
+
+### `--gather-only DIR` / `--from-bundle DIR`
+
+Retrieval needs the estate; modelling needs nothing but the text — and those two halves
+often want to happen on different machines. These flags split the run:
+
+```bash
+# On the box that can reach the estate: retrieval only, no views.
+cobol-xstate prog.cbl --gather-only ./bundle
+
+# On the box that models: replay the bundle, no network at all.
+cobol-xstate prog.cbl --from-bundle ./bundle
+```
+
+`--gather-only` runs BOTH retrieval stages (stage 2's plan needs the parse) and writes
+an **estate bundle**: the source, every member that came off the estate, and a record of
+every answer — *including the misses*, because a probe chain's `languageBasis` is
+derived from which request missed first. `--from-bundle` then runs the ordinary
+pipeline with the bundle answering instead of the estate: same planning, same probe
+chain, same row order, same reason strings, so the model and both retrieval reports
+come out byte-for-byte what the live run would have produced. Asking for a member the
+gather run never asked for is an **error**, not an empty answer — the two runs would
+not be the same analysis. Both flags exist on `jcl-dependencies` too. The two flags are
+mutually exclusive.
 
 ### `--machine-only`
 
@@ -678,11 +743,14 @@ See [docs/dynamic-calls.md](docs/dynamic-calls.md).
 
 ### JCL / PROC — the dataset identity the COBOL was missing
 
-Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.proc`, or force with
-`--jcl`) and it emits `<name>.jcl.artifacts.json` + `<name>.jcl.lineage.json`:
+JCL has its own front-end, `jcl-dependencies` (its own distribution and repository —
+see §2). It emits `<name>.jcl.artifacts.json` + `<name>.jcl.lineage.json`, plus both
+retrieval reports:
 
 ```bash
-cobol-xstate acctunld.jcl        # -> acctunld.jcl.artifacts.json + acctunld.jcl.lineage.json
+jcl-dependencies acctunld.jcl    # -> acctunld.jcl.artifacts.json + acctunld.jcl.lineage.json
+                                 #    + acctunld.jcl.prefetch.json + acctunld.jcl.fetch.json
+cobol-xstate acctunld.jcl        # auto-detects JCL and delegates (kept for one release)
 ```
 
 The **lineage** view gives the dataflow across steps (`dataflow` producer→consumer edges),
@@ -698,12 +766,16 @@ same shape as the COBOL one (datasets / programs / PROCs / INCLUDE / control-car
 the program's artifacts view resolves each file's ddname to its dataset — the row gains
 `dataset` and `boundBy` (job/step, with the step's run conditions), and its `needs` is
 satisfied. Conflicting bindings across jobs are listed as `datasetCandidates` and flagged,
-never collapsed. Python: `bind_cobol_artifacts(manifest, jobs)` in `jcl_views`.
+never collapsed. `--bind-jcl` needs the JCL front-end installed (`pip install
+cobol-xstate[jcl]`); without it the run exits with that exact command. Python:
+`bind_cobol_artifacts(manifest, jobs)` in `jcl_dependencies.views`.
 
-Symbolics (SET / PROC default / EXEC override) are resolved; PROCs, `INCLUDE`, and
-control-card datasets are fetched through a function **you** supply to the Python API
-(`parse_jcl(text, resolver=…)`), and anything unresolved is flagged, never guessed. From the
-CLI no resolver is wired, so external members are listed and flagged. See
+Symbolics (SET / PROC default / EXEC override) are resolved. Cataloged PROCs, `INCLUDE`
+members, and control-card datasets are retrieved **before the parse** by the same
+two-stage machinery as COBOL copybooks — replaying the parse until it stops asking —
+so the steps inside them are in the model; anything that cannot be retrieved is flagged,
+never guessed. In Python, supply your own `parse_jcl(text, resolver=…)` or use
+`jcl_dependencies.api.analyze(...)`, which wires retrieval the way the CLI does. See
 [docs/jcl-target.md](docs/jcl-target.md).
 
 ### Beyond one program: the state axis
@@ -1319,11 +1391,24 @@ most are pinned by a test.
 ## 13. Development and testing
 
 ```bash
-PYTHONPATH=src python -m pytest -q      # 206 tests
+python -m pytest -q      # ~705 tests across core/tests, cobol/tests and jcl/tests
+                         # (the root pyproject puts all three src trees on sys.path)
 ```
 
-Tests requiring Node + a local `xstate` (`npm install`) — the `--target js` integration
-and golden-master suites — **skip cleanly** when those are absent.
+Tests requiring Node + a local `xstate` (`npm install` in `cobol/`) — the `--target js`
+integration and golden-master suites — **skip cleanly** when those are absent, so check
+the skip count when a change touches the emitters.
+
+Two more proofs beyond the suite, run before merging:
+
+```bash
+python tools/gate.py               # byte-stability: every view of every example + both
+                                   # retrieval reports, hashed under two PYTHONHASHSEED
+                                   # values and at --jobs 1 and 8, against goldens/
+python tools/prove_separation.py   # three throwaway venvs: a core+jcl box cannot even
+                                   # find cobol_xstate; --bind-jcl without the extra
+                                   # fails naming the exact pip command
+```
 
 | Test module | Covers |
 |---|---|

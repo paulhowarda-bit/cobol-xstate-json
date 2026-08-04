@@ -11,8 +11,8 @@ Given a job or a PROC it produces two views, the same pair the COBOL side produc
   the COBOL artifact manifest ([artifacts-target.md](artifacts-target.md)).
 
 ```python
-from cobol_xstate.jcl import parse_jcl
-from cobol_xstate.jcl_views import build_jcl_lineage, build_jcl_artifacts
+from jcl_dependencies import parse_jcl
+from jcl_dependencies.views import build_jcl_lineage, build_jcl_artifacts
 
 job = parse_jcl(open("acctunld.jcl").read(), resolver=my_fetch)   # resolver is optional
 lineage   = build_jcl_lineage(job)
@@ -145,7 +145,7 @@ manifest names, for each file, the `ddname` and says *"the DSN is in the JCL"*; 
 **is** that JCL, and `ddBindings` is the edge that connects them. The join is built in:
 
 ```python
-from cobol_xstate.jcl_views import bind_cobol_artifacts
+from jcl_dependencies.views import bind_cobol_artifacts
 resolved = bind_cobol_artifacts(cobol_manifest, [job1, job2, ...])
 ```
 
