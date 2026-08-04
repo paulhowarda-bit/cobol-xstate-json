@@ -22,14 +22,24 @@ on runtime data is *flagged*, never smoothed over.
 
 ## Install
 
-A normal Python package. Install it, then run it:
+**Three distributions ship from this repository** — a shared retrieval core and two
+peer front-ends. Neither front-end imports the other; a JCL install carries no COBOL
+modelling engine:
+
+| Directory | Distribution | What it is |
+|---|---|---|
+| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle |
+| `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) |
+| `jcl/` | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`; also its own repository) |
 
 ```bash
-python -m pip install -e .        # editable (development)
-python -m pip install .           # regular
+python -m pip install -e core -e cobol    # COBOL work (core comes with it)
+python -m pip install -e jcl              # add the JCL front-end
+# from an index: pip install cobol-xstate[jcl]  adds the --bind-jcl join
 
-cobol-xstate <file.cbl>           # the console script
-python -m cobol_xstate <file.cbl> # equivalent, interpreter-explicit
+cobol-xstate <file.cbl>            # the console scripts
+jcl-dependencies <job.jcl>
+python -m cobol_xstate <file.cbl>  # equivalent, interpreter-explicit
 ```
 
 Pure standard library — **no runtime dependencies**, no build step. Python ≥ 3.9.
@@ -40,7 +50,7 @@ Pure standard library — **no runtime dependencies**, no build step. Python ≥
 ```bash
 cobol-xstate prog.cbl                              # -> out/... (see below)
 cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir created)
-cobol-xstate examples/banktran.cbl --summary       # + human summary & flags on stderr
+cobol-xstate cobol/examples/banktran.cbl --summary # + human summary & flags on stderr
 cobol-xstate prog.cbl --no-business --no-lineage --no-reactive --no-artifacts  # bundle only
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
@@ -51,9 +61,12 @@ cobol-xstate prog.cbl --target business            # -> out/prog.business.json (
 cobol-xstate prog.cbl --target artifacts           # the related-artifact manifest on its own
 cobol-xstate prog.cbl -I copybooks -I shared/cpy   # extra local copybook search paths
 cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch   # override the estate client
+cobol-xstate prog.cbl --gather-only ./bundle       # retrieval only, on the estate box
+cobol-xstate prog.cbl --from-bundle ./bundle       # model from it - no network at all
+cobol-xstate prog.cbl --no-fetch                   # never contact the estate (reported as such)
 ```
 
-**Every run retrieves its dependencies. There is no flag for it.** Before parsing, the
+**Every run retrieves its dependencies — by default and by design.** Before parsing, the
 tool pulls the copybooks and control members that complete the source text through your
 estate's artifact service (`network_drive.mf_fetch` by default — only the estate knows
 where its members live); after parsing, it fetches the artifacts the program depends on.
@@ -61,6 +74,13 @@ It works in that order because a copybook that does not arrive takes its `VALUE`
 out of the model, which turns a resolvable dynamic `CALL` target into an unresolved
 runtime name — so the program it calls is never even a row to fetch. Nothing errors; the
 answer is just quietly short. See [docs/fetch-stages.md](docs/fetch-stages.md).
+
+What *is* configurable is where the answers come from: `--no-fetch` turns the estate off
+explicitly (each skipped member says *"retrieval was disabled for this run"* — never
+mistakable for an estate that had nothing), and `--gather-only` / `--from-bundle` split
+a run across machines: gather where the mainframe is reachable, then model anywhere,
+offline, with the bundle answering instead of the estate — byte-for-byte the same
+model and the same retrieval reports as the live run.
 
 A default run writes **eight JSON files** — six views of the same program, each answering
 a different question, plus an account of both retrieval stages:
@@ -92,11 +112,13 @@ and a note — the other five still land.
 ### JCL / PROC
 
 The COBOL tells you what a program does, not the dataset it does it *to* — that binding lives
-in the JCL. Point the tool at a job or PROC (auto-detected for `.jcl`/`.prc`/`.proc`, or force
-with `--jcl`) and it emits two views:
+in the JCL. The JCL side is its own front-end, **`jcl-dependencies`** (its own distribution
+and repository), emitting two views plus both retrieval reports:
 
 ```bash
-cobol-xstate acctunld.jcl        # -> out/acctunld.jcl.artifacts.json + .lineage.json
+jcl-dependencies acctunld.jcl    # -> out/acctunld.jcl.artifacts.json + .lineage.json
+                                 #    + .jcl.prefetch.json + .jcl.fetch.json
+cobol-xstate acctunld.jcl        # auto-detects JCL and delegates (kept for one release)
 ```
 
 - **`.jcl.lineage.json`** — the **dataflow across steps** (step 1 writes a dataset step 2
@@ -110,11 +132,12 @@ cobol-xstate acctunld.jcl        # -> out/acctunld.jcl.artifacts.json + .lineage
   `dependency` (runtime / compile-time) and its resolution chain. GDG generations key on the
   base; `SYSOUT`/`DUMMY` are excluded with a reason.
 
-Cataloged PROCs, `INCLUDE` members, and control-card datasets are fetched through a function
-**you** supply to the Python API (`parse_jcl(text, resolver=…)`); anything it can't return is
-flagged, never guessed. And the loop closes: `cobol-xstate prog.cbl --bind-jcl job.jcl`
-resolves the COBOL program's file ddnames against the JCL, so each bound file row carries its
-actual `dataset` (`OUT-FILE → OUTDD → PROD.ACCT.UNLOAD`, one identity). See
+Cataloged PROCs, `INCLUDE` members, and control-card datasets are retrieved **before the
+parse** by the same two-stage machinery as COBOL copybooks — the steps inside them are in
+the model, and anything unretrievable is flagged, never guessed. And the loop closes:
+`cobol-xstate prog.cbl --bind-jcl job.jcl` (needs the `[jcl]` extra) resolves the COBOL
+program's file ddnames against the JCL, so each bound file row carries its actual
+`dataset` (`OUT-FILE → OUTDD → PROD.ACCT.UNLOAD`, one identity). See
 [docs/jcl-target.md](docs/jcl-target.md).
 
 ### Output
@@ -242,7 +265,7 @@ Most constructs that a naive pass would drop are actually *mappable*; the real
 question is whether a **static** parse can pin the behavior. This tool draws the shape
 and flags what rides on runtime data, rather than skipping it:
 
-- **Dynamic `CALL ident`** — [analysis.py](src/cobol_xstate/analysis.py) runs
+- **Dynamic `CALL ident`** — [analysis.py](cobol/src/cobol_xstate/analysis.py) runs
   constant propagation: a `VALUE 'POSTLOG'` clause or `MOVE 'POSTLOG' TO ident` with no
   conflicting assignment resolves the target (`call_POSTLOG`, no flag). If a non-literal
   assignment can also reach the call, it stays flagged — genuinely runtime.
@@ -374,29 +397,42 @@ parsed carelessly.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest -q     # 304 tests: normalizer, lexer, parser, preprocessor, data, semantics, analysis, statechart, emitter, interface, reactive, business, golden-master
+python -m pytest -q     # ~705 tests across core/tests, cobol/tests and jcl/tests
+                        # (the root pyproject puts all three src trees on sys.path)
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
-install (`npm install`); they skip cleanly when those are absent.
+install (`npm install` **in `cobol/`**); they skip cleanly when those are absent — so
+check the skip count when a change touches the emitters. Two more proofs run before
+merging: `python tools/gate.py` (byte-stability of every view and both retrieval
+reports against `goldens/`, across hash seeds and `--jobs` levels) and
+`python tools/prove_separation.py` (three throwaway venvs proving the distributions
+stand apart).
 
 Layout:
 
 ```
-src/cobol_xstate/   normalizer · lexer · model · parser · preprocessor · data_division · semantics · analysis · naming · statechart · emitter · cli · __main__
-src/cobol_xstate/runtime/   package data, emitted alongside `--target js` output (never
-                    executed by the converter itself):
+core/src/cobol_xstate_core/   what both front-ends share: artifact_service (the estate
+                    boundary) · prefetch/fetch (two-stage retrieval) · bundle (the
+                    replayable estate bundle) · protocol · categories · cliargs ·
+                    output · report · detect · logging_setup · profiling
+cobol/src/cobol_xstate/       normalizer · lexer · model · parser · preprocessor ·
+                    data_division · semantics · analysis · naming · statechart ·
+                    emitter · harel · interface · business · lineage · artifacts ·
+                    dynamic_calls · reactive · classify · api · bind · cli
+cobol/src/cobol_xstate/runtime/   package data, emitted alongside `--target js` output
+                    (never executed by the converter itself):
                     cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
-                    cobolDriver.mjs  (reference driver: invoke interpreter + file I/O for golden-master)
-examples/           custrpt.cbl  (canonical batch loop)
-                    banktran.cbl (EVALUATE dispatch + dynamic CALL resolved by constant propagation)
-                    altswitch.cbl (ALTER first-time-switch idiom + an unresolvable dynamic CALL)
-                    accum.cbl / nestperf.cbl (PERFORM-UNTIL & nested PERFORM call-return)
-                    tblsum.cbl (OCCURS table: subscripted reads/writes)
-                    sorter.cbl (SORT INPUT/OUTPUT PROCEDURE as call-return)
-                    fileerr.cbl (DECLARATIVES USE AFTER ERROR as a parallel handler region)
-                    thrurange.cbl (PERFORM p THRU q as a range actor)
-tests/              one module per pipeline stage (289 tests)
+                    cobolDriver.mjs  (reference driver for the golden master)
+jcl/src/jcl_dependencies/     parser · views · prefetch · api · cli  (also maintained
+                    as its own repository)
+cobol/examples/     custrpt.cbl (canonical batch loop) · banktran.cbl (EVALUATE +
+                    dynamic CALL) · altswitch.cbl (ALTER) · errlit.cbl (keywords
+                    inside literals) · ... one fixture per construct
+jcl/examples/       acctunld.jcl · dailypost.jcl · condflow.jcl · copyrepr.jcl ·
+                    edvalid.prc
+goldens/ + tools/   the byte-stability ratchet (gate.py, byteproof*.py) and the
+                    separation proof (prove_separation.py)
 ```
 
 ## License
