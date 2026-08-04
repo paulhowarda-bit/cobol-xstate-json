@@ -67,23 +67,23 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 
 ## 2. Install and first run
 
-**Three distributions ship from this repository**, each a normal Python package. Pure
-standard library — **no runtime dependencies**, no build step. Python ≥ 3.9. `pytest`
-only for the tests.
+**Two distributions ship from this repository**, each a normal Python package; the JCL
+front-end is its **own repository**. Pure standard library — **no runtime
+dependencies**, no build step. Python ≥ 3.9. `pytest` only for the tests.
 
-| Directory | Distribution | What it is |
+| Where | Distribution | What it is |
 |---|---|---|
 | `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by both front-ends |
 | `cobol/` | `cobol-xstate` | COBOL → statechart and every view (this manual's main subject) |
-| `jcl/` | `jcl-dependencies` | JCL → dataflow + dependency manifest (also maintained as its own repository) |
+| [its own repo](https://github.com/paulhowarda-bit/jcl-dependencies) | `jcl-dependencies` | JCL → dataflow + dependency manifest |
 
 The two front-ends are **peers**: neither imports the other, and a JCL install carries
 no COBOL modelling engine. They meet only at `--bind-jcl`, and that one join is an
 optional extra.
 
 ```bash
-python -m pip install -e core -e cobol      # COBOL work (core comes with it)
-python -m pip install -e jcl                # add the JCL front-end
+python -m pip install -e core -e cobol          # COBOL work (core comes with it)
+python -m pip install -e ../jcl-dependencies    # add the JCL front-end (sibling checkout)
 # or, installing cobol-xstate from an index:  pip install cobol-xstate[jcl]
 ```
 
@@ -1391,8 +1391,10 @@ most are pinned by a test.
 ## 13. Development and testing
 
 ```bash
-python -m pytest -q      # ~705 tests across core/tests, cobol/tests and jcl/tests
-                         # (the root pyproject puts all three src trees on sys.path)
+python -m pytest -q      # ~654 tests across core/tests and cobol/tests
+                         # (the root pyproject puts both src trees on sys.path; the
+                         #  JCL suite lives in the jcl-dependencies repository, and the
+                         #  bridge tests here find a sibling checkout automatically)
 ```
 
 Tests requiring Node + a local `xstate` (`npm install` in `cobol/`) — the `--target js`

@@ -11,8 +11,13 @@ import json
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.dynamic_calls import annotate_artifacts, build_dynamic_calls
 from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
-from jcl_dependencies.parser import parse_jcl
-from jcl_dependencies.views import bind_cobol_artifacts
+import importlib.util
+
+import pytest
+
+_HAS_JCL = importlib.util.find_spec("jcl_dependencies") is not None
+needs_jcl = pytest.mark.skipif(
+    not _HAS_JCL, reason="the JCL half is an optional extra: pip install cobol-xstate[jcl]")
 from cobol_xstate.parser import parse_program
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.statechart import build_machine
@@ -58,6 +63,8 @@ def _view(src, jcl=None, resolver=None):
     m = _machine(src, resolver)
     art = build_artifacts(m)
     if jcl:
+        from jcl_dependencies.parser import parse_jcl
+        from jcl_dependencies.views import bind_cobol_artifacts
         art = bind_cobol_artifacts(art, [parse_jcl(jcl, source_name="J.jcl")])
     return m, art, build_dynamic_calls(m, art)
 
@@ -89,6 +96,7 @@ def test_the_source_artifact_and_the_route_to_the_call_are_named():
         ("CTL-PGM-NAME", "WS-HOLD"), ("WS-HOLD", "WS-SUBPGM")]
 
 
+@needs_jcl
 def test_the_dataset_is_named_once_the_jcl_binds_the_ddname():
     """CTLDD is a program-local ddname; PROD.PARM.CNTL is the thing you can go and read.
     Without the JCL the row honestly stops at the ddname."""
@@ -244,6 +252,7 @@ def test_a_resolvable_call_is_not_a_dynamic_call():
     assert view["counts"]["dynamicTargets"] == 0
 
 
+@needs_jcl
 def test_the_target_is_never_guessed():
     """The control file's CONTENTS are run-time data. Naming the artifact is a fact;
     naming a program would be an invention, and no field here may carry one."""
@@ -259,6 +268,7 @@ def test_the_target_is_never_guessed():
 # the cross-references: the answer reaches wherever the reader starts
 # --------------------------------------------------------------------------- #
 
+@needs_jcl
 def test_the_artifact_manifest_row_carries_the_pointer():
     m, art, view = _view(FILE_FED, jcl=JCL)
     annotated = annotate_artifacts(art, view)
@@ -271,6 +281,7 @@ def test_the_artifact_manifest_row_carries_the_pointer():
     assert "PROD.PARM.CNTL" in row["needs"]
 
 
+@needs_jcl
 def test_the_fetch_plan_says_what_to_fetch_instead():
     """The dynamic row still cannot be fetched. But the artifact that names its target
     can, and a skip reason that says so is an instruction rather than a dead end."""

@@ -1,21 +1,26 @@
-# Development root. This is NOT a distribution - the three that ship live in core/,
-# cobol/ and jcl/, each with its own pyproject.toml:
+# Development root. This is NOT a distribution - the two that ship from THIS repo live
+# in core/ and cobol/, each with its own pyproject.toml:
 #
 #   core/  cobol-xstate-core   the estate boundary and two-stage retrieval, shared
 #   cobol/ cobol-xstate        COBOL -> XState statechart      (depends on core)
-#   jcl/   jcl-dependencies    JCL -> dataflow + dependencies  (depends on core)
 #
-# What this file exists for is running the whole suite together, across all three, from
-# a checkout with nothing installed. Install them for real with:
+# The JCL front-end (jcl-dependencies) lives in its OWN repository -
+# https://github.com/paulhowarda-bit/jcl-dependencies - and depends on core only. It
+# used to be a jcl/ directory here; it was lifted out and the duplicate deleted, so
+# there is exactly one source for that parser.
 #
-#   python -m pip install -e core -e cobol -e jcl
+# What this file exists for is running this repo's suite from a checkout with nothing
+# installed. Install for real with:
+#
+#   python -m pip install -e core -e cobol
+#   python -m pip install -e ../jcl-dependencies   # optional: the --bind-jcl join
 #
 # The JCL half is an EXTRA of cobol-xstate rather than a dependency (`pip install
 # cobol-xstate[jcl]`), because a COBOL install without it is complete - it simply cannot
 # close the ddname->dataset join that --bind-jcl performs.
 
 [tool.pytest.ini_options]
-# All three source trees on sys.path, so `python -m pytest` works with nothing installed
-# (pytest >= 7). Order does not matter: the three packages have distinct import names.
-pythonpath = ["core/src", "cobol/src", "jcl/src", "cobol/tests"]
-testpaths = ["core/tests", "cobol/tests", "jcl/tests"]
+# Both source trees on sys.path, so `python -m pytest` works with nothing installed
+# (pytest >= 7). jcl-dependencies, when present, arrives installed or via its own repo.
+pythonpath = ["core/src", "cobol/src", "cobol/tests"]
+testpaths = ["core/tests", "cobol/tests"]

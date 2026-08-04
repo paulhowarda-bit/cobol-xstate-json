@@ -18,14 +18,29 @@ pytest.importorskip(
 from cobol_xstate.cli import run                                    # noqa: E402
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
-JCL_EXAMPLES = Path(__file__).resolve().parents[2] / "jcl" / "examples"
+
+# The binding job, inline: this repository no longer carries JCL example files (the
+# jcl-dependencies repository owns them), and this test needs exactly one fact from the
+# job - that STEP01 binds ddname OUTDD to a dataset the COBOL side cannot know.
+ACCTUNLD = (
+    "//ACCTUNLD JOB (ACCT),'DAILY UNLOAD'\n"
+    "//STEP01   EXEC PGM=SQLUNLD\n"
+    "//OUTDD    DD  DSN=PROD.ACCT.UNLOAD,DISP=(NEW,CATLG,DELETE)\n"
+    "//SYSOUT   DD  SYSOUT=*\n"
+)
+
+
+def _acctunld(tmp_path) -> str:
+    path = tmp_path / "acctunld.jcl"
+    path.write_text(ACCTUNLD, encoding="utf-8")
+    return str(path)
 
 
 def test_cli_bind_jcl_enriches_the_artifacts_companion(tmp_path):
     """The join both sides were built for: SQLUNLD's OUT-FILE row said 'ddname OUTDD, DSN
     in the JCL'; ACCTUNLD's STEP01 says OUTDD -> PROD.ACCT.UNLOAD."""
     assert run([str(EXAMPLES / "sqlunld.cbl"), "--target", "artifacts",
-                "--bind-jcl", str(JCL_EXAMPLES / "acctunld.jcl"),
+                "--bind-jcl", _acctunld(tmp_path),
                 "--outdir", str(tmp_path)]) == 0
     art = json.loads((tmp_path / "sqlunld.artifacts.json").read_text())
     row = next(a for a in art["artifacts"] if a.get("ddname") == "OUTDD")
@@ -41,13 +56,13 @@ def test_cli_bind_jcl_missing_file_is_a_clean_error(tmp_path, capsys):
 def test_cli_autodetects_jcl_and_writes_both_views(tmp_path):
     """The deprecated auto-fork: `cobol-xstate job.jcl` delegates to the JCL package
     rather than carrying its own copy of that path."""
-    assert run([str(JCL_EXAMPLES / "acctunld.jcl"), "--outdir", str(tmp_path)]) == 0
-    names = {f.name for f in tmp_path.iterdir()}
+    assert run([_acctunld(tmp_path), "--outdir", str(tmp_path / "o")]) == 0
+    names = {f.name for f in (tmp_path / "o").iterdir()}
     assert names == {"acctunld.jcl.artifacts.json", "acctunld.jcl.lineage.json",
                      # the JCL path retrieves its dependencies too, and must: a
                      # cataloged PROC carries EXEC PGM= steps that are in no other file
                      "acctunld.jcl.prefetch.json", "acctunld.jcl.fetch.json"}
-    art = json.loads((tmp_path / "acctunld.jcl.artifacts.json").read_text())
+    art = json.loads((tmp_path / "o" / "acctunld.jcl.artifacts.json").read_text())
     assert art["format"] == "jcl-dependencies-artifacts"
 
 

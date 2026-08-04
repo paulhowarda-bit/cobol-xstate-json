@@ -37,9 +37,8 @@ from typing import Dict, List
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "cobol" / "examples"
-JCL_EXAMPLES = REPO / "jcl" / "examples"
 
-for _tree in ("core/src", "cobol/src", "jcl/src", "cobol/tests"):
+for _tree in ("core/src", "cobol/src", "cobol/tests"):
     sys.path.insert(0, str(REPO / _tree))
 
 from fakes.estate import fetch_artifact                              # noqa: E402
@@ -49,11 +48,8 @@ from cobol_xstate_core.fetch import fetch_dependencies               # noqa: E40
 from cobol_xstate.artifacts import build_artifacts                   # noqa: E402
 from cobol_xstate.dynamic_calls import (annotate_artifacts,          # noqa: E402
                                         build_dynamic_calls)
-from jcl_dependencies.parser import parse_jcl                       # noqa: E402
-from jcl_dependencies.views import build_jcl_artifacts               # noqa: E402
 from cobol_xstate.normalizer import detect_source_format             # noqa: E402
 from cobol_xstate.parser import parse_program                        # noqa: E402
-from jcl_dependencies.prefetch import prefetch_jcl                   # noqa: E402
 from cobol_xstate.prefetch import (attribute_resolution,             # noqa: E402
                                    prefetch_cobol)
 from cobol_xstate.preprocessor import CopybookResolver               # noqa: E402
@@ -80,7 +76,7 @@ def normalize(text: str, run_dir: Path) -> str:
     replacing the repo root first would leave their tails unnormalized.
     """
     for root, token in ((run_dir, "<RUNDIR>"), (EXAMPLES, "<EXAMPLES>"),
-                        (JCL_EXAMPLES, "<JCL_EXAMPLES>"), (REPO, "<REPO>")):
+                        (REPO, "<REPO>")):
         for form in (str(root), str(root).replace("\\", "/"),
                      str(root).replace("\\", "\\\\")):
             text = text.replace(form, token)
@@ -114,17 +110,6 @@ def cobol_reports(path: Path, run_dir: Path, jobs: int = JOBS) -> Dict[str, str]
     return {"prefetch": json_text(pre.report()), "fetch": json_text(report)}
 
 
-def jcl_reports(path: Path, run_dir: Path, jobs: int = JOBS) -> Dict[str, str]:
-    source = path.read_text(encoding="utf-8", errors="replace")
-    deps = str(run_dir / "deps")
-    pre = prefetch_jcl(source, fetch_artifact, paths=[str(JCL_EXAMPLES)], dest=deps,
-                       source_name=path.name, jobs=jobs)
-    job = parse_jcl(source, resolver=pre.resolver(), source_name=path.name)
-    art = build_jcl_artifacts(job)
-    report = fetch_dependencies(art, fetch_artifact, dest=deps, prefetched=pre.store,
-                                jobs=jobs)
-    return {"jcl.prefetch": json_text(pre.report()), "jcl.fetch": json_text(report)}
-
 
 def build_manifest(jobs: int = JOBS) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -134,13 +119,6 @@ def build_manifest(jobs: int = JOBS) -> Dict[str, str]:
             run_dir = tmp / src.stem
             for view, text in cobol_reports(src, run_dir, jobs).items():
                 out[f"{src.name}::{view}"] = digest(normalize(text, run_dir))
-        if JCL_EXAMPLES.is_dir():
-            for src in sorted(JCL_EXAMPLES.iterdir()):
-                if src.suffix.lower() not in (".jcl", ".prc", ".proc"):
-                    continue
-                run_dir = tmp / f"jcl-{src.stem}"
-                for view, text in jcl_reports(src, run_dir, jobs).items():
-                    out[f"jcl/{src.name}::{view}"] = digest(normalize(text, run_dir))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return dict(sorted(out.items()))
