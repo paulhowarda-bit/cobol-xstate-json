@@ -181,9 +181,10 @@ def test_every_run_writes_both_retrieval_reports(tmp_path):
     assert pre["format"] == "cobol-xstate-prefetch"
     assert fetched["format"] == "cobol-xstate-fetch"
     # No estate client on a test machine: that must be stated, never left to look like
-    # an estate that was asked and had nothing.
+    # an estate that was asked and had nothing - and the message must NAME the client it
+    # could not load (cast_clients.mf_fetch, the estate's own module).
     assert pre["serviceAvailable"] is False
-    assert "network_drive" in pre["serviceUnavailable"]
+    assert "cast_clients" in pre["serviceUnavailable"]
 
 
 def test_there_is_no_second_way_to_place_output(tmp_path):

@@ -1,6 +1,6 @@
 """A deterministic stand-in for the estate's artifact service.
 
-The real default client is ``network_drive.mf_fetch:fetch_artifact`` - an external,
+The real default client is ``cast_clients.mf_fetch:fetch_artifact`` - an external,
 out-of-tree library that talks to a mainframe share. Nothing in this repository can
 reach it, so without a stand-in the two retrieval reports (``.prefetch.json`` /
 ``.fetch.json``) are untestable and un-hashable, and the byte-stability ratchet can

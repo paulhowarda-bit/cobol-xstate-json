@@ -69,7 +69,7 @@ cobol-xstate prog.cbl --no-fetch                   # never contact the estate (r
 
 **Every run retrieves its dependencies — by default and by design.** Before parsing, the
 tool pulls the copybooks and control members that complete the source text through your
-estate's artifact service (`network_drive.mf_fetch` by default — only the estate knows
+estate's artifact service (`cast_clients.mf_fetch` by default — only the estate knows
 where its members live); after parsing, it fetches the artifacts the program depends on.
 It works in that order because a copybook that does not arrive takes its `VALUE` clauses
 out of the model, which turns a resolvable dynamic `CALL` target into an unresolved
