@@ -46,7 +46,7 @@ ESTATE = {
 
 
 def _mf(store=None, log=None, detected="copybook"):
-    """A stand-in for network_drive.mf_fetch.fetch_artifact, in its real dict shape:
+    """A stand-in for cast_clients.mf_fetch.fetch_artifact, in its real dict shape:
     fetch_artifact(name, type=, copy=) -> {artifact_name, detected_type, found,
     copied_to, source_path, source_location, alternatives}."""
     data = ESTATE if store is None else store
