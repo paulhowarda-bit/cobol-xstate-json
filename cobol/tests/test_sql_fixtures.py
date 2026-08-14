@@ -267,3 +267,22 @@ def test_fetch_without_a_visible_declare_is_flagged():
     leaves its FETCH with host variables and no columns. Whether that is recoverable is
     the reviewer's call to make from the flag, not ours to make by staying silent."""
     assert "no DECLARE for cursor C9 is visible" in _flags("sqlgaps.cbl")
+
+
+def test_why_no_mapping_reaches_the_event_itself():
+    """The interface EVENT is what downstream tooling reads, and add() rebuilds it
+    key-by-key - so the why-no-mapping note must be copied there explicitly, or an
+    unrecoverable site is indistinguishable from a parser failure at exactly the
+    consumer that cannot see the flags."""
+    iface = _iface("sqlgaps.cbl")
+    noted = {(e["verb"], e["endpoint"]): e["columnNote"]
+             for e in iface["events"] if e.get("columnNote")}
+    assert "no DECLARE for cursor C9" in noted[("FETCH", "<cursor C9>")]
+    assert "no column identity" in noted[("SELECT", "ACCOUNT")]      # COUNT(*) slot
+    assert "STAMP" in noted[("INSERT", "AUDITLOG")]                  # literal VALUES slot
+    assert "without an explicit column list" in noted[("INSERT", "ACCOUNT")]
+    # ...and a fully-proven mapping carries no note
+    ins = next(e for e in iface["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "ACCOUNT"
+               and e.get("columns"))
+    assert "columnNote" not in ins

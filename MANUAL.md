@@ -1098,6 +1098,7 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `fields` | **the data crossing in the event's direction** |
 | `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) |
 | `columns` | for Db2 events, **which column fills which host variable** — see below |
+| `columnNote` | why `columns` is absent or partial — distinguishes "nothing to map here" (a literal slot, `SELECT *`, a missing DECLARE) from a recovery failure, which an absent key alone cannot |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |
 
