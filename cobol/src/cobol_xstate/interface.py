@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from typing import Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional, Tuple
 
 # endpoint kinds
 _FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE = (
@@ -285,21 +285,55 @@ def _qualify(columns: Optional[List[dict]], table: str) -> Optional[List[dict]]:
     return [{"table": table, **c} for c in columns]
 
 
-def _fetch_columns(up: str, into_fields: List[str],
-                   cursor_cols: Dict[str, List[str]]) -> Optional[List[dict]]:
+# Positioning keywords Db2 allows between FETCH and its cursor name. Kept in step with
+# parser._FETCH_POS, which is the primary reader - this text fallback runs only for an
+# action with no spec (an overlay built over a rewritten config, as reactive's is).
+_FETCH_CURSOR = re.compile(
+    r"\bFETCH\s+(?:(?:NEXT|PRIOR|FIRST|LAST|CURRENT|BEFORE|AFTER|ABSOLUTE|RELATIVE"
+    r"|ROWSET|FROM|INSENSITIVE|SENSITIVE|STARTING|AT|CONTINUE)\s+|\d+\s+"
+    r"|:[A-Z0-9_-]+\s+)*([A-Z0-9_-]+)")
+
+
+def _fetch_cursor_name(spec: Optional[dict], up: str) -> Optional[str]:
+    """The cursor a FETCH reads: the parser's token-resolved name where there is one.
+
+    `FETCH NEXT ROWSET FROM CSR1` used to bind the cursor name "ROWSET", which matches
+    no DECLARE - costing the FETCH both its column mapping and its real table endpoint.
+    """
+    name = (spec or {}).get("cursor")
+    if name:
+        return name.upper()
+    m = _FETCH_CURSOR.search(up)
+    if not m or m.group(1) in ("INTO", "FOR"):
+        return None
+    return m.group(1).upper()
+
+
+def _fetch_columns(cursor: Optional[str], into_fields: List[str],
+                   cursor_cols: Dict[str, List[str]]) -> Tuple[Optional[List[dict]],
+                                                               Optional[str]]:
     """Correlate a FETCH's host variables against its cursor's select list.
 
     Same count gate as the parser's: the columns come from one statement and the host
-    variables from another, so only equal lengths prove the correspondence.
+    variables from another, so only equal lengths prove the correspondence. Returns
+    ``(columns, note)`` - a note says which half of the join was missing, so a FETCH
+    whose cursor is declared in an absent copybook reads differently from one whose
+    DECLARE is right there but disagrees on arity.
     """
-    m = re.match(r".*?\bFETCH\s+(?:NEXT\s+|PRIOR\s+|FIRST\s+|FROM\s+)*([A-Z0-9_-]+)", up)
-    if not m:
-        return None
-    cols = cursor_cols.get(m.group(1).upper())
-    if not cols or len(cols) != len(into_fields):
-        return None
+    if not cursor:
+        return None, ("the cursor this FETCH reads could not be identified, so its "
+                      "columns cannot be recovered")
+    cols = cursor_cols.get(cursor)
+    if not cols:
+        return None, (f"no DECLARE for cursor {cursor} is visible in this program "
+                      f"(declared in a copybook that did not arrive, or prepared "
+                      f"dynamically), so its columns are unknown")
+    if len(cols) != len(into_fields):
+        return None, (f"cursor {cursor} selects {len(cols)} column(s) but this FETCH "
+                      f"has {len(into_fields)} host variable(s): not correlatable "
+                      f"(indicator variables, or a host structure) - verify by hand")
     return [{"column": c, "hostVar": h} for c, h in zip(cols, into_fields)
-            if c is not None]
+            if c is not None], None
 
 
 def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
@@ -336,12 +370,11 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         if verb in ("SELECT", "FETCH"):
             endpoint = None
             if verb == "FETCH":
-                fm = re.match(r".*?\bFETCH\s+(?:NEXT\s+|PRIOR\s+|FIRST\s+|FROM\s+)*"
-                              r"([A-Z0-9_-]+)", up)
-                if fm:
-                    endpoint = cursors.get(fm.group(1)) or f"<cursor {fm.group(1)}>"
+                cname = _fetch_cursor_name(spec, up)
+                if cname:
+                    endpoint = cursors.get(cname) or f"<cursor {cname}>"
                 if columns is None:
-                    columns = _fetch_columns(up, into_fields, cursor_cols or {})
+                    columns, _ = _fetch_columns(cname, into_fields, cursor_cols or {})
             if endpoint is None:
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
@@ -731,10 +764,16 @@ def _cursor_columns(semantics: dict, provenance: dict) -> Dict[str, List[str]]:
         cols = spec.get("selectList")
         if not cols:
             continue
-        m = _DECLARE_CURSOR.search(
-            mask_literals((provenance.get(name) or {}).get("cobol", "") or ""))
-        if m:
-            out[m.group(1).upper()] = cols
+        # The parser names the cursor from the DECLARE's tokens; the text scan is the
+        # fallback for a spec that predates it (or an overlay built over rewritten
+        # actions), masked so a literal in the select list cannot supply the name.
+        cursor = spec.get("cursor")
+        if not cursor:
+            m = _DECLARE_CURSOR.search(
+                mask_literals((provenance.get(name) or {}).get("cobol", "") or ""))
+            cursor = m.group(1) if m else None
+        if cursor:
+            out[cursor.upper()] = cols
     return out
 
 

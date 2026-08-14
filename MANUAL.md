@@ -1097,8 +1097,40 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `event` | `GET.<TYPE>.<ENDPOINT>` / `CREATE.<TYPE>.<ENDPOINT>` |
 | `fields` | **the data crossing in the event's direction** |
 | `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) |
+| `columns` | for Db2 events, **which column fills which host variable** — see below |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |
+
+### `columns` — the cross-program state identity
+
+A host-variable *name* is program-local: A's `WS-BALANCE` and B's `CUST-BAL` may be the
+same state or unrelated, and nothing else in the recovery says which. The **column** is
+the database's, shared by every program that touches it — so this mapping is what proves
+two programs read or write the same state.
+
+```json
+"columns": [{ "table": "ACCOUNT", "column": "BAL", "hostVar": "WS-BAL" }]
+```
+
+Recovered from four shapes, and **only** where the source proves the correspondence:
+
+| Shape | How it correlates |
+|---|---|
+| `SELECT c1, c2 INTO :a, :b` | positionally, select list against INTO list |
+| `UPDATE t SET c = :h` | explicit pairs — the highest fidelity there is |
+| `INSERT INTO t (c1, c2) VALUES (:a, :b)` | positionally, column list against VALUES list |
+| `DECLARE cur CURSOR FOR SELECT …` + `FETCH cur INTO …` | the columns are on the DECLARE and the host variables on the FETCH; the two are joined by cursor name after the whole program is compiled |
+
+It **refuses** rather than guessing whenever the counts do not line up — indicator
+variables (`:WS-BAL:IND-BAL` is two host variables for one column) and host structures
+(`INTO :CUST-REC` is one for N) would otherwise zip into confidently wrong lineage. Every
+refusal emits a flag naming the reason; wrong lineage is worse than none.
+
+Slots that name no column are reported too, not dropped: `SELECT 'Y'`, `COUNT(*)`,
+`QTY * PRICE` and `VALUES (…, CURRENT TIMESTAMP)` each occupy a slot whose value has no
+column identity, so the field's origin is unresolved and says so. Note `COUNT(*)` is *not*
+`SELECT *` — the star inside a function is one derived item, and its sibling columns still
+correlate normally.
 
 ### Field-level fidelity — what lands in `fields`
 
@@ -1111,7 +1143,7 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `ACCEPT x FROM DATE/DAY/TIME` | a **system-clock** read, not terminal input |
 | SQL `SELECT/FETCH … INTO` | INTO host vars in `fields`; `WHERE` host vars in `params` |
 | SQL `INSERT/UPDATE/DELETE` | its host variables |
-| SQL cursor `FETCH` | endpoint resolves to the **table** via `DECLARE … CURSOR FOR … FROM t` |
+| SQL cursor `FETCH` | endpoint resolves to the **table** via `DECLARE … CURSOR FOR … FROM t`, including a rowset `FETCH NEXT ROWSET FROM cur` (the positioning keywords are not mistaken for the cursor name) |
 | CICS `RETURN` | the COMMAREA; `TRANSID(x)` appears in the verb (the pseudo-conversational contract) |
 | CICS `LINK`/`XCTL` | the COMMAREA |
 | CICS `READ`/`WRITE` dataset | `INTO`/`FROM` area; `RIDFLD` key in `params` |
@@ -1180,6 +1212,7 @@ unrecovered spot is visible.
 | `dynamic CALL … ` | the target could not be proven constant. The reason spells out WHY: assigned from variables (genuinely runtime), several candidate literals, 88-level `VALUE`s present but no `SET … TO TRUE` visible (candidates listed), declared-but-never-assigned, or **not declared in the visible source** — the latter names the missing copybook that likely holds the `VALUE`; supply it and the target resolves. Constant propagation covers `VALUE` clauses, `MOVE 'lit'`, and `SET <88-condition> TO TRUE` |
 | `dynamic CICS <verb> <OPT>(…)` | a `PROGRAM`/`TRANSID`/`QUEUE`/`FILE`/`MAP`/`MAPSET` operand is a data name — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise (an `EIB*` operand is CICS-supplied, always runtime) |
 | `dynamic SQL: EXEC SQL PREPARE/EXECUTE` | the statement text is assembled at run time — operation and tables not statically knowable |
+| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree (indicator variable / host structure — verify by hand); `SELECT *` or an `INSERT` with no column list (the list is in the **Db2 catalog**, not the source); a select-list item or VALUES slot that names no column (a literal or expression — genuinely has no column identity); or, for a `FETCH`, that no `DECLARE` for its cursor is visible — usually a **copybook that did not arrive**, so supply it and the mapping resolves |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
 | `NEXT SENTENCE` | differs from CONTINUE; verify the intended skip |
 | `arithmetic writes non-numeric X` | **S0C7 risk** — verify the type |
