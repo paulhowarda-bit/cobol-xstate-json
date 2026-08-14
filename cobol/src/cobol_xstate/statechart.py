@@ -32,7 +32,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .analysis import CallAnalysis, analyze_calls
 from .interface import build_interface
@@ -242,6 +242,10 @@ class _BuildCtx:
     # Synthetic data items the compiler introduces (PERFORM n TIMES loop counters):
     # merged into the data dictionary so the emitter types and seeds them.
     synthetic_data: Dict[str, dict] = field(default_factory=dict)
+    # (action, paragraph, line) per EXEC SQL FETCH. A FETCH's columns live on its
+    # cursor's DECLARE, which the compiler is not guaranteed to have reached yet, so the
+    # correlation runs as a post-pass (_correlate_fetches) and needs each site back.
+    fetch_sites: List[Tuple[str, str, int]] = field(default_factory=list)
 
     def new_times_counter(self, line: int) -> str:
         n = sum(1 for k in self.synthetic_data if k.startswith("TIMES-CTR-")) + 1
@@ -369,6 +373,8 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         spec["selectList"] = st.select_list      # a cursor DECLARE's columns, for its FETCH
     if st.column_note:
         spec["columnNote"] = st.column_note
+    if st.cursor:
+        spec["cursor"] = st.cursor               # a FETCH's join back to its DECLARE
     return spec
 
 
@@ -637,6 +643,8 @@ class _ParaCompiler:
                 "raw": f"EXEC {st.lang} {st.text} END-EXEC",
             }
             self.ctx.action_sem[name] = _with_columns(spec, st)
+            if st.lang == "SQL" and st.verb == "FETCH":
+                self.ctx.fetch_sites.append((name, self.pname, st.line))
         else:
             spec = {"verb": st.verb, "kind": f"exec-{st.lang.lower()}",
                     "hostVars": st.host_vars,
@@ -1313,6 +1321,42 @@ def _section_map(program: Program) -> Dict[str, List[str]]:
     return out
 
 
+def _correlate_fetches(ctx: "_BuildCtx") -> None:
+    """Zip every FETCH's host variables against its cursor's DECLARE, once the whole
+    program is compiled.
+
+    A cursor splits the evidence over two statements - the DECLARE holds the columns,
+    the FETCH the host variables - and nothing guarantees the DECLARE was compiled
+    first, so this cannot run at the FETCH's own site. Whatever fails to correlate is
+    FLAGGED, not left silent: a FETCH with no column identity is exactly the gap a
+    SELECT with none is, and the interface overlay that used to recover this is a pure
+    read with no way to raise one.
+    """
+    from .interface import _fetch_columns
+    cols_by_cursor: Dict[str, List[Optional[str]]] = {}
+    for spec in ctx.action_sem.values():
+        if (spec.get("verb") == "DECLARE" and spec.get("cursor")
+                and spec.get("selectList")):
+            cols_by_cursor.setdefault(spec["cursor"], spec["selectList"])
+    for name, para, line in ctx.fetch_sites:
+        spec = ctx.action_sem.get(name)
+        if not spec or spec.get("columns") or spec.get("columnNote"):
+            continue
+        into = [a["target"] for a in spec.get("assignments", [])
+                if isinstance(a, dict) and "target" in a]
+        if not into:
+            continue
+        columns, note = _fetch_columns(spec.get("cursor"), into, cols_by_cursor)
+        if columns:
+            spec["columns"] = columns
+        if note:
+            spec["columnNote"] = note
+            ctx.flag(para, line,
+                     f"EXEC SQL FETCH: column<->host-variable mapping not recovered "
+                     f"({note}); cross-program state identity for these fields is "
+                     f"unresolved")
+
+
 def build_machine(program: Program, source_name: str = "<source>") -> Machine:
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
                     data=program.data_by_name)
@@ -1427,6 +1471,8 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         }
         if program_initial:
             config["initial"] = program_initial
+
+    _correlate_fetches(ctx)
 
     notes = list(program.notes)
     if not program.has_procedure_division:

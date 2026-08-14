@@ -1173,6 +1173,7 @@ class StmtParser:
         columns: List[dict] = []
         select_list: List[Optional[str]] = []
         column_note: Optional[str] = None
+        cursor: Optional[str] = None
         if lang == "CICS":
             if verb in ("RETURN", "ABEND"):
                 kind = "terminate"
@@ -1201,17 +1202,26 @@ class StmtParser:
                     select_list, column_note = self._exec_select_columns(toks)
                     columns, column_note = self._correlate(select_list, into_vars,
                                                            column_note)
+                else:
+                    # The cursor named here is what links this FETCH to the DECLARE
+                    # holding its columns; resolved from tokens so the positioning
+                    # keywords of a rowset FETCH cannot be mistaken for the name.
+                    cursor = self._exec_fetch_cursor(toks)
             elif verb == "DECLARE":
                 # DECLARE c CURSOR FOR SELECT cols FROM t: the columns are here, but the
                 # host variables are on the FETCH. Carry the list; the FETCH zips it.
-                select_list, column_note = self._exec_select_columns(toks)
+                cursor = self._exec_declare_cursor(toks)
+                if cursor:
+                    select_list, column_note = self._exec_select_columns(toks)
             elif verb == "UPDATE":
                 columns = self._exec_update_sets(toks)
+            elif verb == "INSERT":
+                columns, column_note = self._exec_insert_columns(toks)
         return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
                         target=target, dynamic=dynamic,
                         host_vars=host_vars, conditions=conditions,
                         into_vars=into_vars, columns=columns, select_list=select_list,
-                        column_note=column_note)
+                        column_note=column_note, cursor=cursor)
 
     # -- SQL column <-> host-variable correlation ---------------------------
     #
@@ -1257,6 +1267,22 @@ class StmtParser:
             return item[2].up
         return None
 
+    @staticmethod
+    def _is_star_item(item: List[Token]) -> bool:
+        """True for a select-list item that IS a star: `*` or `T.*`.
+
+        Not every `*` in a select list is one. `COUNT(*)` and `QTY * PRICE` are ordinary
+        derived items that occupy one slot each, and a flat scan for the character read
+        both as `SELECT *` - reporting "the column list is not in the source" about a
+        statement whose column list is right there, and discarding the sibling slots'
+        real mappings with it. Deciding per ITEM, after the comma split, is what tells
+        the whole-list star apart from an operator inside one item."""
+        if len(item) == 1 and item[0].kind == "punct" and item[0].text == "*":
+            return True
+        return (len(item) == 3 and item[0].kind == "word"           # T.*
+                and item[1].kind == "period"
+                and item[2].kind == "punct" and item[2].text == "*")
+
     @classmethod
     def _exec_select_columns(cls, toks: List[Token]) -> Tuple[List[Optional[str]], Optional[str]]:
         """The select list between SELECT and INTO/FROM, as column names (None = derived).
@@ -1276,10 +1302,11 @@ class StmtParser:
         sel = toks[start:end]
         if sel and sel[0].kind == "word" and sel[0].up in ("DISTINCT", "ALL"):
             sel = sel[1:]
-        if any(t.kind == "punct" and t.text == "*" for t in sel):
+        items = cls._split_top_commas(sel)
+        if any(cls._is_star_item(item) for item in items):
             return [], ("SELECT * : the column list is not in the source; resolving it "
                         "needs the Db2 catalog")
-        return [cls._column_of(item) for item in cls._split_top_commas(sel)], None
+        return [cls._column_of(item) for item in items], None
 
     @classmethod
     def _exec_update_sets(cls, toks: List[Token]) -> List[dict]:
@@ -1311,6 +1338,131 @@ class StmtParser:
         return out
 
     @staticmethod
+    def _paren_group(toks: List[Token], start: int,
+                     end: Optional[int] = None) -> Optional[List[Token]]:
+        """The inner tokens of the first parenthesized group whose `(` lies in
+        ``toks[start:end]``, or None when there is none. Depth-aware, so a nested
+        `(SUBSTR(X,1,3))` closes on its own paren."""
+        stop = len(toks) if end is None else end
+        i = start
+        while i < stop and not (toks[i].kind == "punct" and toks[i].text == "("):
+            i += 1
+        if i >= stop:
+            return None
+        depth = 0
+        for j in range(i, len(toks)):
+            t = toks[j]
+            if t.kind == "punct" and t.text == "(":
+                depth += 1
+            elif t.kind == "punct" and t.text == ")":
+                depth -= 1
+                if depth == 0:
+                    return toks[i + 1:j]
+        return None
+
+    @classmethod
+    def _exec_insert_columns(cls, toks: List[Token]) -> Tuple[List[dict], Optional[str]]:
+        """`INSERT INTO t (c1, c2) VALUES (:h1, CURRENT TIMESTAMP, :h2)` -> the pairs.
+
+        Positional, like `SELECT ... INTO`: the Nth VALUES item fills the Nth column. A
+        slot holding a literal or an expression rather than a host variable writes a
+        column the program does not source from any field, so it maps to nothing - and
+        is noted, because a column written from somewhere unrecovered is a gap.
+
+        INSERT is the WRITE half of the cross-program state identity. Without it a
+        program that only ever inserts contributes no column evidence at all, and its
+        rows look unrelated to the rows every reader of that table selects.
+        """
+        i_into = next((i for i, t in enumerate(toks)
+                       if t.kind == "word" and t.up == "INTO"), None)
+        if i_into is None:
+            return [], None
+        i_values = next((i for i, t in enumerate(toks)
+                         if t.kind == "word" and t.up == "VALUES"), None)
+        if i_values is None:
+            return [], ("INSERT ... SELECT / fullselect: the values come from a query "
+                        "rather than from host variables, so no column<->field mapping "
+                        "exists at this site - the source table's lineage does")
+        col_toks = cls._paren_group(toks, i_into + 1, i_values)
+        if col_toks is None:
+            return [], ("INSERT without an explicit column list: the target columns are "
+                        "the table's declared order, which is not in the source; "
+                        "resolving it needs the Db2 catalog")
+        val_toks = cls._paren_group(toks, i_values + 1)
+        if val_toks is None:
+            return [], "INSERT VALUES list is not parseable here - verify by hand"
+        cols = [cls._column_of(item) for item in cls._split_top_commas(col_toks)]
+        vals = cls._split_top_commas(val_toks)
+        if len(cols) != len(vals):
+            return [], (f"{len(cols)} column(s) vs {len(vals)} VALUES item(s): not "
+                        f"correlatable (a host structure expanding to several columns) "
+                        f"- verify by hand")
+        out: List[dict] = []
+        unsourced: List[str] = []
+        for col, item in zip(cols, vals):
+            if col is None:
+                continue
+            if (len(item) == 2 and item[0].kind == "punct" and item[0].text == ":"
+                    and item[1].kind == "word"):
+                out.append({"column": col, "hostVar": item[1].up})
+            else:
+                unsourced.append(col)
+        if unsourced:
+            return out, (f"{len(unsourced)} column(s) written from a literal or "
+                         f"expression rather than a host variable "
+                         f"({', '.join(unsourced)}) - no program field maps to them")
+        return out, None
+
+    # Db2 positioning keywords that may sit between FETCH and its cursor name.
+    _FETCH_POS = frozenset({
+        "NEXT", "PRIOR", "FIRST", "LAST", "CURRENT", "BEFORE", "AFTER", "ABSOLUTE",
+        "RELATIVE", "ROWSET", "FROM", "INSENSITIVE", "SENSITIVE", "STARTING", "AT",
+        "CONTINUE",
+    })
+
+    @staticmethod
+    def _exec_declare_cursor(toks: List[Token]) -> Optional[str]:
+        """`DECLARE c CURSOR ...` -> c. None for the other DECLAREs (``... TABLE``,
+        ``... STATEMENT``), which name no cursor and hold no select list to zip."""
+        for i, t in enumerate(toks):
+            if t.kind == "word" and t.up == "DECLARE":
+                if (i + 2 < len(toks) and toks[i + 1].kind == "word"
+                        and toks[i + 2].kind == "word" and toks[i + 2].up == "CURSOR"):
+                    return toks[i + 1].up
+                return None
+        return None
+
+    @classmethod
+    def _exec_fetch_cursor(cls, toks: List[Token]) -> Optional[str]:
+        """The cursor a FETCH reads, from its TOKENS rather than from its text.
+
+        Db2 allows a run of positioning keywords between the verb and the cursor name -
+        `FETCH NEXT ROWSET FROM CSR1 FOR 10 ROWS INTO ...` - and a pattern that does not
+        know them binds the first word after FETCH. Reading `ROWSET` as the cursor name
+        is not a harmless miss: it matches no DECLARE, so the FETCH loses its columns AND
+        its endpoint becomes a phantom `<cursor ROWSET>` instead of the real table, which
+        propagates into the artifact manifest and on into the retrieval stage.
+        """
+        i = next((i for i, t in enumerate(toks)
+                  if t.kind == "word" and t.up == "FETCH"), None)
+        if i is None:
+            return None
+        i += 1
+        while i < len(toks):
+            t = toks[i]
+            if t.kind == "number":                        # ABSOLUTE 5
+                i += 1
+            elif t.kind == "punct" and t.text == ":":     # ABSOLUTE :WS-N
+                i += 2
+            elif t.kind == "word" and t.up in cls._FETCH_POS:
+                i += 1
+            elif t.kind == "word":
+                return t.up
+            else:
+                return None
+        return None
+
+    @staticmethod
     def _correlate(columns: List[Optional[str]], into_vars: List[str],
                    note: Optional[str]) -> Tuple[List[dict], Optional[str]]:
         """Zip a select list against the INTO host variables - ONLY when the counts prove
@@ -1329,8 +1481,19 @@ class StmtParser:
             return [], (f"{len(columns)} column(s) vs {len(into_vars)} host variable(s): "
                         f"not correlatable (indicator variables, or a host structure "
                         f"expanding to several columns) - verify by hand")
-        return ([{"column": c, "hostVar": h} for c, h in zip(columns, into_vars)
-                 if c is not None], None)
+        mapped = [{"column": c, "hostVar": h} for c, h in zip(columns, into_vars)
+                  if c is not None]
+        # A derived slot (`SELECT 'Y'`, `COUNT(*)`, `A + B`) fills its host variable from
+        # something that is not a column, so there is no mapping to emit - but the field's
+        # origin is then unrecovered, which is a gap and not a benign fact. Say so, per
+        # variable: whether such a slot is resolvable at all is a judgement for the
+        # reviewer looking at the statement, not one to make here by staying quiet.
+        derived = [h for c, h in zip(columns, into_vars) if c is None]
+        if derived:
+            return mapped, (f"{len(derived)} select-list item(s) name no column (literal "
+                            f"or expression) - the value reaching "
+                            f"{', '.join(derived)} has no column identity")
+        return mapped, None
 
     @staticmethod
     def _exec_into_vars(toks: List[Token]) -> List[str]:

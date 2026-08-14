@@ -156,6 +156,10 @@ class ExecStmt(Stmt):
     # cursor DECLARE, whose columns must be zipped against a later FETCH's host vars.
     select_list: List[Optional[str]] = field(default_factory=list)
     column_note: Optional[str] = None     # why the columns could NOT be correlated
+    # The cursor a FETCH reads, resolved from tokens (a rowset FETCH buries the name
+    # behind positioning keywords). It is the join back to the DECLARE that holds the
+    # columns, and it names the endpoint the FETCH crosses.
+    cursor: Optional[str] = None
 
 
 @dataclass

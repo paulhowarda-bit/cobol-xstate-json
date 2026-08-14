@@ -191,3 +191,79 @@ def test_qualified_table_names_resolve_to_the_table():
     assert _SQL_FROM.search("SELECT X INTO : Y FROM ACCOUNT").group(1) == "ACCOUNT"
     assert _SQL_UPDATE.search("UPDATE S . CUST SET A = : B").group(1) == "CUST"
     assert _SQL_INTO_TABLE.search("INSERT INTO S . T ( A ) VALUES ( : X )").group(1) == "T"
+
+
+# --------------------------------------------------------------------------- #
+# sqlgaps: the write half, and the shapes that must FLAG rather than fall quiet
+# --------------------------------------------------------------------------- #
+#
+# Everything below was found on a real estate run: 5,370 unrecovered-mapping warnings
+# over 1,124 field names. The point of each test is not only that the mapping is now
+# recovered, but that whatever is still NOT recovered says so out loud - an absent
+# mapping that nobody reports reads exactly like a program with nothing to map.
+
+
+def _flags(name):
+    src = (EXAMPLES / name).read_text()
+    return " ".join(f["message"] for f in build_machine(parse_program(src)).flags)
+
+
+def test_insert_maps_each_column_to_its_values_item():
+    """INSERT is the WRITE half of the cross-program state identity. Without it a
+    program that only ever inserts contributes no column evidence at all, and its rows
+    look unrelated to the rows every reader of that table selects."""
+    iface = _iface("sqlgaps.cbl")
+    ins = next(e for e in iface["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "ACCOUNT" and e.get("columns"))
+    assert {c["column"]: c["hostVar"] for c in ins["columns"]} == {
+        "ID": "WS-ID", "NAME": "WS-NAME", "BAL": "WS-BAL"}
+    assert ins["columns"][0]["table"] == "ACCOUNT"
+
+
+def test_insert_literal_slot_maps_no_field_and_says_so():
+    """`VALUES (:WS-ID, CURRENT TIMESTAMP)` writes STAMP from no program field. ID is
+    still proven; the column with nothing behind it is reported, not dropped."""
+    iface, flags = _iface("sqlgaps.cbl"), _flags("sqlgaps.cbl")
+    ins = next(e for e in iface["events"] if e["endpoint"] == "AUDITLOG")
+    assert [(c["column"], c["hostVar"]) for c in ins["columns"]] == [("ID", "WS-ID")]
+    assert "STAMP" in flags
+
+
+def test_insert_without_a_column_list_refuses_rather_than_guessing():
+    """`INSERT INTO ACCOUNT VALUES (...)` targets the table's DECLARED column order,
+    which is not in the source. Zipping it against the VALUES order would invent the
+    very identity the mapping exists to prove."""
+    assert "INSERT without an explicit column list" in _flags("sqlgaps.cbl")
+
+
+def test_rowset_fetch_binds_its_cursor_not_the_positioning_keyword():
+    """`FETCH NEXT ROWSET FROM C2` - a scan that does not know the positioning keywords
+    binds "ROWSET" as the cursor name. That costs more than the mapping: ROWSET matches
+    no DECLARE, so the FETCH's endpoint degrades to a phantom `<cursor ROWSET>` instead
+    of the table the rows actually come from, and that name propagates into the artifact
+    manifest and on into retrieval."""
+    iface = _iface("sqlgaps.cbl")
+    assert "<cursor ROWSET>" not in _dirs(iface, "db2")
+    fetch = next(e for e in iface["events"]
+                 if e["verb"] == "FETCH" and e["endpoint"] == "ACCOUNT")
+    assert [(c["column"], c["hostVar"]) for c in fetch["columns"]] == \
+        [("ID", "WS-ID"), ("NAME", "WS-NAME")]
+
+
+def test_count_star_is_not_select_star():
+    """`SELECT ID, COUNT(*)` has its column list right there. Reading the star inside the
+    function as `SELECT *` reported the list as absent - a WRONG answer rather than a
+    missing one - and discarded ID's provable mapping along with it."""
+    iface, flags = _iface("sqlgaps.cbl"), _flags("sqlgaps.cbl")
+    assert "SELECT *" not in flags
+    sel = next(e for e in iface["events"] if e["verb"] == "SELECT")
+    assert [(c["column"], c["hostVar"]) for c in sel["columns"]] == [("ID", "WS-ID")]
+    # ...while the slot that genuinely names no column is still reported
+    assert "WS-N has no column identity" in flags
+
+
+def test_fetch_without_a_visible_declare_is_flagged():
+    """A cursor DECLAREd in a copybook that did not arrive - or prepared dynamically -
+    leaves its FETCH with host variables and no columns. Whether that is recoverable is
+    the reviewer's call to make from the flag, not ours to make by staying silent."""
+    assert "no DECLARE for cursor C9 is visible" in _flags("sqlgaps.cbl")
