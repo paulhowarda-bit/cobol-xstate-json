@@ -285,6 +285,13 @@ def _qualify(columns: Optional[List[dict]], table: str) -> Optional[List[dict]]:
     return [{"table": table, **c} for c in columns]
 
 
+def _note(hit: dict, note: Optional[str]) -> dict:
+    """Attach the why-no-mapping note to a hit, so the EVENT carries it."""
+    if note:
+        hit["columnNote"] = note
+    return hit
+
+
 # Positioning keywords Db2 allows between FETCH and its cursor name. Kept in step with
 # parser._FETCH_POS, which is the primary reader - this text fallback runs only for an
 # action with no spec (an overlay built over a rewritten config, as reactive's is).
@@ -363,8 +370,13 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     is_cics = "EXEC CICS" in up or name.startswith("exec_cics")
 
     # Which column fills which host variable - the cross-program state identity. The
-    # parser proves it for SELECT/UPDATE; a FETCH's columns live on its cursor's DECLARE.
+    # parser proves it for SELECT/UPDATE/INSERT; a FETCH's columns live on its cursor's
+    # DECLARE (joined at build time, statechart._correlate_fetches). The NOTE says why a
+    # mapping is absent - carried onto the hit so the EVENT distinguishes "nothing to
+    # map here" from "the recovery failed", which downstream tooling cannot tell apart
+    # from an absent key.
     columns = (spec or {}).get("columns") or None
+    note = (spec or {}).get("columnNote")
 
     if is_sql:
         if verb in ("SELECT", "FETCH"):
@@ -373,24 +385,25 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 cname = _fetch_cursor_name(spec, up)
                 if cname:
                     endpoint = cursors.get(cname) or f"<cursor {cname}>"
-                if columns is None:
-                    columns, _ = _fetch_columns(cname, into_fields, cursor_cols or {})
+                if columns is None and note is None:
+                    # Spec-less overlay (reactive's rewritten config): correlate here.
+                    columns, note = _fetch_columns(cname, into_fields, cursor_cols or {})
             if endpoint is None:
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
             params = [h for h in host_vars if h not in into_fields]
-            return [_hit("get", _DB2, endpoint, verb, into_fields, params,
-                         _qualify(columns, endpoint))]
+            return [_note(_hit("get", _DB2, endpoint, verb, into_fields, params,
+                               _qualify(columns, endpoint)), note)]
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
             ep = m.group(1) if m else "<table>"
-            return [_hit("create", _DB2, ep, verb, host_vars,
-                         columns=_qualify(columns, ep))]
+            return [_note(_hit("create", _DB2, ep, verb, host_vars,
+                               columns=_qualify(columns, ep)), note)]
         if verb == "UPDATE":
             m = _SQL_UPDATE.search(up)
             ep = m.group(1) if m else "<table>"
-            return [_hit("create", _DB2, ep, verb, host_vars,
-                         columns=_qualify(columns, ep))]
+            return [_note(_hit("create", _DB2, ep, verb, host_vars,
+                               columns=_qualify(columns, ep)), note)]
         if verb == "DELETE":
             m = _SQL_FROM.search(mup)
             return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
@@ -836,6 +849,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             # forgetting this would make the mapping appear to work in two of three
             # places - the worst kind of bug to chase.
             entry["columns"] = hit["columns"]
+        if hit.get("columnNote"):
+            entry["columnNote"] = hit["columnNote"]
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
         # one came through, `candidates` the literals an ambiguous one may be.
