@@ -36,6 +36,6 @@ if ensure_on_path() is not None:
 if importlib.util.find_spec("jcl_dependencies") is None:
     _sibling = Path(os.environ.get(
         "JCL_DEPENDENCIES_REPO",
-        _HERE.parents[1].parent / "jcl-dependencies")) / "src"
+        _HERE.parent.parent / "jcl-dependencies")) / "src"
     if (_sibling / "jcl_dependencies" / "__init__.py").is_file():
         sys.path.insert(0, str(_sibling))

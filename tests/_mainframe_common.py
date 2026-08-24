@@ -16,7 +16,7 @@ from pathlib import Path
 
 CHECKOUT = Path(os.environ.get(
     "MAINFRAME_COMMON_REPO",
-    Path(__file__).resolve().parents[2].parent / "mainframe-common"))
+    Path(__file__).resolve().parents[1].parent / "mainframe-common"))
 
 
 def ensure_on_path():

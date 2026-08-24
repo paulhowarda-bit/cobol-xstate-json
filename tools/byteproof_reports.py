@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Dict, List
 
 REPO = Path(__file__).resolve().parents[1]
-EXAMPLES = REPO / "cobol" / "examples"
+EXAMPLES = REPO / "examples"
 
 # mainframe-artifacts/src and cobol-parser/src live in the mainframe-common sibling checkout (override
 # with MAINFRAME_COMMON_REPO). When the distributions are pip-installed instead, the
@@ -45,7 +45,7 @@ import os                                                             # noqa: E4
 _COMMON = Path(os.environ.get("MAINFRAME_COMMON_REPO",
                               REPO.parent / "mainframe-common"))
 for _tree in (_COMMON / "mainframe-artifacts" / "src", _COMMON / "cobol-parser" / "src",
-              REPO / "cobol" / "src", REPO / "cobol" / "tests"):
+              REPO / "src", REPO / "tests"):
     sys.path.insert(0, str(_tree))
 
 from fakes.estate import fetch_artifact                              # noqa: E402

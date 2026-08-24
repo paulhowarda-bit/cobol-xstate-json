@@ -34,13 +34,13 @@ The parse front-end stands alone too — any program can `pip install cobol-pars
 
 | Where | Distribution | What it is |
 |---|---|---|
-| `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) |
+| *(this repo, root)* | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) |
 | mainframe-common `mainframe-artifacts/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable estate bundle |
 | mainframe-common `cobol-parser/` | `cobol-parser` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
 | its own repo | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) |
 
 ```bash
-python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
+python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e .
 python -m pip install -e ../jcl-dependencies  # optional: the JCL front-end
 # or: pip install cobol-xstate[jcl]           # adds the --bind-jcl join
 
@@ -57,7 +57,7 @@ Pure standard library — **no runtime dependencies**, no build step. Python ≥
 ```bash
 cobol-xstate prog.cbl                              # -> out/... (see below)
 cobol-xstate prog.cbl --outdir build/charts        # -> build/charts/... (dir created)
-cobol-xstate cobol/examples/banktran.cbl --summary # + human summary & flags on stderr
+cobol-xstate examples/banktran.cbl --summary # + human summary & flags on stderr
 cobol-xstate prog.cbl --no-business --no-lineage --no-reactive --no-artifacts  # bundle only
 cobol-xstate prog.cbl --machine-only               # bare XState config only
 cobol-xstate - < prog.cbl                          # read from stdin (-> <PROGRAM-ID>.json)
@@ -276,7 +276,7 @@ Most constructs that a naive pass would drop are actually *mappable*; the real
 question is whether a **static** parse can pin the behavior. This tool draws the shape
 and flags what rides on runtime data, rather than skipping it:
 
-- **Dynamic `CALL ident`** — [analysis.py](cobol/src/cobol_xstate/analysis.py) runs
+- **Dynamic `CALL ident`** — [analysis.py](src/cobol_xstate/analysis.py) runs
   constant propagation: a `VALUE 'POSTLOG'` clause or `MOVE 'POSTLOG' TO ident` with no
   conflicting assignment resolves the target (`call_POSTLOG`, no flag). If a non-literal
   assignment can also reach the call, it stays flagged — genuinely runtime.
@@ -408,14 +408,14 @@ parsed carelessly.
 ## Development
 
 ```bash
-python -m pytest -q     # ~645 tests in cobol/tests (mainframe-artifacts/cobol-parser suites live in the
+python -m pytest -q     # ~645 tests in tests (mainframe-artifacts/cobol-parser suites live in the
                         # mainframe-common repository, the JCL suite in jcl-dependencies;
                         # the tests here find sibling ../mainframe-common and
                         # ../jcl-dependencies checkouts automatically)
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
-install (`npm install` **in `cobol/`**); they skip cleanly when those are absent — so
+install (`npm install` at the repo root); they skip cleanly when those are absent — so
 check the skip count when a change touches the emitters. Two more proofs run before
 merging: `python tools/gate.py` (byte-stability of every view and both retrieval
 reports against `goldens/`, across hash seeds and `--jobs` levels) and
@@ -425,15 +425,15 @@ stand apart, installing mainframe-artifacts/cobol-parser from the sibling mainfr
 Layout (mainframe-artifacts/src and cobol-parser/src live in the mainframe-common repository):
 
 ```
-cobol/src/cobol_xstate/       normalizer · lexer · model · parser · preprocessor ·
+src/cobol_xstate/       normalizer · lexer · model · parser · preprocessor ·
                     data_division · semantics · analysis · naming · statechart ·
                     emitter · harel · interface · business · lineage · artifacts ·
                     dynamic_calls · reactive · classify · api · bind · cli
-cobol/src/cobol_xstate/runtime/   package data, emitted alongside `--target js` output
+src/cobol_xstate/runtime/   package data, emitted alongside `--target js` output
                     (never executed by the converter itself):
                     cobolRuntime.mjs (fixed-point decimal ops + field-aware store)
                     cobolDriver.mjs  (reference driver for the golden master)
-cobol/examples/     custrpt.cbl (canonical batch loop) · banktran.cbl (EVALUATE +
+examples/     custrpt.cbl (canonical batch loop) · banktran.cbl (EVALUATE +
                     dynamic CALL) · altswitch.cbl (ALTER) · errlit.cbl (keywords
                     inside literals) · ... one fixture per construct
 goldens/ + tools/   the byte-stability ratchet (gate.py, byteproof*.py) and the
