@@ -69,6 +69,9 @@ cobol-xstate prog.cbl --copybook-fetcher pkg.client:fetch   # override the estat
 cobol-xstate prog.cbl --gather-only ./bundle       # retrieval only, on the estate box
 cobol-xstate prog.cbl --from-bundle ./bundle       # model from it - no network at all
 cobol-xstate prog.cbl --no-fetch                   # never contact the estate (reported as such)
+
+cobol-parse prog.cbl -o prog.parse.json            # parse upfront (serialized Program, sha256-pinned)
+cobol-xstate prog.cbl --from-parse prog.parse.json # model from it - the parse is skipped
 ```
 
 **Every run retrieves its dependencies — by default and by design.** Before parsing, the

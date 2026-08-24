@@ -85,7 +85,8 @@ def main() -> int:
               else "core + parser + cobol (jcl checkout absent)")
         v = make_venv(root, "all", ("core", "parser", "cobol", "jcl") if have_jcl
                       else ("core", "parser", "cobol"))
-        scripts = ("cobol-xstate", "jcl-dependencies") if have_jcl else ("cobol-xstate",)
+        scripts = (("cobol-xstate", "cobol-parse", "jcl-dependencies") if have_jcl
+                   else ("cobol-xstate", "cobol-parse"))
         for script in scripts:
             check(f"{script} console script exists",
                   (v / BIN / f"{script}{EXE}").exists())
@@ -93,6 +94,18 @@ def main() -> int:
                 "--outdir", str(out / "a"), "-q")
         check("a COBOL run writes its eight files", r.returncode == 0
               and len(list((out / "a").glob("*.json"))) == 8)
+        # The two-step run: parse upfront, then model from the parse bundle.
+        r = run(v, "-m", "cobol_parse", "cobol/examples/accum.cbl",
+                "-o", str(out / "accum.parse.json"), "-q")
+        check("cobol-parse writes a parse bundle", r.returncode == 0
+              and (out / "accum.parse.json").is_file())
+        r = run(v, "-m", "cobol_xstate", "cobol/examples/accum.cbl",
+                "--from-parse", str(out / "accum.parse.json"),
+                "--outdir", str(out / "a2"), "-q")
+        ok = r.returncode == 0 and len(list((out / "a2").glob("*.json"))) == 8
+        same = ok and all((out / "a" / p.name).read_bytes() == p.read_bytes()
+                          for p in (out / "a2").glob("*.json"))
+        check("--from-parse writes the same eight files byte-for-byte", same)
         if have_jcl:
             r = run(v, "-m", "jcl_dependencies",
                     str(JCL_REPO / "examples" / "acctunld.jcl"),
@@ -133,6 +146,11 @@ def main() -> int:
                 "print('PARAS', len(prog.paragraphs), 'ID', prog.program_id)")
         check("parse_program recovers a real example with no modelling engine",
               r.returncode == 0 and "ID" in r.stdout and "PARAS 0" not in r.stdout,
+              "" if r.returncode == 0 else r.stderr.strip().splitlines()[-1][:100])
+        r = run(v, "-m", "cobol_parse", "cobol/examples/accum.cbl",
+                "-o", str(out / "parse-box.parse.json"), "-q")
+        check("the cobol-parse CLI works with no modelling engine",
+              r.returncode == 0 and (out / "parse-box.parse.json").is_file(),
               "" if r.returncode == 0 else r.stderr.strip().splitlines()[-1][:100])
 
         print("\nCOBOL box (core + parser + cobol - the JCL extra not installed)")

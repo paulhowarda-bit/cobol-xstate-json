@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from cobol_parse.parse_bundle import ParseBundle, ParseBundleError
 from cobol_xstate_core.bundle import EstateBundle, recording_fetcher, write_bundle
 from cobol_xstate_core.fetch import fetch_dependencies
 from cobol_xstate_core.prefetch import PrefetchResult
@@ -135,6 +136,7 @@ def _resolve_format(source: str, fmt: Optional[SourceFormat],
 def analyze(source: str, *, source_name: str = "<source>",
             fmt: Optional[SourceFormat] = None,
             bundle: Optional[EstateBundle] = None,
+            parse: Optional[ParseBundle] = None,
             fetcher: Optional[Any] = None,
             retrieve: bool = True,
             paths: Sequence[str] = (), exts: Sequence[str] = (),
@@ -154,11 +156,25 @@ def analyze(source: str, *, source_name: str = "<source>",
                        mistaken for an estate that had nothing
     ``bundle=b``       replay a gathered estate; needs no network at all
 
+    ``parse=p`` skips the parse: the ``Program`` comes rehydrated from a parse bundle
+    written upfront by ``cobol-parse``. The bundle refuses a source whose hash is not
+    the one it parsed - a stale Program is wrong everywhere at once, silently. It
+    composes with ``bundle=`` (the estate replay) for a fully offline, parse-free run.
+
     ``jcl`` is ``[(name, text)]`` of JCL whose DD statements bind this program's file
     ddnames to datasets. Supplying it requires the optional JCL package.
     """
     timer = timer or StageTimer(_log, False, source_name)
-    fmt = _resolve_format(source, fmt, source_name)
+    if parse is not None:
+        parse.check_source(source, source_name=source_name)
+        if fmt is not None and fmt != parse.fmt:
+            raise ParseBundleError(
+                f"format {fmt.value!r} was requested, but the parse bundle was "
+                f"produced as {parse.fmt.value!r}; drop the override or re-run the "
+                f"producer")
+        fmt = parse.fmt
+    else:
+        fmt = _resolve_format(source, fmt, source_name)
     all_exts = tuple(exts) + DEFAULT_EXTS
     paths = list(paths)
 
@@ -182,12 +198,23 @@ def analyze(source: str, *, source_name: str = "<source>",
                              source_name=source_name, unavailable=unavailable,
                              exts=all_exts, jobs=jobs)
 
-    resolver = CopybookResolver(
-        paths=paths, exts=all_exts, fetcher=fetcher,
-        store=pre.store,            # everything stage 1 retrieved, already paid for
-    )
-    with timer.stage("parse"):
-        program = parse_program(source, fmt, resolver=resolver)
+    if parse is not None:
+        # The replay introduces no new branch downstream: the ONE call that differs is
+        # parse_program, replaced by rehydration; build_machine and everything after it
+        # sees the same Program a live parse would have produced (the byte-stability
+        # gate proves "the same" byte for byte). The copybook errors are the producer
+        # run's - there is no resolver here to have its own.
+        with timer.stage("parse"):
+            program = parse.program()
+        copybook_errors: Tuple[Tuple[str, str], ...] = parse.copybook_errors
+    else:
+        resolver = CopybookResolver(
+            paths=paths, exts=all_exts, fetcher=fetcher,
+            store=pre.store,        # everything stage 1 retrieved, already paid for
+        )
+        with timer.stage("parse"):
+            program = parse_program(source, fmt, resolver=resolver)
+        copybook_errors = tuple(getattr(resolver, "fetch_errors", ()))
     with timer.stage("build_machine"):
         machine = build_machine(program, source_name=source_name)
 
@@ -209,7 +236,7 @@ def analyze(source: str, *, source_name: str = "<source>",
 
     analysis = Analysis(machine=machine, program=program, prefetch=pre,
                         source_name=source_name, bind_jobs=tuple(bind_jobs),
-                        copybook_errors=tuple(getattr(resolver, "fetch_errors", ())))
+                        copybook_errors=copybook_errors)
 
     # STAGE 2. Unconditional: retrieving what this program depends on is not a mode of
     # the tool, it is what the tool does.

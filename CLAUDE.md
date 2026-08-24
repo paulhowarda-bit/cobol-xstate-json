@@ -46,6 +46,11 @@ jcl-dependencies job.jcl               # 2 views + both retrieval reports (its o
 cobol-xstate prog.cbl --gather-only ./bundle
 cobol-xstate prog.cbl --from-bundle ./bundle     # no network at all
 
+# Parse upfront, model later (the parse bundle = serialized Program, sha256-pinned)
+cobol-parse prog.cbl -o prog.parse.json
+cobol-xstate prog.cbl --from-parse prog.parse.json           # skips the parse
+cobol-xstate prog.cbl --from-bundle ./b --from-parse prog.parse.json  # offline + parse-free
+
 python -m pytest cobol/tests/test_emitter.py -q            # one module
 python -m pytest cobol/tests/test_reactive.py -k retarget  # one test by name substring
 ```
@@ -98,7 +103,7 @@ Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `
 
 ## Conventions when editing
 
-- **Output is byte-stable and deterministic.** A refactor that should not change output must produce identical bytes — a green test run does not prove this. Verify with **`python tools/gate.py`**, which hashes every view of every `examples/*.cbl` and both retrieval reports, and checks them under two `PYTHONHASHSEED` values and at `--jobs 1` and `8`:
+- **Output is byte-stable and deterministic.** A refactor that should not change output must produce identical bytes — a green test run does not prove this. Verify with **`python tools/gate.py`**, which hashes every view of every `examples/*.cbl` and both retrieval reports, and checks them under two `PYTHONHASHSEED` values, at `--jobs 1` and `8`, and through the parse-bundle round trip (Program → JSON → Program before modelling, against the SAME goldens):
 
   ```bash
   python tools/gate.py
@@ -107,6 +112,7 @@ Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `
   Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `cobol/tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
 
   Two things genuinely are machine-dependent and are normalized before hashing, rather than pretended away: `copiedTo` in both reports, and the `source` of any member resolved from disk (a copybook row in the artifact manifest carries it, so `<program>::artifacts` embeds a local path). Note also that `core.autocrlf=true` here, so a fresh clone gets CRLF example files while this working tree has LF — which changes the `bytes:` count in the prefetch report. The goldens are recorded from the working tree.
-- **Prove the three distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds three throwaway venvs and checks that a `core+jcl` box cannot even find `cobol_xstate` while its CLI still works, and that `--bind-jcl` on a `core+cobol` box fails naming the exact pip command. `cobol/tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
+- **Prove the distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds four throwaway venvs and checks that a `core+jcl` box cannot even find `cobol_xstate` or `cobol_parse`, that a `core+parser` box parses (and runs `cobol-parse`) with no modelling engine at all, and that `--bind-jcl` on a `core+parser+cobol` box fails naming the exact pip command. `cobol/tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
+- **The parse bundle is a versioned contract over `model.py`.** Any change to a dataclass field set in `parser/src/cobol_parse/model.py` (or `DataItem`/`PicType`) is a `VERSION` bump in `parse_bundle.py`; a newer bundle is refused, never partially read.
 - **Prove runnable changes under real XState**, not just in Python — an emitted machine that type-checks can still compute the wrong decimal.
 - One test module per pipeline stage/view in `tests/`; `examples/*.cbl` are the fixtures each construct is exercised against (add one when adding a construct).

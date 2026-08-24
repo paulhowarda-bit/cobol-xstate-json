@@ -17,6 +17,7 @@ from cobol_xstate_core.cliargs import (add_logging_args, add_output_args,
                                        add_retrieval_args, jobs as _jobs)
 from cobol_xstate_core.detect import looks_like_jcl as _looks_like_jcl
 from cobol_parse import PACKAGE_LOGGER as PARSE_LOGGER
+from cobol_parse.parse_bundle import open_parse_bundle
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
 from cobol_xstate_core.output import make_run_dir as _make_run_dir
@@ -106,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--copybook-ext", action="append", default=[], metavar="EXT",
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
     add_retrieval_args(p)
+    p.add_argument("--from-parse", metavar="FILE",
+                   help="model from a parse bundle written upfront by cobol-parse, "
+                        "skipping the parse entirely. The bundle records the sha256 of "
+                        "the exact source it parsed and a different source is an error "
+                        "- a stale Program is silently wrong everywhere. Composes with "
+                        "--from-bundle for a fully offline, parse-free run.")
     p.add_argument("--machine-only", action="store_true",
                    help="emit only the bare XState config (omit provenance/flags/notes)")
     p.add_argument("--no-lineage", action="store_true",
@@ -280,6 +287,21 @@ def _run(args, timing_sink=None) -> int:
         _log.error("error: --gather-only writes a bundle and --from-bundle reads one; "
                    "they cannot both apply to a single run")
         return 2
+    if args.gather_only and args.from_parse:
+        # Not merely odd: the gather's stage-2 plan comes from the parsed model, and
+        # tying that record to a pre-parsed Program instead of the live parse would
+        # blur which run produced which evidence.
+        _log.error("error: --gather-only runs the retrieval half against a live parse; "
+                   "it cannot take --from-parse")
+        return 2
+
+    parse = None
+    if args.from_parse:
+        try:
+            parse = open_parse_bundle(args.from_parse)
+        except CobolXstateError as exc:
+            _log.error(f"error: {exc}")
+            return 2
 
     bundle = None
     if args.from_bundle:
@@ -336,7 +358,7 @@ def _run(args, timing_sink=None) -> int:
                            fetcher=fetcher, paths=search_paths,
                            exts=tuple(args.copybook_ext), dest=deps, unavailable=why,
                            jobs=_jobs(args), jcl=jcl_sources, timer=timer,
-                           bundle=bundle, retrieve=not args.no_fetch)
+                           bundle=bundle, parse=parse, retrieve=not args.no_fetch)
     except JclSupportMissing as exc:
         _log.error(f"error: {exc}")
         return 2

@@ -120,18 +120,26 @@ def guarded(fn: Callable[[], str]) -> str:
 
 # ----------------------------------------------------------------------- the views
 
-def cobol_views(path: Path) -> Dict[str, str]:
+def cobol_views(path: Path, via_parse_bundle: bool = False) -> Dict[str, str]:
     """Every artifact a default run would write for one COBOL source, as text.
 
     Mirrors cli._run's sequencing exactly, including the order in which the artifact
     manifest is built (build -> attribute -> annotate). attribute_resolution with an
     empty store is a no-op, but it is called anyway so this stays the same call
     sequence the CLI makes - if that ever stops being a no-op, the ratchet sees it.
+
+    With ``via_parse_bundle`` the Program is serialized to the parse-bundle JSON
+    contract and rehydrated before modelling - the round trip a two-step
+    ``cobol-parse`` / ``--from-parse`` run takes. Checked against the SAME goldens as
+    the direct path, which is the proof that the contract loses nothing.
     """
     source = path.read_text(encoding="utf-8", errors="replace")
     fmt = detect_source_format(source).format
     resolver = CopybookResolver(paths=[str(EXAMPLES)], fetcher=None, store={})
     program = parse_program(source, fmt, resolver=resolver)
+    if via_parse_bundle:
+        from cobol_parse.parse_bundle import program_from_dict, program_to_dict
+        program = program_from_dict(json.loads(json.dumps(program_to_dict(program))))
     machine = build_machine(program, source_name=path.name)
 
     art = build_artifacts(machine)
@@ -155,12 +163,12 @@ def cobol_views(path: Path) -> Dict[str, str]:
 
 
 
-def build_manifest() -> Dict[str, str]:
+def build_manifest(via_parse_bundle: bool = False) -> Dict[str, str]:
     """key -> sha256, over every example. Sorted so the file is diff-friendly and the
     ordering cannot depend on the filesystem."""
     out: Dict[str, str] = {}
     for src in sorted(EXAMPLES.glob("*.cbl")):
-        for view, text in cobol_views(src).items():
+        for view, text in cobol_views(src, via_parse_bundle).items():
             out[f"{src.name}::{view}"] = digest(text)
     return dict(sorted(out.items()))
 
@@ -207,9 +215,14 @@ def main() -> int:
     g.add_argument("--check", metavar="FILE", help="compare against the goldens")
     ap.add_argument("--verbose", action="store_true",
                     help="list every key checked, not just the differences")
+    ap.add_argument("--via-parse-bundle", action="store_true",
+                    help="serialize each Program through the cobol-parse parse-bundle "
+                         "contract and rehydrate it before modelling; checked against "
+                         "the SAME goldens as the direct path, proving the contract "
+                         "byte-equivalent")
     args = ap.parse_args()
 
-    manifest = build_manifest()
+    manifest = build_manifest(args.via_parse_bundle)
 
     if args.record:
         dump(Path(args.record), manifest)
