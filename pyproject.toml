@@ -1,34 +1,69 @@
-# Development root. This is NOT a distribution - the one that ships from THIS repo
-# lives in cobol/, with its own pyproject.toml:
+# The cobol-xstate distribution IS this repository now - the repo was flattened once
+# its former core/ and parser/ subdirectories moved to the mainframe-common repository
+# (https://github.com/paulhowarda-bit/mainframe-common) and only one distribution
+# remained. src/, tests/, examples/ live at the root, jcl-dependencies in its own
+# repository, and tools/ + goldens/ are repo tooling that is not shipped.
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cobol-xstate"
+version = "0.1.0"
+description = "Parse IBM Enterprise COBOL and emit its control flow as an XState v5 JSON Harel statechart (a modernization rewrite contract)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Paul Howard" }]
+keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernization", "parser"]
+
+# Both dependencies ship from the mainframe-common repository (one repo, two
+# distributions in subdirectories). Until they are on an index, version pins here mean
+# a bare `pip install cobol-xstate` cannot resolve them - install all three in one
+# command with explicit direct references (which these pins accept):
 #
-#   cobol/  cobol-xstate  Program -> XState statechart + all views
+#   pip install "mainframe-artifacts @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=mainframe-artifacts" \
+#               "cobol-parser @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=cobol-parser" \
+#               "cobol-xstate @ git+https://github.com/paulhowarda-bit/cobol-xstate-json"
 #
-# Its two dependencies live in the mainframe-common repository -
-# https://github.com/paulhowarda-bit/mainframe-common - one repo shipping both:
-#
-#   mainframe-artifacts/  the estate boundary and two-stage retrieval, shared
-#   cobol-parser/         COBOL source -> Program AST  (depends on mainframe-artifacts)
-#
-# The JCL front-end (jcl-dependencies) lives in its OWN repository -
-# https://github.com/paulhowarda-bit/jcl-dependencies - and depends on mainframe-artifacts only.
-# All three of those started as directories in this repo; each was lifted out
-# and the duplicate deleted, so there is exactly one source for each. Pre-split history
-# stays reachable here via `git log --follow`.
-#
-# What this file exists for is running this repo's suite from a checkout with nothing
-# installed: cobol/tests/conftest.py finds a ../mainframe-common checkout automatically
-# (override with MAINFRAME_COMMON_REPO). Install for real with:
-#
-#   python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
-#   python -m pip install -e ../jcl-dependencies   # optional: the --bind-jcl join
-#
-# The JCL half is an EXTRA of cobol-xstate rather than a dependency (`pip install
-# cobol-xstate[jcl]`), because a COBOL install without it is complete - it simply cannot
-# close the ddname->dataset join that --bind-jcl performs.
+# Deliberately NOT direct git references in dependencies themselves, unlike the [jcl]
+# extra below. The extra's reference is inert until someone asks for [jcl]; a HARD
+# dependency's reference is resolved on every install, and pip (proven on 25.0.1)
+# git-clones it even when the same-named project is supplied as a local editable in
+# the same command - an already-installed editable does not satisfy a direct-URL
+# requirement whose URL differs. That would break the offline editable flow
+# (tools/prove_separation.py, the documented dev install) and, once the URL exists,
+# silently replace editable mainframe-artifacts/cobol-parser installs with snapshot clones.
+dependencies = ["mainframe-artifacts>=0.1,<0.2", "cobol-parser>=0.1,<0.2"]
+
+[project.optional-dependencies]
+# --bind-jcl closes the ddname->dataset join, which needs the JCL half. It is an EXTRA
+# rather than a dependency because a COBOL install without it is a complete, working
+# install that simply cannot do that one join - and because the two are peers, so making
+# one require the other would settle a hierarchy that does not exist.
+# A direct git reference while jcl-dependencies is not on an index. Swap to a
+# version pin ("jcl-dependencies>=0.1,<0.2") when it is published - PyPI rejects
+# direct references in uploaded metadata.
+jcl = ["jcl-dependencies @ git+https://github.com/paulhowarda-bit/jcl-dependencies"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+cobol-xstate = "cobol_xstate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The JS decimal runtime + reference driver ship INSIDE the package: `--target js`
+# writes cobolRuntime.mjs beside the emitted module, so it must be importable from an
+# installed wheel, not only from a source checkout.
+[tool.setuptools.package-data]
+cobol_xstate = ["runtime/*.mjs"]
 
 [tool.pytest.ini_options]
-# This repo's source tree on sys.path, so `python -m pytest` works with nothing
-# installed (pytest >= 7). mainframe-artifacts / cobol-parser arrive installed or via
-# the sibling checkout (cobol/tests/conftest.py); jcl-dependencies likewise.
-pythonpath = ["cobol/src", "cobol/tests"]
-testpaths = ["cobol/tests"]
+# src/ and tests/ on sys.path, so `python -m pytest` works with nothing installed
+# (pytest >= 7). mainframe-artifacts / cobol-parser arrive installed or via a sibling
+# ../mainframe-common checkout (tests/conftest.py; override MAINFRAME_COMMON_REPO);
+# jcl-dependencies likewise, via its own repo.
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]

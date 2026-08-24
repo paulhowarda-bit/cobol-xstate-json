@@ -25,16 +25,16 @@ from pathlib import Path
 
 import pytest
 
-# The source trees the child interpreters run against: this repo's cobol/src plus the
+# The source trees the child interpreters run against: this repo's src plus the
 # mainframe-artifacts/ and cobol-parser/ trees from the mainframe-common sibling checkout (override with
 # MAINFRAME_COMMON_REPO - the same discovery conftest.py performs). When the
 # distributions are pip-installed instead, the checkout paths simply do not exist and
 # the inserts are inert - the installed packages carry the run.
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[1]
 _COMMON = Path(os.environ.get("MAINFRAME_COMMON_REPO",
                               _REPO.parent / "mainframe-common"))
 _TREES = (str(_COMMON / "mainframe-artifacts" / "src"), str(_COMMON / "cobol-parser" / "src"),
-          str(_REPO / "cobol" / "src"))
+          str(_REPO / "src"))
 
 # Run each case in its own interpreter. Blocking a module that a previous test already
 # imported would do nothing (it is in sys.modules), and unpicking that inside one process
@@ -91,7 +91,7 @@ def test_a_cobol_install_without_the_jcl_package_is_a_complete_install(tmp_path)
         from cobol_xstate.cli import run
         out = {str(tmp_path / "o")!r}
         with contextlib.redirect_stderr(io.StringIO()):
-            rc = run(["cobol/examples/accum.cbl", "--outdir", out, "-q"])
+            rc = run(["examples/accum.cbl", "--outdir", out, "-q"])
         assert rc == 0, rc
         print("FILES", len([f for f in os.listdir(out) if f.endswith(".json")]))
     """)
@@ -114,7 +114,7 @@ def test_bind_jcl_without_the_jcl_package_says_exactly_what_to_install(tmp_path)
         from cobol_xstate.cli import run
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            rc = run(["cobol/examples/accum.cbl", "--outdir", {str(tmp_path / "o")!r},
+            rc = run(["examples/accum.cbl", "--outdir", {str(tmp_path / "o")!r},
                       "--bind-jcl", {str(job)!r}, "-q"])
         print("RC", rc)
         print(err.getvalue())

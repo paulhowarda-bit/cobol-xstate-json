@@ -33,7 +33,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 import os
 
 FIXTURE = (Path(os.environ.get("JCL_DEPENDENCIES_REPO",
-                               Path(__file__).resolve().parents[3] / "jcl-dependencies"))
+                               Path(__file__).resolve().parents[2] / "jcl-dependencies"))
            / "tests" / "fixtures" / "sqlunld.artifacts.json")
 
 

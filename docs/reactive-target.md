@@ -6,7 +6,7 @@ The shipped deliverable of cobol-xstate is a **reactive** XState v5 machine: one
 boundary I/O is *event-driven* rather than synchronous. The synchronous "faithful" machine
 (`--target js`) stays as an internal, golden-master-tested stage and verification oracle.
 The reactive machine is a **mechanical lowering** of the perimeter overlay
-(`cobol/src/cobol_xstate/interface.py`) over that faithful machine — it inherits trust *through*
+(`src/cobol_xstate/interface.py`) over that faithful machine — it inherits trust *through*
 the validated IR; it is never regenerated from raw COBOL text.
 
 Pipeline:

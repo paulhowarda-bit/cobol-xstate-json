@@ -43,7 +43,7 @@ JCL_REPO = Path(os.environ.get("JCL_DEPENDENCIES_REPO",
                                REPO.parent / "jcl-dependencies"))
 # Which checkout each installable name comes from.
 DISTS = {"core": COMMON_REPO / "mainframe-artifacts", "parser": COMMON_REPO / "cobol-parser",
-         "cobol": REPO / "cobol", "jcl": JCL_REPO}
+         "cobol": REPO, "jcl": JCL_REPO}
 IS_WIN = sys.platform == "win32"
 BIN = "Scripts" if IS_WIN else "bin"
 EXE = ".exe" if IS_WIN else ""
@@ -108,16 +108,16 @@ def main() -> int:
         for script in scripts:
             check(f"{script} console script exists",
                   (v / BIN / f"{script}{EXE}").exists())
-        r = run(v, "-m", "cobol_xstate", "cobol/examples/accum.cbl",
+        r = run(v, "-m", "cobol_xstate", "examples/accum.cbl",
                 "--outdir", str(out / "a"), "-q")
         check("a COBOL run writes its eight files", r.returncode == 0
               and len(list((out / "a").glob("*.json"))) == 8)
         # The two-step run: parse upfront, then model from the parse bundle.
-        r = run(v, "-m", "cobol_parser", "cobol/examples/accum.cbl",
+        r = run(v, "-m", "cobol_parser", "examples/accum.cbl",
                 "-o", str(out / "accum.parse.json"), "-q")
         check("cobol-parser writes a parse bundle", r.returncode == 0
               and (out / "accum.parse.json").is_file())
-        r = run(v, "-m", "cobol_xstate", "cobol/examples/accum.cbl",
+        r = run(v, "-m", "cobol_xstate", "examples/accum.cbl",
                 "--from-parse", str(out / "accum.parse.json"),
                 "--outdir", str(out / "a2"), "-q")
         ok = r.returncode == 0 and len(list((out / "a2").glob("*.json"))) == 8
@@ -159,13 +159,13 @@ def main() -> int:
         r = run(v, "-c",
                 "from pathlib import Path\n"
                 "from cobol_parser import parse_program\n"
-                "src = Path('cobol/examples/accum.cbl').read_text(encoding='utf-8')\n"
+                "src = Path('examples/accum.cbl').read_text(encoding='utf-8')\n"
                 "prog = parse_program(src)\n"
                 "print('PARAS', len(prog.paragraphs), 'ID', prog.program_id)")
         check("parse_program recovers a real example with no modelling engine",
               r.returncode == 0 and "ID" in r.stdout and "PARAS 0" not in r.stdout,
               "" if r.returncode == 0 else r.stderr.strip().splitlines()[-1][:100])
-        r = run(v, "-m", "cobol_parser", "cobol/examples/accum.cbl",
+        r = run(v, "-m", "cobol_parser", "examples/accum.cbl",
                 "-o", str(out / "parse-box.parse.json"), "-q")
         check("the cobol-parser CLI works with no modelling engine",
               r.returncode == 0 and (out / "parse-box.parse.json").is_file(),
@@ -176,7 +176,7 @@ def main() -> int:
         r = run(v, "-c", "import jcl_dependencies")
         check("import jcl_dependencies raises ModuleNotFoundError",
               r.returncode != 0 and "ModuleNotFoundError" in r.stderr)
-        r = run(v, "-m", "cobol_xstate", "cobol/examples/accum.cbl",
+        r = run(v, "-m", "cobol_xstate", "examples/accum.cbl",
                 "--outdir", str(out / "d"), "-q")
         check("a full COBOL run is unaffected", r.returncode == 0
               and len(list((out / "d").glob("*.json"))) == 8)
@@ -185,7 +185,7 @@ def main() -> int:
         if not have_jcl:
             (out / "missing.jcl").parent.mkdir(parents=True, exist_ok=True)
             (out / "missing.jcl").write_text("//J JOB\n//S EXEC PGM=IEFBR14\n")
-        r = run(v, "-m", "cobol_xstate", "cobol/examples/sqlunld.cbl",
+        r = run(v, "-m", "cobol_xstate", "examples/sqlunld.cbl",
                 "--outdir", str(out / "e"), "--bind-jcl", bind_job, "-q")
         combined = r.stdout + r.stderr
         check("--bind-jcl exits 2 naming the exact pip command",

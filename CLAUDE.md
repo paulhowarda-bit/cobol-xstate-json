@@ -12,7 +12,7 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 
 | Where | Distribution | What it is | Depends on |
 |---|---|---|---|
-| `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) | mainframe-artifacts + cobol-parser |
+| *(this repo, root)* | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) | mainframe-artifacts + cobol-parser |
 | [`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) `mainframe-artifacts/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
 | [`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) `cobol-parser/` | `cobol-parser` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), reusable by any program | mainframe-artifacts |
 | *(sibling repo)* | [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies) | JCL → dataflow + dependencies (`jcl-dependencies`) | mainframe-artifacts only |
@@ -20,18 +20,18 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 `cobol_parser` carries no modelling engine: `parse_program(source, fmt, resolver) ->
 Program` is its whole surface, and `cobol_xstate` keeps thin re-export shims at the old
 module paths (`cobol_xstate.parser`, `.model`, …) so existing imports work unchanged.
-The boundary is enforced by `cobol/tests/test_package_boundaries.py` and
+The boundary is enforced by `tests/test_package_boundaries.py` and
 `tools/prove_separation.py`, like the others.
 
 The two front-ends are **peers**: neither imports the other, and a JCL install carries no
 COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
-the lazy orchestrator in `cobol/src/cobol_xstate/bind.py`. `pip install cobol-xstate[jcl]`
+the lazy orchestrator in `src/cobol_xstate/bind.py`. `pip install cobol-xstate[jcl]`
 adds that one join. The JCL front-end and both mainframe-common distributions started
 as directories in this repo — each was lifted out and the duplicate deleted, so every
 package has exactly one source (pre-split history stays reachable here via
 `git log --follow`). The suite finds sibling
 `../mainframe-common` and `../jcl-dependencies` checkouts automatically (see
-`cobol/tests/conftest.py` and `_mainframe_common.py`; override with
+`tests/conftest.py` and `_mainframe_common.py`; override with
 `MAINFRAME_COMMON_REPO` / `JCL_DEPENDENCIES_REPO`). Without a jcl checkout the bridge
 tests skip with the pip command; without mainframe-common nothing here can import, so
 the run collapses to ONE clean skip (`test_sibling_distributions.py`) naming the exact
@@ -40,10 +40,10 @@ pip command.
 ```bash
 # Run from a checkout, no install needed (root pyproject + conftest sibling discovery)
 python -m pytest -q                                        # this repo's suite (~645 tests)
-PYTHONPATH="../mainframe-common/mainframe-artifacts/src;../mainframe-common/cobol-parser/src;cobol/src" python -m cobol_xstate cobol/examples/custrpt.cbl
+PYTHONPATH="../mainframe-common/mainframe-artifacts/src;../mainframe-common/cobol-parser/src;src" python -m cobol_xstate examples/custrpt.cbl
 
 # Or install for real (editable), which is what gives you the console scripts
-python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
+python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e .
 python -m pip install -e ../jcl-dependencies      # optional: the JCL front-end + --bind-jcl
 cobol-xstate prog.cbl --summary        # 8 JSON views into ./out/
 cobol-xstate prog.cbl --target js      # runnable ES module + cobolRuntime.mjs
@@ -66,11 +66,11 @@ COBOL_PARSER_KOOPA_JAR=~/tools/koopa.jar cobol-parser prog.cbl --diff-producers
 # INSERT written under a synonym find the base table's DECLARE TABLE column order.
 cobol-xstate prog.cbl --synonym-map synonyms.json
 
-python -m pytest cobol/tests/test_emitter.py -q            # one module
-python -m pytest cobol/tests/test_reactive.py -k retarget  # one test by name substring
+python -m pytest tests/test_emitter.py -q            # one module
+python -m pytest tests/test_reactive.py -k retarget  # one test by name substring
 ```
 
-Node-backed tests live in `cobol/` and need `npm install` **there** (`cobol/node_modules`).
+Node-backed tests need `npm install` at the repo root (`node_modules`).
 
 `--target` ∈ `{json (default bundle), js, reactive, business, lineage, artifacts}`. There is **no build step and no linter configured** — do not invent one. Python ≥ 3.9.
 
@@ -124,10 +124,10 @@ Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `
   python tools/gate.py
   ```
 
-  Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `cobol/tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
+  Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
 
   Two things genuinely are machine-dependent and are normalized before hashing, rather than pretended away: `copiedTo` in both reports, and the `source` of any member resolved from disk (a copybook row in the artifact manifest carries it, so `<program>::artifacts` embeds a local path). Note also that `core.autocrlf=true` here, so a fresh clone gets CRLF example files while this working tree has LF — which changes the `bytes:` count in the prefetch report. The goldens are recorded from the working tree.
-- **Prove the distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds four throwaway venvs (installing mainframe-artifacts/cobol-parser from the sibling `../mainframe-common` checkout; `MAINFRAME_COMMON_REPO` overrides, and without one it refuses to run rather than proving nothing) and checks that an `artifacts+jcl` box cannot even find `cobol_xstate` or `cobol_parser`, that an `artifacts+parser` box parses (and runs `cobol-parser`) with no modelling engine at all, and that `--bind-jcl` on an `artifacts+parser+cobol` box fails naming the exact pip command. `cobol/tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
+- **Prove the distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds four throwaway venvs (installing mainframe-artifacts/cobol-parser from the sibling `../mainframe-common` checkout; `MAINFRAME_COMMON_REPO` overrides, and without one it refuses to run rather than proving nothing) and checks that an `artifacts+jcl` box cannot even find `cobol_xstate` or `cobol_parser`, that an `artifacts+parser` box parses (and runs `cobol-parser`) with no modelling engine at all, and that `--bind-jcl` on an `artifacts+parser+cobol` box fails naming the exact pip command. `tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
 - **The parse bundle is a versioned contract over `model.py`.** Any change to a dataclass field set in mainframe-common's `cobol-parser/src/cobol_parser/model.py` (or `DataItem`/`PicType`) is a `VERSION` bump in `parse_bundle.py`; a newer bundle is refused, never partially read — and it is a change in ANOTHER repository that this repo's gate and `--from-parse` consume, so run both repos' ratchets (`python tools/gate.py` here, `python tools/byteproof.py --check goldens/parse.sha256` there).
 - **Prove runnable changes under real XState**, not just in Python — an emitted machine that type-checks can still compute the wrong decimal.
 - One test module per pipeline stage/view in `tests/`; `examples/*.cbl` are the fixtures each construct is exercised against (add one when adding a construct).

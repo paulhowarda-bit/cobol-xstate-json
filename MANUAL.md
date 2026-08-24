@@ -75,7 +75,7 @@ step. Python ≥ 3.9. `pytest` only for the tests.
 
 | Where | Distribution | What it is |
 |---|---|---|
-| `cobol/` | `cobol-xstate` | `Program` → statechart and every view (this manual's main subject) |
+| *(this repo, root)* | `cobol-xstate` | `Program` → statechart and every view (this manual's main subject) |
 | [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `mainframe-artifacts/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by every front-end |
 | [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `cobol-parser/` | `cobol-parser` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), usable on its own |
 | [its own repo](https://github.com/paulhowarda-bit/jcl-dependencies) | `jcl-dependencies` | JCL → dataflow + dependency manifest |
@@ -88,7 +88,7 @@ paths (`cobol_xstate.parser`, `.model`, `.normalizer`, …) so imports written b
 split keep working.
 
 ```bash
-python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
+python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e .
 python -m pip install -e ../jcl-dependencies    # add the JCL front-end (sibling checkout)
 # or, installing cobol-xstate from an index:  pip install cobol-xstate[jcl]
 ```
@@ -1541,14 +1541,14 @@ most are pinned by a test.
 ## 13. Development and testing
 
 ```bash
-python -m pytest -q      # ~645 tests in cobol/tests
+python -m pytest -q      # ~645 tests in tests
                          # (mainframe-artifacts/cobol-parser suites live in the mainframe-common repository,
                          #  the JCL suite in jcl-dependencies; the tests here find
                          #  sibling checkouts of both automatically - override with
                          #  MAINFRAME_COMMON_REPO / JCL_DEPENDENCIES_REPO)
 ```
 
-Tests requiring Node + a local `xstate` (`npm install` in `cobol/`) — the `--target js`
+Tests requiring Node + a local `xstate` (`npm install` at the repo root) — the `--target js`
 integration and golden-master suites — **skip cleanly** when those are absent, so check
 the skip count when a change touches the emitters.
 
