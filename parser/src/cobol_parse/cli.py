@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
     add_retrieval_args(p)
     p.add_argument("--indent", type=int, default=2, help="JSON indent (default: 2)")
+    p.add_argument("--diff-producers", action="store_true",
+                   help="also run the external Koopa parser (Java, BSD) over the same "
+                        "pre-expanded stream and write <output-stem>.parser-diff.json "
+                        "- a per-line coverage comparison naming what each parser "
+                        "recovered that the other did not. Needs java on PATH and a "
+                        "Koopa release jar (--koopa-jar or COBOL_PARSE_KOOPA_JAR).")
+    p.add_argument("--koopa-jar", metavar="JAR",
+                   help="path to a Koopa release jar "
+                        "(https://github.com/krisds/koopa/releases); the jar is never "
+                        "bundled. Defaults to $COBOL_PARSE_KOOPA_JAR.")
     add_logging_args(p)
     return p
 
@@ -142,6 +152,30 @@ def _run(args) -> int:
               f"{len(program.data_items)} data item(s))")
     _log.info(f"[{source_name}] model from it with: cobol-xstate {args.source} "
               f"--from-parse {written}")
+
+    if args.diff_producers:
+        import json
+        from .normalizer import normalize
+        from .preprocessor import preprocess
+        from .producers.koopa import diff_producers, run_koopa
+        # The same resolver, so Koopa sees exactly the stream the native parse saw
+        # (members already resolved and cached; no second retrieval).
+        pre_lines = preprocess(normalize(source, fmt), resolver=resolver,
+                               fmt=fmt).lines
+        report = diff_producers(program, run_koopa(pre_lines, jar=args.koopa_jar),
+                                pre_lines)
+        base = (out.name[:-len(".parse.json")]
+                if out.name.endswith(".parse.json") else out.stem)
+        diff_path = out.with_name(base + ".parser-diff.json")
+        diff_path.write_text(json.dumps(report, indent=args.indent) + "\n",
+                             encoding="utf-8")
+        t = report["totals"]
+        _log.info(f"[{source_name}] wrote producer diff {diff_path} "
+                  f"(native {t['nativeStatements']} vs koopa "
+                  f"{t['koopaStatements']} statements; "
+                  f"{len(report['parseErrorParagraphs'])} parse-error paragraph(s), "
+                  f"{len(report['nativeMissed'])} native-missed line(s), "
+                  f"{len(report['koopaMissed'])} koopa-missed line(s))")
     return 0
 
 

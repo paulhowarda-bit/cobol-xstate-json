@@ -157,7 +157,7 @@ The parse front-end has its own command, which runs only the parse and writes on
 ```
 cobol-parse [-h] [-o FILE] [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
             [--copybook-fetcher MODULE:FUNC] [--from-bundle DIR] [--no-fetch]
-            [--jobs N] [--indent N]
+            [--diff-producers] [--koopa-jar JAR] [--jobs N] [--indent N]
             source
 ```
 
@@ -468,6 +468,31 @@ Other programs can consume the parse bundle directly (`cobol_parse.parse_bundle.
 open_parse_bundle`, or any JSON reader — nodes are `{"t": "<ClassName>", ...}` with
 keys matching the `model.py` dataclass fields), and other producers can write it: the
 `producer` field names whose parse it is.
+
+### `--diff-producers` / `--koopa-jar JAR` (optional; needs Java)
+
+`cobol-parse --diff-producers` also runs the **Koopa** COBOL parser
+([krisds/koopa](https://github.com/krisds/koopa), BSD, Java) over the *same*
+pre-expanded stream and writes `<output-stem>.parser-diff.json` — a per-line coverage
+comparison between the native parser and an independent, island-grammar one with real
+sub-grammars for embedded CICS and SQL. Java is an optional, separate-process
+dependency: point `--koopa-jar` (or `COBOL_PARSE_KOOPA_JAR`) at a release jar, which
+is never bundled.
+
+The architecture keeps **our preprocessor as the provenance owner**: Koopa is fed the
+already-expanded stream (COPY resolved, comments stripped, literals stitched, rendered
+free-format so no line can truncate at column 72) *without* its own `--preprocess`, so
+every `from-line` in its tree indexes 1:1 into our origin-tagged line map — copybook
+provenance included — and the external parser is judged purely on statement coverage.
+
+Reading the report honestly requires one fact: a native `Action` is opaque **by
+design** for straight-line data verbs (their data effects are recovered by the
+semantics layer), so "native says Action, Koopa says moveStatement" is agreement. The
+gap signals, strongest first: `parseErrorParagraphs` (a paragraph the native parser
+gave up on, with everything Koopa still recovered inside it), `nativeMissed` (lines
+Koopa typed that the native parse has nothing for), and `koopaMissed` (the reverse
+check). The Koopa producer tests skip cleanly when Java or the jar is absent — the
+same caveat as the Node-backed tests: a green run does not prove they ran.
 
 ### `--machine-only`
 
