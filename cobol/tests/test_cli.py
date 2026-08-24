@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from cobol_xstate.cli import run
-from cobol_xstate_core.profiling import StageTimer
+from mainframe_artifacts.profiling import StageTimer
 
 EXAMPLES_CBL = str(
     Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl")

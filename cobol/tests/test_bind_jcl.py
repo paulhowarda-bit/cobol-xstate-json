@@ -67,7 +67,7 @@ def test_cli_autodetects_jcl_and_writes_both_views(tmp_path):
 
 
 def test_cli_jcl_detection_does_not_misfire_on_cobol():
-    from cobol_xstate_core.detect import looks_like_jcl
+    from mainframe_artifacts.detect import looks_like_jcl
     cobol = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
     assert looks_like_jcl("t.cbl", cobol) is False
     assert looks_like_jcl("t.jcl", "//J JOB\n//S EXEC PGM=P\n") is True

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from cobol_parse.cli import run as parse_run
+from cobol_parser.cli import run as parse_run
 from cobol_xstate.cli import run as model_run
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"

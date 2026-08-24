@@ -6,11 +6,11 @@
 # Its two dependencies live in the mainframe-common repository -
 # https://github.com/paulhowarda-bit/mainframe-common - one repo shipping both:
 #
-#   core/   cobol-xstate-core  the estate boundary and two-stage retrieval, shared
-#   parser/ cobol-parse        COBOL source -> Program AST     (depends on core)
+#   mainframe-artifacts/  the estate boundary and two-stage retrieval, shared
+#   cobol-parser/         COBOL source -> Program AST  (depends on mainframe-artifacts)
 #
 # The JCL front-end (jcl-dependencies) lives in its OWN repository -
-# https://github.com/paulhowarda-bit/jcl-dependencies - and depends on core only.
+# https://github.com/paulhowarda-bit/jcl-dependencies - and depends on mainframe-artifacts only.
 # Both used to be directories here (jcl/, then core/ and parser/); each was lifted out
 # and the duplicate deleted, so there is exactly one source for each. Pre-split history
 # stays reachable here via `git log --follow`.
@@ -19,7 +19,7 @@
 # installed: cobol/tests/conftest.py finds a ../mainframe-common checkout automatically
 # (override with MAINFRAME_COMMON_REPO). Install for real with:
 #
-#   python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
+#   python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
 #   python -m pip install -e ../jcl-dependencies   # optional: the --bind-jcl join
 #
 # The JCL half is an EXTRA of cobol-xstate rather than a dependency (`pip install
@@ -28,7 +28,7 @@
 
 [tool.pytest.ini_options]
 # This repo's source tree on sys.path, so `python -m pytest` works with nothing
-# installed (pytest >= 7). core/parser arrive installed or via the sibling checkout
-# (cobol/tests/conftest.py); jcl-dependencies likewise, via its own repo.
+# installed (pytest >= 7). mainframe-artifacts / cobol-parser arrive installed or via
+# the sibling checkout (cobol/tests/conftest.py); jcl-dependencies likewise.
 pythonpath = ["cobol/src", "cobol/tests"]
 testpaths = ["cobol/tests"]

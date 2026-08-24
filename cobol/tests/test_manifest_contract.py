@@ -73,7 +73,7 @@ def test_core_has_an_opinion_about_every_kind_this_package_emits():
     A kind in NEITHER table is the dangerous case. It is not an error - the row is simply
     skipped, and reads afterwards as an estate that had nothing.
     """
-    from cobol_xstate_core.fetch import _KIND_TYPE, _NEVER_FETCHABLE
+    from mainframe_artifacts.fetch import _KIND_TYPE, _NEVER_FETCHABLE
 
     kinds = set()
     for name in ("sqlunld.cbl", "mqcall.cbl", "cicsinq.cbl", "banktran.cbl",

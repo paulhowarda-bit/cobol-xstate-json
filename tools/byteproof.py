@@ -56,7 +56,7 @@ EXAMPLES = REPO / "cobol" / "examples"
 import os                                                             # noqa: E402
 _COMMON = Path(os.environ.get("MAINFRAME_COMMON_REPO",
                               REPO.parent / "mainframe-common"))
-for _tree in (_COMMON / "core" / "src", _COMMON / "parser" / "src",
+for _tree in (_COMMON / "mainframe-artifacts" / "src", _COMMON / "cobol-parser" / "src",
               REPO / "cobol" / "src"):
     sys.path.insert(0, str(_tree))
 
@@ -137,7 +137,7 @@ def cobol_views(path: Path, via_parse_bundle: bool = False) -> Dict[str, str]:
 
     With ``via_parse_bundle`` the Program is serialized to the parse-bundle JSON
     contract and rehydrated before modelling - the round trip a two-step
-    ``cobol-parse`` / ``--from-parse`` run takes. Checked against the SAME goldens as
+    ``cobol-parser`` / ``--from-parse`` run takes. Checked against the SAME goldens as
     the direct path, which is the proof that the contract loses nothing.
     """
     source = path.read_text(encoding="utf-8", errors="replace")
@@ -145,7 +145,7 @@ def cobol_views(path: Path, via_parse_bundle: bool = False) -> Dict[str, str]:
     resolver = CopybookResolver(paths=[str(EXAMPLES)], fetcher=None, store={})
     program = parse_program(source, fmt, resolver=resolver)
     if via_parse_bundle:
-        from cobol_parse.parse_bundle import program_from_dict, program_to_dict
+        from cobol_parser.parse_bundle import program_from_dict, program_to_dict
         program = program_from_dict(json.loads(json.dumps(program_to_dict(program))))
     machine = build_machine(program, source_name=path.name)
 
@@ -223,7 +223,7 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true",
                     help="list every key checked, not just the differences")
     ap.add_argument("--via-parse-bundle", action="store_true",
-                    help="serialize each Program through the cobol-parse parse-bundle "
+                    help="serialize each Program through the cobol-parser parse-bundle "
                          "contract and rehydrate it before modelling; checked against "
                          "the SAME goldens as the direct path, proving the contract "
                          "byte-equivalent")

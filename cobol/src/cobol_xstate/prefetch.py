@@ -1,6 +1,6 @@
 """Attribution of stage-1 retrieval onto the modelling side's artifact manifest.
 
-The retrieval itself - :func:`cobol_parse.prefetch.prefetch_cobol`, the lexical COPY
+The retrieval itself - :func:`cobol_parser.prefetch.prefetch_cobol`, the lexical COPY
 closure that runs BEFORE the parse - moved to the parse front-end distribution and is
 re-exported here so existing imports keep working. What REMAINS here is the half that
 needs the modelling engine's output: marking manifest rows whose resolution the
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from cobol_parse.prefetch import prefetch_cobol  # noqa: F401  (re-export)
+from cobol_parser.prefetch import prefetch_cobol  # noqa: F401  (re-export)
 
 
 def attribute_resolution(manifest: dict, program, store: Dict[str, Tuple[str, str]]

@@ -46,14 +46,14 @@ from .statechart import build_machine, Machine
 
 #: This package's top-level logger name. Every module logger (``cobol_xstate.parser`` ...)
 #: is a child of it, so configuring this one configures the whole package. The CLI passes
-#: it - alongside core's own root - to ``cobol_xstate_core.logging_setup.configure_logging``;
+#: it - alongside core's own root - to ``mainframe_artifacts.logging_setup.configure_logging``;
 #: a root that nobody configures either propagates to the root logger or falls back to
 #: logging's lastResort and prints straight to stderr.
 PACKAGE_LOGGER = "cobol_xstate"
 
 # Library logging contract: attach a no-op handler to the package logger so importing
 # cobol_xstate never emits "No handlers could be found" and never writes to stderr on its
-# own. The application (see cobol_xstate_core.logging_setup, used by the CLI) decides what
+# own. The application (see mainframe_artifacts.logging_setup, used by the CLI) decides what
 # to do with these records. Every module logs via logging.getLogger(__name__).
 _logging.getLogger(PACKAGE_LOGGER).addHandler(_logging.NullHandler())
 

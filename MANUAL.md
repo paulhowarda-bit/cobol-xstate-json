@@ -76,8 +76,8 @@ step. Python ≥ 3.9. `pytest` only for the tests.
 | Where | Distribution | What it is |
 |---|---|---|
 | `cobol/` | `cobol-xstate` | `Program` → statechart and every view (this manual's main subject) |
-| [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by every front-end |
-| [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), usable on its own |
+| [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `mainframe-artifacts/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by every front-end |
+| [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `cobol-parser/` | `cobol-parser` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), usable on its own |
 | [its own repo](https://github.com/paulhowarda-bit/jcl-dependencies) | `jcl-dependencies` | JCL → dataflow + dependency manifest |
 
 The two estate front-ends (COBOL, JCL) are **peers**: neither imports the other, and a
@@ -88,7 +88,7 @@ paths (`cobol_xstate.parser`, `.model`, `.normalizer`, …) so imports written b
 split keep working.
 
 ```bash
-python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
+python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
 python -m pip install -e ../jcl-dependencies    # add the JCL front-end (sibling checkout)
 # or, installing cobol-xstate from an index:  pip install cobol-xstate[jcl]
 ```
@@ -158,7 +158,7 @@ The parse front-end has its own command, which runs only the parse and writes on
 — a **parse bundle** (the serialized `Program`) that `--from-parse` models from:
 
 ```
-cobol-parse [-h] [-o FILE] [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
+cobol-parser [-h] [-o FILE] [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
             [--copybook-fetcher MODULE:FUNC] [--from-bundle DIR] [--no-fetch]
             [--diff-producers] [--koopa-jar JAR] [--jobs N] [--indent N]
             source
@@ -397,7 +397,7 @@ file if fetched blindly:
 - **`CALLER` / `SYSOUT` / `<dynamic-sql>`**, which are not stored artifacts at all.
 
 In Python, `fetch_dependencies(manifest, fetcher, dest=...)` from
-`cobol_xstate_core.fetch`; `build_fetch_plan(manifest)` returns the same plan without
+`mainframe_artifacts.fetch`; `build_fetch_plan(manifest)` returns the same plan without
 making any calls, so you can review it before hitting a service.
 
 ### `--no-fetch`
@@ -432,16 +432,16 @@ gather run never asked for is an **error**, not an empty answer — the two runs
 not be the same analysis. Both flags exist on `jcl-dependencies` too. The two flags are
 mutually exclusive.
 
-### `cobol-parse` / `--from-parse FILE`
+### `cobol-parser` / `--from-parse FILE`
 
 The **parse** also splits out of the run — the axis this time is *when*, not *where*.
-`cobol-parse` parses upfront and writes a **parse bundle**: one JSON file carrying the
+`cobol-parser` parses upfront and writes a **parse bundle**: one JSON file carrying the
 serialized `Program` AST (every statement node, the typed data dictionary, copybook
 provenance), the exact source text it parsed with its sha256, and the producer run's
 copybook errors. `--from-parse` then models from it, skipping the parse entirely:
 
 ```bash
-cobol-parse prog.cbl -o prog.parse.json          # upfront, once
+cobol-parser prog.cbl -o prog.parse.json          # upfront, once
 cobol-xstate prog.cbl --from-parse prog.parse.json    # skips the parse
 cobol-xstate prog.cbl --from-bundle ./b --from-parse prog.parse.json  # offline AND parse-free
 ```
@@ -460,26 +460,26 @@ Three rules, all inherited from the estate bundle's design:
 
 `--from-parse` conflicts with `--gather-only` (the gather's stage-2 plan comes from the
 live parse), and with a disagreeing `--format` (the bundle records the format it was
-parsed as). `cobol-parse` refuses `--gather-only` for the mirror-image reason: it never
+parsed as). `cobol-parser` refuses `--gather-only` for the mirror-image reason: it never
 builds the artifact manifest stage 2 plans from, so its half-gathered bundle would
 poison a later `--from-bundle` replay (which errors on any member the gather never
 asked for). Retrieval flags (`--from-bundle`, `--no-fetch`, `--copybook-fetcher`,
-`--jobs`, `-I`, `--copybook-ext`) work on `cobol-parse` exactly as on `cobol-xstate` —
+`--jobs`, `-I`, `--copybook-ext`) work on `cobol-parser` exactly as on `cobol-xstate` —
 copybooks must still arrive before the parse.
 
-Other programs can consume the parse bundle directly (`cobol_parse.parse_bundle.
+Other programs can consume the parse bundle directly (`cobol_parser.parse_bundle.
 open_parse_bundle`, or any JSON reader — nodes are `{"t": "<ClassName>", ...}` with
 keys matching the `model.py` dataclass fields), and other producers can write it: the
 `producer` field names whose parse it is.
 
 ### `--diff-producers` / `--koopa-jar JAR` (optional; needs Java)
 
-`cobol-parse --diff-producers` also runs the **Koopa** COBOL parser
+`cobol-parser --diff-producers` also runs the **Koopa** COBOL parser
 ([krisds/koopa](https://github.com/krisds/koopa), BSD, Java) over the *same*
 pre-expanded stream and writes `<output-stem>.parser-diff.json` — a per-line coverage
 comparison between the native parser and an independent, island-grammar one with real
 sub-grammars for embedded CICS and SQL. Java is an optional, separate-process
-dependency: point `--koopa-jar` (or `COBOL_PARSE_KOOPA_JAR`) at a release jar, which
+dependency: point `--koopa-jar` (or `COBOL_PARSER_KOOPA_JAR`) at a release jar, which
 is never bundled.
 
 The architecture keeps **our preprocessor as the provenance owner**: Koopa is fed the
@@ -1437,8 +1437,8 @@ raw source
 
 ### Module map
 
-The first six modules are the parse front-end and live in the **`cobol_parse` package**
-(`parser/src/cobol_parse/` in the mainframe-common repository, its own distribution);
+The first six modules are the parse front-end and live in the **`cobol_parser` package**
+(`cobol-parser/src/cobol_parser/` in the mainframe-common repository, its own distribution);
 `cobol_xstate` re-exports them at the old paths. The rest are `cobol_xstate`'s.
 
 | Module | Responsibility |
@@ -1542,7 +1542,7 @@ most are pinned by a test.
 
 ```bash
 python -m pytest -q      # ~645 tests in cobol/tests
-                         # (core/parser suites live in the mainframe-common repository,
+                         # (mainframe-artifacts/cobol-parser suites live in the mainframe-common repository,
                          #  the JCL suite in jcl-dependencies; the tests here find
                          #  sibling checkouts of both automatically - override with
                          #  MAINFRAME_COMMON_REPO / JCL_DEPENDENCIES_REPO)
@@ -1558,18 +1558,18 @@ Two more proofs beyond the suite, run before merging:
 python tools/gate.py               # byte-stability: every view of every example + both
                                    # retrieval reports, hashed under two PYTHONHASHSEED
                                    # values and at --jobs 1 and 8, against goldens/
-python tools/prove_separation.py   # four throwaway venvs: a core+jcl box cannot even
-                                   # find cobol_xstate or cobol_parse; a core+parser box
+python tools/prove_separation.py   # four throwaway venvs: an artifacts+jcl box cannot even
+                                   # find cobol_xstate or cobol_parser; an artifacts+parser box
                                    # parses with no modelling engine; --bind-jcl without
                                    # the extra fails naming the exact pip command
 ```
 
 | Test module | Covers |
 |---|---|
-| `test_normalizer.py` (in mainframe-common's `parser/tests/`) | format detection, column handling, continuation |
-| `test_lexer.py` (in mainframe-common's `parser/tests/`) | tokenization |
+| `test_normalizer.py` (in mainframe-common's `cobol-parser/tests/`) | format detection, column handling, continuation |
+| `test_lexer.py` (in mainframe-common's `cobol-parser/tests/`) | tokenization |
 | `test_preprocessor.py` | COPY / REPLACE / missing members |
-| `test_parser.py` (in mainframe-common's `parser/tests/`) | statement AST, handlers, headers, GO TO |
+| `test_parser.py` (in mainframe-common's `cobol-parser/tests/`) | statement AST, handlers, headers, GO TO |
 | `test_data_semantics.py` | PIC types, `target := expr`, conditions |
 | `test_statechart.py` | the compiled config, flags, ALTER |
 | `test_emitter.py` | ops/guards + **Node integration under stock XState** |

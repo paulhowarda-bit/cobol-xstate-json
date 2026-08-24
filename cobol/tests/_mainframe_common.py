@@ -1,6 +1,6 @@
 """Find the mainframe-common distributions: installed, or in the sibling checkout.
 
-cobol-xstate's two dependencies (cobol-xstate-core, cobol-parse) ship from the
+cobol-xstate's two dependencies (mainframe-artifacts, cobol-parser) ship from the
 mainframe-common repository. Installed, they are simply importable. From a bare
 dual-checkout - that repo and this one side by side, nothing installed - each package's
 src goes on sys.path. Override the checkout location with MAINFRAME_COMMON_REPO.
@@ -25,7 +25,7 @@ def ensure_on_path():
     The reason string names the exact pip command, because the failure has to be
     actionable from the message alone.
     """
-    for package, tree in (("cobol_xstate_core", "core"), ("cobol_parse", "parser")):
+    for package, tree in (("mainframe_artifacts", "mainframe-artifacts"), ("cobol_parser", "cobol-parser")):
         if importlib.util.find_spec(package) is not None:
             continue
         src = CHECKOUT / tree / "src"
@@ -34,6 +34,7 @@ def ensure_on_path():
             continue
         return (f"{package} is neither installed nor found in a mainframe-common "
                 f"checkout at {CHECKOUT} - install both distributions with "
-                f"`python -m pip install -e {CHECKOUT / 'core'} -e "
-                f"{CHECKOUT / 'parser'}` (or set MAINFRAME_COMMON_REPO to a checkout)")
+                f"`python -m pip install -e {CHECKOUT / 'mainframe-artifacts'} -e "
+                f"{CHECKOUT / 'cobol-parser'}` (or set MAINFRAME_COMMON_REPO to a "
+                f"checkout)")
     return None

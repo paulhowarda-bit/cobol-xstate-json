@@ -11,20 +11,20 @@ from typing import List, Optional
 
 # Shared with the JCL front-end: the estate boundary, retrieval, and the CLI plumbing
 # both CLIs repeat. Core never imports back into this package.
-from cobol_xstate_core.artifact_service import decode_member, load_fetcher
-from cobol_xstate_core.bundle import open_bundle
-from cobol_xstate_core.cliargs import (add_logging_args, add_output_args,
+from mainframe_artifacts.artifact_service import decode_member, load_fetcher
+from mainframe_artifacts.bundle import open_bundle
+from mainframe_artifacts.cliargs import (add_logging_args, add_output_args,
                                        add_retrieval_args, jobs as _jobs)
-from cobol_xstate_core.detect import looks_like_jcl as _looks_like_jcl
-from cobol_parse import PACKAGE_LOGGER as PARSE_LOGGER
-from cobol_parse.parse_bundle import open_parse_bundle
-from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
-from cobol_xstate_core.logging_setup import configure_logging
-from cobol_xstate_core.output import make_run_dir as _make_run_dir
-from cobol_xstate_core.output import run_dir as _run_dir_of
-from cobol_xstate_core.output import write_json, write_text
-from cobol_xstate_core.profiling import StageTimer
-from cobol_xstate_core.report import report_stages as _report_stages
+from mainframe_artifacts.detect import looks_like_jcl as _looks_like_jcl
+from cobol_parser import PACKAGE_LOGGER as PARSE_LOGGER
+from cobol_parser.parse_bundle import open_parse_bundle
+from mainframe_artifacts.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
+from mainframe_artifacts.logging_setup import configure_logging
+from mainframe_artifacts.output import make_run_dir as _make_run_dir
+from mainframe_artifacts.output import run_dir as _run_dir_of
+from mainframe_artifacts.output import write_json, write_text
+from mainframe_artifacts.profiling import StageTimer
+from mainframe_artifacts.report import report_stages as _report_stages
 
 from . import PACKAGE_LOGGER
 from .api import analyze, gather
@@ -115,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "table's DECLARE TABLE / DCLGEN column order; its column "
                         "mappings are then stamped with the BASE table name.")
     p.add_argument("--from-parse", metavar="FILE",
-                   help="model from a parse bundle written upfront by cobol-parse, "
+                   help="model from a parse bundle written upfront by cobol-parser, "
                         "skipping the parse entirely. The bundle records the sha256 of "
                         "the exact source it parsed and a different source is an error "
                         "- a stale Program is silently wrong everywhere. Composes with "
@@ -241,8 +241,8 @@ def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     exit code; an UNEXPECTED exception is reported as an internal error (exit 1) with the
     full traceback shown only under ``--debug`` - never leaked raw to the user."""
     args = build_parser().parse_args(argv)
-    # ALL THREE roots: retrieval logs from cobol_xstate_core.*, the parse front-end's
-    # from cobol_parse.*, everything else from cobol_xstate.*. Configuring only some
+    # ALL THREE roots: retrieval logs from mainframe_artifacts.*, the parse front-end's
+    # from cobol_parser.*, everything else from cobol_xstate.*. Configuring only some
     # leaves the rest propagating to the root logger - or, with no handler anywhere,
     # printing WARNING+ via logging's lastResort, which would make -qq stop being silent.
     configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet,

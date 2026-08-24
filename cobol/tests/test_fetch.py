@@ -5,7 +5,7 @@ honestly which rows were never fetchable in the first place."""
 import json
 
 from cobol_xstate.artifacts import build_artifacts
-from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
+from mainframe_artifacts.fetch import build_fetch_plan, fetch_dependencies
 from cobol_xstate.parser import parse_program
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.statechart import build_machine

@@ -10,7 +10,7 @@ import json
 
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.dynamic_calls import annotate_artifacts, build_dynamic_calls
-from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
+from mainframe_artifacts.fetch import build_fetch_plan, fetch_dependencies
 import importlib.util
 
 import pytest

@@ -20,11 +20,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from cobol_parse.parse_bundle import ParseBundle, ParseBundleError
-from cobol_xstate_core.bundle import EstateBundle, recording_fetcher, write_bundle
-from cobol_xstate_core.fetch import fetch_dependencies
-from cobol_xstate_core.prefetch import PrefetchResult
-from cobol_xstate_core.profiling import StageTimer
+from cobol_parser.parse_bundle import ParseBundle, ParseBundleError
+from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
+from mainframe_artifacts.fetch import fetch_dependencies
+from mainframe_artifacts.prefetch import PrefetchResult
+from mainframe_artifacts.profiling import StageTimer
 
 from .artifacts import build_artifacts
 from .business import build_business_view
@@ -158,7 +158,7 @@ def analyze(source: str, *, source_name: str = "<source>",
     ``bundle=b``       replay a gathered estate; needs no network at all
 
     ``parse=p`` skips the parse: the ``Program`` comes rehydrated from a parse bundle
-    written upfront by ``cobol-parse``. The bundle refuses a source whose hash is not
+    written upfront by ``cobol-parser``. The bundle refuses a source whose hash is not
     the one it parsed - a stale Program is wrong everywhere at once, silently. It
     composes with ``bundle=`` (the estate replay) for a fully offline, parse-free run.
 
