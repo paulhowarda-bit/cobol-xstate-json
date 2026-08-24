@@ -8,7 +8,7 @@ fixed table and covers every outcome the reports distinguish - local, fetched,
 not-found, error, a probe chain, alternatives, and a detected-type disagreement.
 
 This is the half of the ratchet that guards the riskiest part of the module split:
-prefetch.py is being cut three ways (engine to core, the COBOL closure and the JCL
+prefetch.py is being cut three ways (engine to mainframe-artifacts, the COBOL closure and the JCL
 closure to their own packages), and a mistake there shows up here rather than in the
 views.
 

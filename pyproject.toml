@@ -11,7 +11,7 @@
 #
 # The JCL front-end (jcl-dependencies) lives in its OWN repository -
 # https://github.com/paulhowarda-bit/jcl-dependencies - and depends on mainframe-artifacts only.
-# Both used to be directories here (jcl/, then core/ and parser/); each was lifted out
+# All three of those started as directories in this repo; each was lifted out
 # and the duplicate deleted, so there is exactly one source for each. Pre-split history
 # stays reachable here via `git log --follow`.
 #

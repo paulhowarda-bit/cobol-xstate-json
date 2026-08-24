@@ -35,8 +35,8 @@ The parse front-end stands alone too — any program can `pip install cobol-pars
 | Where | Distribution | What it is |
 |---|---|---|
 | `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) |
-| mainframe-common `core/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable estate bundle |
-| mainframe-common `parser/` | `cobol-parser` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
+| mainframe-common `mainframe-artifacts/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable estate bundle |
+| mainframe-common `cobol-parser/` | `cobol-parser` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
 | its own repo | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) |
 
 ```bash
