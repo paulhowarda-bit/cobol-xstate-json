@@ -26,9 +26,10 @@ The boundary is enforced by `cobol/tests/test_package_boundaries.py` and
 The two front-ends are **peers**: neither imports the other, and a JCL install carries no
 COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
 the lazy orchestrator in `cobol/src/cobol_xstate/bind.py`. `pip install cobol-xstate[jcl]`
-adds that one join. There used to be `jcl/`, then `core/` and `parser/` directories here —
-each was lifted out and the duplicate deleted, so every package has exactly one source
-(pre-split history stays reachable here via `git log --follow`). The suite finds sibling
+adds that one join. The JCL front-end and both mainframe-common distributions started
+as directories in this repo — each was lifted out and the duplicate deleted, so every
+package has exactly one source (pre-split history stays reachable here via
+`git log --follow`). The suite finds sibling
 `../mainframe-common` and `../jcl-dependencies` checkouts automatically (see
 `cobol/tests/conftest.py` and `_mainframe_common.py`; override with
 `MAINFRAME_COMMON_REPO` / `JCL_DEPENDENCIES_REPO`). Without a jcl checkout the bridge
