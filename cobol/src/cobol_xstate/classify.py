@@ -39,7 +39,7 @@ from typing import Dict, Iterable
 # below (which names are MQI verbs, which prefixes IBM reserves) is COBOL domain
 # knowledge and stays here. Re-exported so `from cobol_xstate.classify import
 # NON_FETCHABLE` keeps working: this module remains the one place a COBOL caller needs.
-from cobol_xstate_core.categories import (CATEGORY_ASM, CATEGORY_COBOL, CATEGORY_IBM,
+from mainframe_artifacts.categories import (CATEGORY_ASM, CATEGORY_COBOL, CATEGORY_IBM,
                                           CATEGORY_INTERNAL, CATEGORY_UNRESOLVED,
                                           NON_FETCHABLE)
 

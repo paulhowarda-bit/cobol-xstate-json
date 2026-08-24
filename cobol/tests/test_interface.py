@@ -532,7 +532,7 @@ def test_the_phantom_program_is_not_classified_fetched_or_published():
     the other three: the manifest would still list a program that exists nowhere, the
     estate would still be asked for it, and the message contract would still carry it."""
     from cobol_xstate.artifacts import build_artifacts
-    from cobol_xstate_core.fetch import build_fetch_plan
+    from mainframe_artifacts.fetch import build_fetch_plan
     from cobol_xstate.lineage import build_lineage
     m = _mq_twice_machine()
     art = build_artifacts(m)

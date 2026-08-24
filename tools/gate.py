@@ -44,7 +44,7 @@ CHECKS = [
     ("views   @ PYTHONHASHSEED=1234",
      [sys.executable, "tools/byteproof.py", "--check", str(VIEWS)], {"PYTHONHASHSEED": "1234"}),
     # The parse-bundle round trip is checked against the SAME views goldens: a two-step
-    # cobol-parse / --from-parse run must emit the bytes a one-step run does, or the
+    # cobol-parser / --from-parse run must emit the bytes a one-step run does, or the
     # serialized contract is losing something.
     ("views   @ parse-bundle round-trip, PYTHONHASHSEED=0",
      [sys.executable, "tools/byteproof.py", "--check", str(VIEWS), "--via-parse-bundle"],

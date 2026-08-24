@@ -27,20 +27,20 @@ two dependencies, the shared retrieval core and the COBOL parse front-end, ship 
 [`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) (one repo,
 two distributions). The JCL front-end,
 [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies),
-lives in its own repository and depends only on the core. The two estate front-ends are
+lives in its own repository and depends only on mainframe-artifacts. The two estate front-ends are
 peers: neither imports the other, and a JCL install carries no COBOL modelling engine.
-The parse front-end stands alone too — any program can `pip install cobol-parse` and get
+The parse front-end stands alone too — any program can `pip install cobol-parser` and get
 `parse_program(source) -> Program` without the statechart machinery:
 
 | Where | Distribution | What it is |
 |---|---|---|
 | `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) |
-| mainframe-common `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle |
-| mainframe-common `parser/` | `cobol-parse` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
+| mainframe-common `core/` | `mainframe-artifacts` | the estate boundary, two-stage retrieval, the replayable estate bundle |
+| mainframe-common `parser/` | `cobol-parser` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
 | its own repo | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) |
 
 ```bash
-python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
+python -m pip install -e ../mainframe-common/mainframe-artifacts -e ../mainframe-common/cobol-parser -e cobol
 python -m pip install -e ../jcl-dependencies  # optional: the JCL front-end
 # or: pip install cobol-xstate[jcl]           # adds the --bind-jcl join
 
@@ -72,7 +72,7 @@ cobol-xstate prog.cbl --gather-only ./bundle       # retrieval only, on the esta
 cobol-xstate prog.cbl --from-bundle ./bundle       # model from it - no network at all
 cobol-xstate prog.cbl --no-fetch                   # never contact the estate (reported as such)
 
-cobol-parse prog.cbl -o prog.parse.json            # parse upfront (serialized Program, sha256-pinned)
+cobol-parser prog.cbl -o prog.parse.json            # parse upfront (serialized Program, sha256-pinned)
 cobol-xstate prog.cbl --from-parse prog.parse.json # model from it - the parse is skipped
 ```
 
@@ -408,7 +408,7 @@ parsed carelessly.
 ## Development
 
 ```bash
-python -m pytest -q     # ~645 tests in cobol/tests (core/parser suites live in the
+python -m pytest -q     # ~645 tests in cobol/tests (mainframe-artifacts/cobol-parser suites live in the
                         # mainframe-common repository, the JCL suite in jcl-dependencies;
                         # the tests here find sibling ../mainframe-common and
                         # ../jcl-dependencies checkouts automatically)
@@ -420,9 +420,9 @@ check the skip count when a change touches the emitters. Two more proofs run bef
 merging: `python tools/gate.py` (byte-stability of every view and both retrieval
 reports against `goldens/`, across hash seeds and `--jobs` levels) and
 `python tools/prove_separation.py` (throwaway venvs proving the distributions
-stand apart, installing core/parser from the sibling mainframe-common checkout).
+stand apart, installing mainframe-artifacts/cobol-parser from the sibling mainframe-common checkout).
 
-Layout (core/src and parser/src live in the mainframe-common repository):
+Layout (mainframe-artifacts/src and cobol-parser/src live in the mainframe-common repository):
 
 ```
 cobol/src/cobol_xstate/       normalizer · lexer · model · parser · preprocessor ·
@@ -437,7 +437,7 @@ cobol/examples/     custrpt.cbl (canonical batch loop) · banktran.cbl (EVALUATE
                     dynamic CALL) · altswitch.cbl (ALTER) · errlit.cbl (keywords
                     inside literals) · ... one fixture per construct
 goldens/ + tools/   the byte-stability ratchet (gate.py, byteproof*.py) and the
-                    separation proof (prove_separation.py, which installs core/parser
+                    separation proof (prove_separation.py, which installs mainframe-artifacts/cobol-parser
                     from the sibling mainframe-common checkout and jcl-dependencies
                     from its own)
 

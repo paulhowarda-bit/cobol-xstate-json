@@ -1,7 +1,7 @@
-"""Moved to the cobol-parse distribution (parser/src/cobol_parse/data_division.py);
+"""Moved to the cobol-parser distribution (parser/src/cobol_parser/data_division.py);
 re-exported here so existing imports keep working."""
 
-from cobol_parse.data_division import (  # noqa: F401
+from cobol_parser.data_division import (  # noqa: F401
     DataItem,
     PicType,
     expand_pic,

@@ -9,7 +9,7 @@ from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.classify import (
     CATEGORY_COBOL, CATEGORY_IBM, CATEGORY_INTERNAL, CATEGORY_UNRESOLVED,
     classify_call_target)
-from cobol_xstate_core.fetch import fetch_dependencies
+from mainframe_artifacts.fetch import fetch_dependencies
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
 
@@ -64,7 +64,7 @@ def test_a_cics_module_is_never_requested_from_the_estate():
     a missing application program. ibm-runtime is in NON_FETCHABLE, so it is not asked
     for at all."""
     from cobol_xstate.classify import NON_FETCHABLE
-    from cobol_xstate_core.fetch import build_fetch_plan
+    from mainframe_artifacts.fetch import build_fetch_plan
     info = classify_call_target("DFHNCTR")
     assert info["category"] in NON_FETCHABLE
     man = {"program": "CICSPGM", "artifacts": [
@@ -296,7 +296,7 @@ _NESTED_HIDDEN = (
 
 def test_a_nested_program_behind_a_hyphenated_item_is_internal_not_fetched():
     from cobol_xstate.artifacts import build_artifacts
-    from cobol_xstate_core.fetch import build_fetch_plan
+    from mainframe_artifacts.fetch import build_fetch_plan
     m = _machine(_NESTED_HIDDEN)
     art = build_artifacts(m)
     row = next(r for r in art["artifacts"]

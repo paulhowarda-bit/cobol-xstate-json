@@ -1,14 +1,14 @@
 """Development convenience: find the sibling checkouts this suite builds on.
 
 Two repositories feed this one now. mainframe-common carries the distributions
-cobol-xstate depends on (cobol-xstate-core and cobol-parse); jcl-dependencies carries
+cobol-xstate depends on (mainframe-artifacts and cobol-parser); jcl-dependencies carries
 the JCL front-end that --bind-jcl joins with. Installed (pip install), each is simply
 importable and none of this runs. From a bare multi-checkout - the repos side by side,
-nothing installed - the suite would fail (core/parser are hard dependencies) or the
+nothing installed - the suite would fail (mainframe-artifacts / cobol-parser are hard dependencies) or the
 bridge tests would silently skip (the JCL join), which on a developer machine is
 coverage lost for no reason. So when a package is not importable but its sibling
 checkout is there, its src goes on sys.path (see _mainframe_common.py for the
-core/parser half; override the locations with MAINFRAME_COMMON_REPO /
+mainframe-artifacts / cobol-parser half; override the locations with MAINFRAME_COMMON_REPO /
 JCL_DEPENDENCIES_REPO).
 
 Deliberately NOT an install and NOT magic beyond this. If mainframe-common is neither

@@ -10,7 +10,7 @@ that actually runs.
 import json
 
 from cobol_xstate.artifacts import build_artifacts
-from cobol_xstate_core.fetch import build_fetch_plan, fetch_dependencies
+from mainframe_artifacts.fetch import build_fetch_plan, fetch_dependencies
 from cobol_xstate.parser import parse_program
 from cobol_xstate.prefetch import attribute_resolution, prefetch_cobol
 from cobol_xstate.preprocessor import CopybookResolver

@@ -1,4 +1,4 @@
-"""Moved to the cobol-parse distribution (parser/src/cobol_parse/lexer.py);
+"""Moved to the cobol-parser distribution (parser/src/cobol_parser/lexer.py);
 re-exported here so existing imports keep working."""
 
-from cobol_parse.lexer import Token, tokenize  # noqa: F401
+from cobol_parser.lexer import Token, tokenize  # noqa: F401

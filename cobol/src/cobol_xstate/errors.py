@@ -20,18 +20,18 @@ This module imports nothing from the package, so it is safe to import from anywh
 from __future__ import annotations
 
 # RE-EXPORTED, never redefined. The base lives at the lowest layer both front-ends
-# depend on (cobol_xstate_core.errors) because ServiceUnavailable — raised by the estate
+# depend on (mainframe_artifacts.errors) because ServiceUnavailable — raised by the estate
 # boundary, which is core's — must derive from the SAME class this package's CLI catches.
 # Defining a second CobolXstateError here would look harmless and would silently stop
 # `except CobolXstateError` in cli.run from catching retrieval failures, turning an
 # expected, explainable error into an "internal error" traceback.
 # tests/test_logging.py::test_every_domain_error_derives_from_the_one_base is the guard.
-from cobol_xstate_core.errors import CobolXstateError
+from mainframe_artifacts.errors import CobolXstateError
 
-# The parse-stage errors moved with the parse front-end to the cobol-parse
+# The parse-stage errors moved with the parse front-end to the cobol-parser
 # distribution; re-exported here so existing imports and `except` sites keep catching
 # the same classes.
-from cobol_parse.errors import (CopybookError, ParseError,  # noqa: F401
+from cobol_parser.errors import (CopybookError, ParseError,  # noqa: F401
                                 SourceFormatError)
 
 

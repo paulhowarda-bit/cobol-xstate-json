@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Tuple
 
-from cobol_xstate_core.prefetch import PrefetchResult
+from mainframe_artifacts.prefetch import PrefetchResult
 
 from .errors import CobolXstateError
 

@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from cobol_parse.normalizer import detect_source_format
-from cobol_parse.parse_bundle import program_from_dict, program_to_dict
-from cobol_parse.parser import parse_program
-from cobol_parse.preprocessor import CopybookResolver
+from cobol_parser.normalizer import detect_source_format
+from cobol_parser.parse_bundle import program_from_dict, program_to_dict
+from cobol_parser.parser import parse_program
+from cobol_parser.preprocessor import CopybookResolver
 from cobol_xstate.statechart import build_machine
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"

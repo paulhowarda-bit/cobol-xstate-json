@@ -44,13 +44,13 @@ EXAMPLES = REPO / "cobol" / "examples"
 import os                                                             # noqa: E402
 _COMMON = Path(os.environ.get("MAINFRAME_COMMON_REPO",
                               REPO.parent / "mainframe-common"))
-for _tree in (_COMMON / "core" / "src", _COMMON / "parser" / "src",
+for _tree in (_COMMON / "mainframe-artifacts" / "src", _COMMON / "cobol-parser" / "src",
               REPO / "cobol" / "src", REPO / "cobol" / "tests"):
     sys.path.insert(0, str(_tree))
 
 from fakes.estate import fetch_artifact                              # noqa: E402
 
-from cobol_xstate_core.fetch import fetch_dependencies               # noqa: E402
+from mainframe_artifacts.fetch import fetch_dependencies               # noqa: E402
 
 from cobol_xstate.artifacts import build_artifacts                   # noqa: E402
 from cobol_xstate.dynamic_calls import (annotate_artifacts,          # noqa: E402

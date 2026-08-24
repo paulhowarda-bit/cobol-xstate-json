@@ -17,8 +17,8 @@ keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernizatio
 # a bare `pip install cobol-xstate` cannot resolve them - install all three in one
 # command with explicit direct references (which these pins accept):
 #
-#   pip install "cobol-xstate-core @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=core" \
-#               "cobol-parse @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=parser" \
+#   pip install "mainframe-artifacts @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=mainframe-artifacts" \
+#               "cobol-parser @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=cobol-parser" \
 #               "cobol-xstate @ git+https://github.com/paulhowarda-bit/cobol-xstate-json#subdirectory=cobol"
 #
 # Deliberately NOT direct git references in dependencies themselves, unlike the [jcl]
@@ -28,8 +28,8 @@ keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernizatio
 # the same command - an already-installed editable does not satisfy a direct-URL
 # requirement whose URL differs. That would break the offline editable flow
 # (tools/prove_separation.py, the documented dev install) and, once the URL exists,
-# silently replace editable core/parser installs with snapshot clones.
-dependencies = ["cobol-xstate-core>=0.1,<0.2", "cobol-parse>=0.1,<0.2"]
+# silently replace editable mainframe-artifacts/cobol-parser installs with snapshot clones.
+dependencies = ["mainframe-artifacts>=0.1,<0.2", "cobol-parser>=0.1,<0.2"]
 
 [project.optional-dependencies]
 # --bind-jcl closes the ddname->dataset join, which needs the JCL half. It is an EXTRA

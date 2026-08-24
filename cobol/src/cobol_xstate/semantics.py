@@ -26,7 +26,7 @@ _NUM = re.compile(r"^[+-]?\d+(\.\d+)?$")
 # The literal-masking rule moved to the parse front-end distribution (the parser tears
 # statements with it and must not import this modelling module) - re-imported here, so
 # every existing `from .semantics import mask_literals` keeps working unchanged.
-from cobol_parse.textutil import _QUOTED, mask_literals  # noqa: E402,F401
+from cobol_parser.textutil import _QUOTED, mask_literals  # noqa: E402,F401
 
 
 def sub_outside_literals(pattern, repl: str, text: str) -> str:
