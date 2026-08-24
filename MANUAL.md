@@ -67,22 +67,26 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 
 ## 2. Install and first run
 
-**Two distributions ship from this repository**, each a normal Python package; the JCL
+**Three distributions ship from this repository**, each a normal Python package; the JCL
 front-end is its **own repository**. Pure standard library — **no runtime
 dependencies**, no build step. Python ≥ 3.9. `pytest` only for the tests.
 
 | Where | Distribution | What it is |
 |---|---|---|
-| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by both front-ends |
-| `cobol/` | `cobol-xstate` | COBOL → statechart and every view (this manual's main subject) |
+| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by every front-end |
+| `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), usable on its own |
+| `cobol/` | `cobol-xstate` | `Program` → statechart and every view (this manual's main subject) |
 | [its own repo](https://github.com/paulhowarda-bit/jcl-dependencies) | `jcl-dependencies` | JCL → dataflow + dependency manifest |
 
-The two front-ends are **peers**: neither imports the other, and a JCL install carries
-no COBOL modelling engine. They meet only at `--bind-jcl`, and that one join is an
-optional extra.
+The two estate front-ends (COBOL, JCL) are **peers**: neither imports the other, and a
+JCL install carries no COBOL modelling engine. They meet only at `--bind-jcl`, and that
+one join is an optional extra. The parse front-end sits underneath the COBOL side:
+`cobol-xstate` depends on it, and `cobol_xstate` re-exports its modules at the old
+paths (`cobol_xstate.parser`, `.model`, `.normalizer`, …) so imports written before the
+split keep working.
 
 ```bash
-python -m pip install -e core -e cobol          # COBOL work (core comes with it)
+python -m pip install -e core -e parser -e cobol   # COBOL work (core+parser come with it)
 python -m pip install -e ../jcl-dependencies    # add the JCL front-end (sibling checkout)
 # or, installing cobol-xstate from an index:  pip install cobol-xstate[jcl]
 ```
@@ -1329,6 +1333,10 @@ raw source
 
 ### Module map
 
+The first six modules are the parse front-end and live in the **`cobol_parse` package**
+(`parser/src/cobol_parse/`, its own distribution); `cobol_xstate` re-exports them at the
+old paths. The rest are `cobol_xstate`'s.
+
 | Module | Responsibility |
 |---|---|
 | `normalizer.py` | source format detection, column handling, continuation |
@@ -1441,17 +1449,18 @@ Two more proofs beyond the suite, run before merging:
 python tools/gate.py               # byte-stability: every view of every example + both
                                    # retrieval reports, hashed under two PYTHONHASHSEED
                                    # values and at --jobs 1 and 8, against goldens/
-python tools/prove_separation.py   # three throwaway venvs: a core+jcl box cannot even
-                                   # find cobol_xstate; --bind-jcl without the extra
-                                   # fails naming the exact pip command
+python tools/prove_separation.py   # four throwaway venvs: a core+jcl box cannot even
+                                   # find cobol_xstate or cobol_parse; a core+parser box
+                                   # parses with no modelling engine; --bind-jcl without
+                                   # the extra fails naming the exact pip command
 ```
 
 | Test module | Covers |
 |---|---|
-| `test_normalizer.py` | format detection, column handling, continuation |
-| `test_lexer.py` | tokenization |
+| `test_normalizer.py` (in `parser/tests/`) | format detection, column handling, continuation |
+| `test_lexer.py` (in `parser/tests/`) | tokenization |
 | `test_preprocessor.py` | COPY / REPLACE / missing members |
-| `test_parser.py` | statement AST, handlers, headers, GO TO |
+| `test_parser.py` (in `parser/tests/`) | statement AST, handlers, headers, GO TO |
 | `test_data_semantics.py` | PIC types, `target := expr`, conditions |
 | `test_statechart.py` | the compiled config, flags, ALTER |
 | `test_emitter.py` | ops/guards + **Node integration under stock XState** |

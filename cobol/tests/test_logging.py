@@ -25,6 +25,7 @@ from cobol_xstate.errors import (
     SourceFormatError,
 )
 from cobol_xstate import PACKAGE_LOGGER
+from cobol_parse import PACKAGE_LOGGER as PARSE_LOGGER
 from cobol_xstate_core.artifact_service import ServiceUnavailable
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging, level_for
@@ -33,7 +34,7 @@ from cobol_xstate.runtime_assets import RuntimeAssetMissing
 #: Every top-level logger root the CLI can emit from. A root nobody configures does not
 #: merely lose messages - it propagates to the root logger, or falls back to logging's
 #: lastResort and prints straight to stderr. These are asserted together on purpose.
-LOGGER_ROOTS = (CORE_LOGGER, PACKAGE_LOGGER)
+LOGGER_ROOTS = (CORE_LOGGER, PARSE_LOGGER, PACKAGE_LOGGER)
 
 _PROG = (
     "       IDENTIFICATION DIVISION.\n"

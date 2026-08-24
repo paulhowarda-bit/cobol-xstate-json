@@ -1,4 +1,4 @@
-from cobol_xstate.normalizer import (
+from cobol_parse.normalizer import (
     normalize,
     SourceFormat,
     detect_source_format,

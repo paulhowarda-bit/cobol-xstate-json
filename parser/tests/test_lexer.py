@@ -1,5 +1,5 @@
-from cobol_xstate.normalizer import normalize, SourceFormat
-from cobol_xstate.lexer import tokenize
+from cobol_parse.normalizer import normalize, SourceFormat
+from cobol_parse.lexer import tokenize
 
 
 def _toks(code: str):

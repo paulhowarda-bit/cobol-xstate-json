@@ -6,14 +6,21 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 
 ## Commands
 
-**Two distributions ship from this repo**, each with its own `pyproject.toml`; the JCL
+**Three distributions ship from this repo**, each with its own `pyproject.toml`; the JCL
 front-end is its **own repository**:
 
 | Directory | Distribution | What it is | Depends on |
 |---|---|---|---|
 | `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
-| `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) | core |
+| `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), reusable by any program | core |
+| `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) | core + parser |
 | *(sibling repo)* | [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies) | JCL → dataflow + dependencies (`jcl-dependencies`) | core only |
+
+`cobol_parse` carries no modelling engine: `parse_program(source, fmt, resolver) ->
+Program` is its whole surface, and `cobol_xstate` keeps thin re-export shims at the old
+module paths (`cobol_xstate.parser`, `.model`, …) so existing imports work unchanged.
+The boundary is enforced by `cobol/tests/test_package_boundaries.py` and
+`tools/prove_separation.py`, like the others.
 
 The two front-ends are **peers**: neither imports the other, and a JCL install carries no
 COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
@@ -24,12 +31,12 @@ duplicate deleted, so that parser has exactly one source. The suite finds a sibl
 `JCL_DEPENDENCIES_REPO`); without one, the bridge tests skip with the pip command.
 
 ```bash
-# Run from a checkout, no install needed (the root pyproject puts both on sys.path)
-python -m pytest -q                                        # this repo's suite (~654 tests)
-PYTHONPATH="core/src;cobol/src" python -m cobol_xstate cobol/examples/custrpt.cbl
+# Run from a checkout, no install needed (the root pyproject puts all three on sys.path)
+python -m pytest -q                                        # this repo's suite (~660 tests)
+PYTHONPATH="core/src;parser/src;cobol/src" python -m cobol_xstate cobol/examples/custrpt.cbl
 
 # Or install for real (editable), which is what gives you the console scripts
-python -m pip install -e core -e cobol
+python -m pip install -e core -e parser -e cobol
 python -m pip install -e ../jcl-dependencies      # optional: the JCL front-end + --bind-jcl
 cobol-xstate prog.cbl --summary        # 8 JSON views into ./out/
 cobol-xstate prog.cbl --target js      # runnable ES module + cobolRuntime.mjs
@@ -55,7 +62,7 @@ Node-backed tests live in `cobol/` and need `npm install` **there** (`cobol/node
 
 ### The pipeline builds one hub object, then many views project it
 
-Source → **`Machine`** (`statechart.build_machine`) via: `normalizer` (fixed/free format, column-7, continuation-literal stitching) → `preprocessor` (COPY/REPLACING/EXEC SQL INCLUDE expansion) → `lexer` → `parser` (+ `model`, `data_division`) → `statechart` (+ `semantics`, `analysis`, `naming`). The `Machine` carries `.config` (the XState config), `.data` (typed dictionary), `.semantics` (actions/guards), `.provenance`, `.flags`, plus `.paragraph_order`, `.sections`, `.files`.
+Source → **`Machine`** (`statechart.build_machine`) via: `normalizer` (fixed/free format, column-7, continuation-literal stitching) → `preprocessor` (COPY/REPLACING/EXEC SQL INCLUDE expansion) → `lexer` → `parser` (+ `model`, `data_division`) → `statechart` (+ `semantics`, `analysis`, `naming`). The front-end half up to and including `parser`/`data_division`/`model` lives in the **`cobol_parse` package** (`parser/src/cobol_parse/`); the seam is exactly `parse_program(...) -> Program` then `build_machine(program) -> Machine` (two adjacent calls in `api.py`). The `Machine` carries `.config` (the XState config), `.data` (typed dictionary), `.semantics` (actions/guards), `.provenance`, `.flags`, plus `.paragraph_order`, `.sections`, `.files`.
 
 **`Machine.config` is deliberately FLAT**: one state per program point, hierarchy encoded only in mangled names (`0000-MAIN__loop3`, `__seq2`, `__if4`), and `PERFORM p` recorded as a **marker action** `perform_p` with no target and no return. This is the convenient working IR for analyses that walk it — it is *not* the final statechart. Every "view" is a **pure function over the `Machine`** that transforms this flat IR into one answer:
 

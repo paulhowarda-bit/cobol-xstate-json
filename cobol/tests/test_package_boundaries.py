@@ -1,9 +1,12 @@
 """The package boundaries, enforced rather than asserted in prose.
 
-Three distributions ship from this tree: cobol_xstate_core (retrieval and the estate
-boundary), jcl_dependencies (JCL), and cobol_xstate (COBOL). The whole point of the split
-is that the two front-ends are PEERS - a JCL install carries no COBOL modelling engine,
-and neither imports the other - with core underneath both.
+Three distributions ship from this tree - cobol_xstate_core (retrieval and the estate
+boundary), cobol_parse (the COBOL parse front-end), and cobol_xstate (the statechart
+modelling engine) - with jcl_dependencies in its own repository. The point of the split
+is that the two ESTATE front-ends (COBOL, JCL) are peers - a JCL install carries no
+COBOL modelling engine, and neither imports the other - with core underneath both, and
+that the PARSE front-end stands alone: other programs can parse COBOL to a Program
+without carrying the modelling engine.
 
 Nothing about the source layout enforces that; a single stray import would erase it while
 every test still passed. So these tests import each package with the others genuinely
@@ -25,7 +28,7 @@ import pytest
 # is exactly the kind of cleverness that ends in a vacuous pass.
 _PREAMBLE = textwrap.dedent("""
     import sys
-    for _tree in ("core/src", "cobol/src"):
+    for _tree in ("core/src", "parser/src", "cobol/src"):
         sys.path.insert(0, _tree)
 
     class Blocker:
@@ -54,7 +57,7 @@ def test_the_blocker_actually_blocks():
 
 
 def test_core_needs_neither_front_end():
-    proc = _run_isolated(["cobol_xstate", "jcl_dependencies"], """
+    proc = _run_isolated(["cobol_xstate", "jcl_dependencies", "cobol_parse"], """
         import cobol_xstate_core
         from cobol_xstate_core.prefetch import Prefetcher, PrefetchResult
         from cobol_xstate_core.fetch import fetch_dependencies, build_fetch_plan
@@ -107,6 +110,47 @@ def test_bind_jcl_without_the_jcl_package_says_exactly_what_to_install(tmp_path)
     assert "RC 2" in proc.stdout
     assert "jcl-dependencies" in proc.stdout
     assert "pip install cobol-xstate[jcl]" in proc.stdout
+
+
+def test_the_parse_front_end_needs_no_modelling_engine():
+    """cobol_parse is the standalone product of the split: source in, Program out, with
+    the statechart engine genuinely absent - not merely unused."""
+    proc = _run_isolated(["cobol_xstate", "jcl_dependencies"], """
+        from cobol_parse import parse_program, prefetch_cobol, scan_copy_members
+        prog = parse_program(
+            "       IDENTIFICATION DIVISION.\\n"
+            "       PROGRAM-ID. STANDALONE.\\n"
+            "       PROCEDURE DIVISION.\\n"
+            "       0000-MAIN.\\n"
+            "           PERFORM 1000-A\\n"
+            "           STOP RUN.\\n"
+            "       1000-A.\\n"
+            "           ADD 1 TO WS-N.\\n"
+        )
+        assert prog.program_id == "STANDALONE"
+        assert [p.name for p in prog.paragraphs] == ["0000-MAIN", "1000-A"]
+        print("OK")
+    """)
+    assert proc.returncode == 0, proc.stderr
+    assert "OK" in proc.stdout
+
+
+def test_importing_the_parse_package_does_not_pull_in_the_modelling_one():
+    """The dependency points one way. If cobol_parse ever imported cobol_xstate - even
+    lazily, even for one helper - every third-party parser consumer would silently carry
+    the whole modelling engine."""
+    proc = _run_isolated([], """
+        import sys
+        import cobol_parse
+        # cobol_xstate_core is the legitimate dependency; only the modelling package
+        # itself must be absent.
+        assert "cobol_xstate" not in sys.modules, sorted(
+            m for m in sys.modules
+            if m == "cobol_xstate" or m.startswith("cobol_xstate."))
+        print("OK")
+    """)
+    assert proc.returncode == 0, proc.stderr
+    assert "OK" in proc.stdout
 
 
 def test_importing_the_cobol_package_does_not_pull_in_the_jcl_one():

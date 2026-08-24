@@ -50,7 +50,7 @@ from typing import Callable, Dict, List, Tuple
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "cobol" / "examples"
 
-for _tree in ("core/src", "cobol/src"):
+for _tree in ("core/src", "parser/src", "cobol/src"):
     sys.path.insert(0, str(REPO / _tree))
 
 from cobol_xstate.artifacts import build_artifacts                    # noqa: E402

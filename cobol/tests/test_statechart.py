@@ -662,3 +662,26 @@ def test_overflow_inside_a_string_literal_is_not_flagged():
     # flag swallowed by the dedupe. The line is the discriminating fact.
     assert len(overflow_flags) == 1
     assert overflow_flags[0]["line"] == 12   # the STRING with the real ON OVERFLOW
+
+def test_goto_unknown_target_is_flagged_and_rerouted():
+    # Lived in test_parser.py before the parse front-end split; it exercises
+    # build_machine's flag + reroute, so it belongs on this side of the boundary.
+    machine = _machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           GO TO NO-SUCH-PARA.\n"
+        "       1000-NEXT.\n"
+        "           STOP RUN.\n"
+    )
+    assert any("NO-SUCH-PARA" in f["message"] and "does not exist" in f["message"]
+               for f in machine.flags)
+    # no dangling edge survives anywhere in the machine
+    def targets(states):
+        for st in states.values():
+            for tr in st.get("always", []) or []:
+                yield tr["target"]
+            yield from targets(st.get("states", {}))
+    known = set(machine.config["states"])
+    assert all(t in known for t in targets(machine.config["states"]))
