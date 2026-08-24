@@ -22,19 +22,23 @@ on runtime data is *flagged*, never smoothed over.
 
 ## Install
 
-**Two distributions ship from this repository** — a shared retrieval core and the COBOL
-front-end. The JCL front-end, [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies),
-lives in its own repository and depends only on the core. The two front-ends are peers:
-neither imports the other, and a JCL install carries no COBOL modelling engine:
+**Three distributions ship from this repository** — a shared retrieval core, the COBOL
+parse front-end, and the statechart modelling engine. The JCL front-end,
+[`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies),
+lives in its own repository and depends only on the core. The two estate front-ends are
+peers: neither imports the other, and a JCL install carries no COBOL modelling engine.
+The parse front-end stands alone too — any program can `pip install cobol-parse` and get
+`parse_program(source) -> Program` without the statechart machinery:
 
 | Where | Distribution | What it is |
 |---|---|---|
 | `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle |
-| `cobol/` | `cobol-xstate` | COBOL → statechart + all views (`cobol-xstate`) |
+| `parser/` | `cobol-parse` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
+| `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) |
 | its own repo | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) |
 
 ```bash
-python -m pip install -e core -e cobol        # COBOL work (core comes with it)
+python -m pip install -e core -e parser -e cobol   # COBOL work (core+parser come with it)
 python -m pip install -e ../jcl-dependencies  # optional: the JCL front-end
 # or: pip install cobol-xstate[jcl]           # adds the --bind-jcl join
 

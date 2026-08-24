@@ -38,7 +38,7 @@ from typing import Dict, List
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "cobol" / "examples"
 
-for _tree in ("core/src", "cobol/src", "cobol/tests"):
+for _tree in ("core/src", "parser/src", "cobol/src", "cobol/tests"):
     sys.path.insert(0, str(REPO / _tree))
 
 from fakes.estate import fetch_artifact                              # noqa: E402

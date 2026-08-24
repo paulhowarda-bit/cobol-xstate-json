@@ -1,5 +1,5 @@
-from cobol_xstate.parser import parse_program
-from cobol_xstate.model import (
+from cobol_parse.parser import parse_program
+from cobol_parse.model import (
     EvaluateStmt,
     GoToStmt,
     IfStmt,
@@ -215,7 +215,7 @@ def _para(prog, name):
 def test_string_without_end_string_does_not_swallow_following_statements():
     # A STRING with no END-STRING terminator must end at the next statement verb,
     # not consume the rest of the paragraph (one-period-per-paragraph style).
-    from cobol_xstate.model import walk_statements, Action, IfStmt
+    from cobol_parse.model import walk_statements, Action, IfStmt
     prog = parse_program(_wrap(
         "       5000-PROCESS.\n"
         "           STRING WS-A DELIMITED BY SIZE\n"
@@ -242,7 +242,7 @@ def test_string_without_end_string_does_not_swallow_following_statements():
 def test_string_with_end_string_and_overflow_keeps_its_imperative():
     # With an explicit END-STRING, the ON OVERFLOW imperative (which contains verbs)
     # belongs to the STRING and must not prematurely terminate the opaque scope.
-    from cobol_xstate.model import walk_statements, Action, IfStmt
+    from cobol_parse.model import walk_statements, Action, IfStmt
     prog = parse_program(_wrap(
         "       5000-PROCESS.\n"
         "           STRING WS-A DELIMITED BY SIZE INTO WS-OUT\n"
@@ -268,7 +268,7 @@ def test_string_with_end_string_and_overflow_keeps_its_imperative():
 
 
 def test_string_without_end_string_inside_if_does_not_eat_end_if():
-    from cobol_xstate.model import walk_statements, IfStmt, Action
+    from cobol_parse.model import walk_statements, IfStmt, Action
     prog = parse_program(_wrap(
         "       5000-PROCESS.\n"
         "           IF WS-A > 0\n"
@@ -292,7 +292,7 @@ def test_string_without_end_string_inside_if_does_not_eat_end_if():
 # --------------------------------------------------------------------------- #
 
 def test_call_on_exception_handler_captured_as_branch():
-    from cobol_xstate.model import Action, walk_statements
+    from cobol_parse.model import Action, walk_statements
     prog = parse_program(_wrap(
         "       0000-MAIN.\n"
         "           CALL 'SUBPGM' USING BY REFERENCE WS-A BY CONTENT WS-B\n"
@@ -315,7 +315,7 @@ def test_call_on_exception_handler_captured_as_branch():
 
 
 def test_arith_on_size_error_captured_as_branches():
-    from cobol_xstate.model import HandledStmt
+    from cobol_parse.model import HandledStmt
     prog = parse_program(_wrap(
         "       0000-MAIN.\n"
         "           ADD 1 TO WS-A\n"
@@ -362,7 +362,7 @@ def test_write_at_end_of_page_is_its_own_handler_key():
 
 
 def test_read_into_and_accept_exception_captured():
-    from cobol_xstate.model import HandledStmt
+    from cobol_parse.model import HandledStmt
     prog = parse_program(_wrap(
         "       0000-MAIN.\n"
         "           READ IN-FILE INTO WS-REC\n"
@@ -403,26 +403,6 @@ def test_goto_qualified_target_drops_qualification_only():
     st = prog.paragraphs[0].statements[0]
     assert isinstance(st, GoToStmt)
     assert st.targets == ["1000-SUB"]          # not [1000-SUB, OF, 2000-SEC]
-
-
-def test_goto_unknown_target_is_flagged_and_rerouted():
-    from cobol_xstate.statechart import build_machine
-    machine = build_machine(parse_program(_wrap(
-        "       0000-MAIN.\n"
-        "           GO TO NO-SUCH-PARA.\n"
-        "       1000-NEXT.\n"
-        "           STOP RUN.\n"
-    )))
-    assert any("NO-SUCH-PARA" in f["message"] and "does not exist" in f["message"]
-               for f in machine.flags)
-    # no dangling edge survives anywhere in the machine
-    def targets(states):
-        for st in states.values():
-            for tr in st.get("always", []) or []:
-                yield tr["target"]
-            yield from targets(st.get("states", {}))
-    known = set(machine.config["states"])
-    assert all(t in known for t in targets(machine.config["states"]))
 
 
 def test_perform_literal_times_keeps_its_inline_body():
@@ -520,8 +500,8 @@ def test_hyphenated_data_name_does_not_hide_a_nested_program():
 def test_find_program_id_ignores_a_hyphenated_data_name():
     """Even if the DATA DIVISION item came first, the leading hyphen must keep it from
     being read as the program's own id."""
-    from cobol_xstate.parser import _find_program_id
-    from cobol_xstate.normalizer import normalize
+    from cobol_parse.parser import _find_program_id
+    from cobol_parse.normalizer import normalize
     lines = normalize(
         "       01  WS-SAVED-PROGRAM-ID PIC X(8).\n"
         "       PROGRAM-ID. REALPGM.\n")

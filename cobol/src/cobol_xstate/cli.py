@@ -16,6 +16,7 @@ from cobol_xstate_core.bundle import open_bundle
 from cobol_xstate_core.cliargs import (add_logging_args, add_output_args,
                                        add_retrieval_args, jobs as _jobs)
 from cobol_xstate_core.detect import looks_like_jcl as _looks_like_jcl
+from cobol_parse import PACKAGE_LOGGER as PARSE_LOGGER
 from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from cobol_xstate_core.logging_setup import configure_logging
 from cobol_xstate_core.output import make_run_dir as _make_run_dir
@@ -226,12 +227,12 @@ def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     exit code; an UNEXPECTED exception is reported as an internal error (exit 1) with the
     full traceback shown only under ``--debug`` - never leaked raw to the user."""
     args = build_parser().parse_args(argv)
-    # BOTH roots: retrieval logs from cobol_xstate_core.*, everything else from
-    # cobol_xstate.*. Configuring only one leaves the other propagating to the root
-    # logger - or, with no handler anywhere, printing WARNING+ via logging's lastResort,
-    # which would make -qq stop being silent.
+    # ALL THREE roots: retrieval logs from cobol_xstate_core.*, the parse front-end's
+    # from cobol_parse.*, everything else from cobol_xstate.*. Configuring only some
+    # leaves the rest propagating to the root logger - or, with no handler anywhere,
+    # printing WARNING+ via logging's lastResort, which would make -qq stop being silent.
     configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet,
-                      loggers=(CORE_LOGGER, PACKAGE_LOGGER))
+                      loggers=(CORE_LOGGER, PARSE_LOGGER, PACKAGE_LOGGER))
     try:
         return _run(args, timing_sink=timing_sink)
     except CobolXstateError as exc:

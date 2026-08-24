@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Paul Howard" }]
 keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernization", "parser"]
 
-dependencies = ["cobol-xstate-core>=0.1,<0.2"]
+dependencies = ["cobol-xstate-core>=0.1,<0.2", "cobol-parse>=0.1,<0.2"]
 
 [project.optional-dependencies]
 # --bind-jcl closes the ddname->dataset join, which needs the JCL half. It is an EXTRA

@@ -28,17 +28,11 @@ from __future__ import annotations
 # tests/test_logging.py::test_every_domain_error_derives_from_the_one_base is the guard.
 from cobol_xstate_core.errors import CobolXstateError
 
-
-class SourceFormatError(CobolXstateError):
-    """The source format (fixed / free) could not be determined, or is invalid."""
-
-
-class ParseError(CobolXstateError):
-    """The COBOL or JCL source could not be parsed into a model."""
-
-
-class CopybookError(CobolXstateError):
-    """A COPY member / copybook could not be resolved or expanded."""
+# The parse-stage errors moved with the parse front-end to the cobol-parse
+# distribution; re-exported here so existing imports and `except` sites keep catching
+# the same classes.
+from cobol_parse.errors import (CopybookError, ParseError,  # noqa: F401
+                                SourceFormatError)
 
 
 class ReactiveLoweringError(CobolXstateError, NotImplementedError):
