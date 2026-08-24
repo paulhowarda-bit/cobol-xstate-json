@@ -12,6 +12,23 @@ license = { text = "MIT" }
 authors = [{ name = "Paul Howard" }]
 keywords = ["cobol", "mainframe", "xstate", "statechart", "harel", "modernization", "parser"]
 
+# Both dependencies ship from the mainframe-common repository (one repo, two
+# distributions in subdirectories). Until they are on an index, version pins here mean
+# a bare `pip install cobol-xstate` cannot resolve them - install all three in one
+# command with explicit direct references (which these pins accept):
+#
+#   pip install "cobol-xstate-core @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=core" \
+#               "cobol-parse @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=parser" \
+#               "cobol-xstate @ git+https://github.com/paulhowarda-bit/cobol-xstate-json#subdirectory=cobol"
+#
+# Deliberately NOT direct git references in dependencies themselves, unlike the [jcl]
+# extra below. The extra's reference is inert until someone asks for [jcl]; a HARD
+# dependency's reference is resolved on every install, and pip (proven on 25.0.1)
+# git-clones it even when the same-named project is supplied as a local editable in
+# the same command - an already-installed editable does not satisfy a direct-URL
+# requirement whose URL differs. That would break the offline editable flow
+# (tools/prove_separation.py, the documented dev install) and, once the URL exists,
+# silently replace editable core/parser installs with snapshot clones.
 dependencies = ["cobol-xstate-core>=0.1,<0.2", "cobol-parse>=0.1,<0.2"]
 
 [project.optional-dependencies]

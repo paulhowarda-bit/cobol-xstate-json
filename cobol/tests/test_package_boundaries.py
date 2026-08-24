@@ -1,12 +1,12 @@
 """The package boundaries, enforced rather than asserted in prose.
 
-Three distributions ship from this tree - cobol_xstate_core (retrieval and the estate
-boundary), cobol_parse (the COBOL parse front-end), and cobol_xstate (the statechart
-modelling engine) - with jcl_dependencies in its own repository. The point of the split
-is that the two ESTATE front-ends (COBOL, JCL) are peers - a JCL install carries no
-COBOL modelling engine, and neither imports the other - with core underneath both, and
-that the PARSE front-end stands alone: other programs can parse COBOL to a Program
-without carrying the modelling engine.
+One distribution ships from this tree - cobol_xstate (the statechart modelling engine) -
+over cobol_xstate_core (retrieval and the estate boundary) and cobol_parse (the COBOL
+parse front-end) from the mainframe-common repository, with jcl_dependencies in its own
+repository. The point of the split is that the two ESTATE front-ends (COBOL, JCL) are
+peers - a JCL install carries no COBOL modelling engine, and neither imports the other -
+with core underneath both, and that the PARSE front-end stands alone: other programs can
+parse COBOL to a Program without carrying the modelling engine.
 
 Nothing about the source layout enforces that; a single stray import would erase it while
 every test still passed. So these tests import each package with the others genuinely
@@ -17,18 +17,31 @@ consulted through ``find_spec``. ``find_module`` was REMOVED in Python 3.12, so 
 that only defines it is ignored entirely and every one of these tests passes vacuously.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
+
+# The source trees the child interpreters run against: this repo's cobol/src plus the
+# core/ and parser/ trees from the mainframe-common sibling checkout (override with
+# MAINFRAME_COMMON_REPO - the same discovery conftest.py performs). When the
+# distributions are pip-installed instead, the checkout paths simply do not exist and
+# the inserts are inert - the installed packages carry the run.
+_REPO = Path(__file__).resolve().parents[2]
+_COMMON = Path(os.environ.get("MAINFRAME_COMMON_REPO",
+                              _REPO.parent / "mainframe-common"))
+_TREES = (str(_COMMON / "core" / "src"), str(_COMMON / "parser" / "src"),
+          str(_REPO / "cobol" / "src"))
 
 # Run each case in its own interpreter. Blocking a module that a previous test already
 # imported would do nothing (it is in sys.modules), and unpicking that inside one process
 # is exactly the kind of cleverness that ends in a vacuous pass.
 _PREAMBLE = textwrap.dedent("""
     import sys
-    for _tree in ("core/src", "parser/src", "cobol/src"):
+    for _tree in %r:
         sys.path.insert(0, _tree)
 
     class Blocker:
@@ -44,7 +57,7 @@ _PREAMBLE = textwrap.dedent("""
 
 
 def _run_isolated(blocked, body):
-    script = _PREAMBLE % (tuple(blocked),) + textwrap.dedent(body)
+    script = _PREAMBLE % (_TREES, tuple(blocked)) + textwrap.dedent(body)
     return subprocess.run([sys.executable, "-c", script],
                           capture_output=True, text=True)
 

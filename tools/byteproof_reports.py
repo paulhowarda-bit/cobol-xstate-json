@@ -38,8 +38,15 @@ from typing import Dict, List
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "cobol" / "examples"
 
-for _tree in ("core/src", "parser/src", "cobol/src", "cobol/tests"):
-    sys.path.insert(0, str(REPO / _tree))
+# core/src and parser/src live in the mainframe-common sibling checkout now (override
+# with MAINFRAME_COMMON_REPO). When the distributions are pip-installed instead, the
+# checkout paths simply do not exist and the inserts are inert.
+import os                                                             # noqa: E402
+_COMMON = Path(os.environ.get("MAINFRAME_COMMON_REPO",
+                              REPO.parent / "mainframe-common"))
+for _tree in (_COMMON / "core" / "src", _COMMON / "parser" / "src",
+              REPO / "cobol" / "src", REPO / "cobol" / "tests"):
+    sys.path.insert(0, str(_tree))
 
 from fakes.estate import fetch_artifact                              # noqa: E402
 

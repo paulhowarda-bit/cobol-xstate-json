@@ -29,12 +29,21 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# The JCL front-end lives in its OWN repository now; this proof installs it from a
+# The core and parser distributions live in the mainframe-common repository now; this
+# proof installs them from a sibling checkout (override with MAINFRAME_COMMON_REPO).
+# Unlike the JCL checkout below, that one is NOT optional: every venv here needs core,
+# so with no checkout the proof refuses to run rather than proving nothing quietly.
+import os
+COMMON_REPO = Path(os.environ.get("MAINFRAME_COMMON_REPO",
+                                  REPO.parent / "mainframe-common"))
+# The JCL front-end lives in its OWN repository; this proof installs it from a
 # sibling checkout (override with JCL_DEPENDENCIES_REPO). When the checkout is absent
 # the jcl-involving venvs are SKIPPED with a message - never silently passed.
-import os
 JCL_REPO = Path(os.environ.get("JCL_DEPENDENCIES_REPO",
                                REPO.parent / "jcl-dependencies"))
+# Which checkout each installable name comes from.
+DISTS = {"core": COMMON_REPO / "core", "parser": COMMON_REPO / "parser",
+         "cobol": REPO / "cobol", "jcl": JCL_REPO}
 IS_WIN = sys.platform == "win32"
 BIN = "Scripts" if IS_WIN else "bin"
 EXE = ".exe" if IS_WIN else ""
@@ -55,7 +64,7 @@ def make_venv(root: Path, name: str, dists) -> Path:
     py = venv / BIN / f"python{EXE}"
     args = [str(py), "-m", "pip", "install", "-q"]
     for d in dists:
-        args += ["-e", str(JCL_REPO if d == "jcl" else REPO / d)]
+        args += ["-e", str(DISTS[d])]
     proc = subprocess.run(args, capture_output=True, text=True)
     if proc.returncode:
         print(proc.stdout, proc.stderr)
@@ -72,6 +81,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true", help="do not delete the venvs")
     args = ap.parse_args()
+
+    if not (COMMON_REPO / "core" / "pyproject.toml").is_file():
+        print(f"mainframe-common checkout not found at {COMMON_REPO} - every venv "
+              f"here installs core (and most install parser) from it, so there is "
+              f"nothing this proof can prove without one. Clone it beside this repo "
+              f"or set MAINFRAME_COMMON_REPO to point at a checkout.",
+              file=sys.stderr)
+        return 2
 
     root = Path(tempfile.mkdtemp(prefix="cobol-xstate-separation-"))
     out = root / "out"
