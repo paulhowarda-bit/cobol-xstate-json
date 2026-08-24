@@ -144,11 +144,21 @@ cobol-xstate [-h] [--outdir DIR]
              [--target {json,js,reactive,business,lineage,artifacts}]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
              [--copybook-fetcher MODULE:FUNC]
-             [--gather-only DIR] [--from-bundle DIR] [--no-fetch]
+             [--gather-only DIR] [--from-bundle DIR] [--from-parse FILE] [--no-fetch]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
              [--no-dynamic-calls] [--bind-jcl FILE]
              [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
              source
+```
+
+The parse front-end has its own command, which runs only the parse and writes one file
+— a **parse bundle** (the serialized `Program`) that `--from-parse` models from:
+
+```
+cobol-parse [-h] [-o FILE] [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
+            [--copybook-fetcher MODULE:FUNC] [--from-bundle DIR] [--no-fetch]
+            [--jobs N] [--indent N]
+            source
 ```
 
 The JCL front-end has its own command with the same retrieval/output/logging flags plus
@@ -418,6 +428,46 @@ come out byte-for-byte what the live run would have produced. Asking for a membe
 gather run never asked for is an **error**, not an empty answer — the two runs would
 not be the same analysis. Both flags exist on `jcl-dependencies` too. The two flags are
 mutually exclusive.
+
+### `cobol-parse` / `--from-parse FILE`
+
+The **parse** also splits out of the run — the axis this time is *when*, not *where*.
+`cobol-parse` parses upfront and writes a **parse bundle**: one JSON file carrying the
+serialized `Program` AST (every statement node, the typed data dictionary, copybook
+provenance), the exact source text it parsed with its sha256, and the producer run's
+copybook errors. `--from-parse` then models from it, skipping the parse entirely:
+
+```bash
+cobol-parse prog.cbl -o prog.parse.json          # upfront, once
+cobol-xstate prog.cbl --from-parse prog.parse.json    # skips the parse
+cobol-xstate prog.cbl --from-bundle ./b --from-parse prog.parse.json  # offline AND parse-free
+```
+
+Three rules, all inherited from the estate bundle's design:
+
+- **No new branch.** The replay swaps exactly one call — `parse_program` for
+  rehydration — and everything downstream is the same code. `tools/gate.py` proves the
+  two paths byte-identical for every view of every example, against the *same* goldens.
+- **Staleness is a hard error**, unlike the estate bundle's drift *warning*: an estate
+  answer for changed source is merely incomplete, but a `Program` for changed source is
+  wrong everywhere at once — lines, statements, provenance — with nothing left to
+  notice it. The bundle records the source's sha256 and a mismatch stops the run.
+- **A newer bundle version is refused, never partially read.** Any change to
+  `model.py`'s field sets is a contract version bump.
+
+`--from-parse` conflicts with `--gather-only` (the gather's stage-2 plan comes from the
+live parse), and with a disagreeing `--format` (the bundle records the format it was
+parsed as). `cobol-parse` refuses `--gather-only` for the mirror-image reason: it never
+builds the artifact manifest stage 2 plans from, so its half-gathered bundle would
+poison a later `--from-bundle` replay (which errors on any member the gather never
+asked for). Retrieval flags (`--from-bundle`, `--no-fetch`, `--copybook-fetcher`,
+`--jobs`, `-I`, `--copybook-ext`) work on `cobol-parse` exactly as on `cobol-xstate` —
+copybooks must still arrive before the parse.
+
+Other programs can consume the parse bundle directly (`cobol_parse.parse_bundle.
+open_parse_bundle`, or any JSON reader — nodes are `{"t": "<ClassName>", ...}` with
+keys matching the `model.py` dataclass fields), and other producers can write it: the
+`producer` field names whose parse it is.
 
 ### `--machine-only`
 

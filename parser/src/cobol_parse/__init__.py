@@ -32,6 +32,8 @@ from .lexer import Token, tokenize
 from .preprocessor import CopybookResolver, PreprocessResult, preprocess, scan_copy_members
 from .data_division import DataItem, PicType, expand_pic, parse_data_division, parse_pic
 from .model import Paragraph, Program, Stmt, walk_statements
+from .parse_bundle import (ParseBundle, ParseBundleError, open_parse_bundle,
+                           program_from_dict, program_to_dict, write_parse_bundle)
 from .parser import parse_program
 from .prefetch import prefetch_cobol
 from .textutil import mask_literals
@@ -74,6 +76,13 @@ __all__ = [
     "DataItem",
     "PicType",
     "mask_literals",
+    # The serialized parse contract (see cobol_parse.parse_bundle)
+    "ParseBundle",
+    "ParseBundleError",
+    "open_parse_bundle",
+    "write_parse_bundle",
+    "program_to_dict",
+    "program_from_dict",
     # Error hierarchy (see cobol_parse.errors)
     "SourceFormatError",
     "ParseError",

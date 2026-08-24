@@ -7,15 +7,18 @@ a step was clean is to hash every view and every retrieval report and compare. R
 that by hand, in four variants, after each of a dozen substeps, is how it stops getting
 run - so it is one command.
 
-Four variants, because each pins a different way the output could stop being stable:
+Six variants, because each pins a different way the output could stop being stable:
 
     views   @ PYTHONHASHSEED=0        the baseline
     views   @ PYTHONHASHSEED=1234     no set/dict iteration order leaked into output
+    views   @ parse-bundle round-trip the serialized parse contract (both hash seeds):
+                                      Program -> JSON -> Program before modelling,
+                                      against the SAME views goldens
     reports @ --jobs 1                the sequential retrieval path (no threads at all)
     reports @ --jobs 8                the concurrent one - row order must still follow
                                       the PLAN, not the order answers arrived
 
-Exit code is 0 only if all four agree with the goldens.
+Exit code is 0 only if all six agree with the goldens.
 
     python tools/gate.py                 # check
     python tools/gate.py --record        # re-record all goldens (only when a change
@@ -40,6 +43,15 @@ CHECKS = [
      [sys.executable, "tools/byteproof.py", "--check", str(VIEWS)], {"PYTHONHASHSEED": "0"}),
     ("views   @ PYTHONHASHSEED=1234",
      [sys.executable, "tools/byteproof.py", "--check", str(VIEWS)], {"PYTHONHASHSEED": "1234"}),
+    # The parse-bundle round trip is checked against the SAME views goldens: a two-step
+    # cobol-parse / --from-parse run must emit the bytes a one-step run does, or the
+    # serialized contract is losing something.
+    ("views   @ parse-bundle round-trip, PYTHONHASHSEED=0",
+     [sys.executable, "tools/byteproof.py", "--check", str(VIEWS), "--via-parse-bundle"],
+     {"PYTHONHASHSEED": "0"}),
+    ("views   @ parse-bundle round-trip, PYTHONHASHSEED=1234",
+     [sys.executable, "tools/byteproof.py", "--check", str(VIEWS), "--via-parse-bundle"],
+     {"PYTHONHASHSEED": "1234"}),
     ("reports @ --jobs 1",
      [sys.executable, "tools/byteproof_reports.py", "--check", str(REPORTS), "--jobs", "1"], {}),
     ("reports @ --jobs 8",
