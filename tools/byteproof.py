@@ -50,7 +50,7 @@ from typing import Callable, Dict, List, Tuple
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "cobol" / "examples"
 
-# core/src and parser/src live in the mainframe-common sibling checkout now (override
+# mainframe-artifacts/src and cobol-parser/src live in the mainframe-common sibling checkout (override
 # with MAINFRAME_COMMON_REPO). When the distributions are pip-installed instead, the
 # checkout paths simply do not exist and the inserts are inert.
 import os                                                             # noqa: E402

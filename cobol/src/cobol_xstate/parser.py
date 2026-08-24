@@ -1,4 +1,4 @@
-"""Moved to the cobol-parser distribution (parser/src/cobol_parser/parser.py);
+"""Moved to the cobol-parser distribution (cobol-parser/src/cobol_parser/parser.py);
 re-exported here so existing imports keep working. ``CopybookResolver`` was always
 reachable through this module (the real parser imports it), so it stays reachable."""
 

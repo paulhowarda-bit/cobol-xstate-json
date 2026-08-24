@@ -1,4 +1,4 @@
-"""Moved to the cobol-parser distribution (parser/src/cobol_parser/model.py);
+"""Moved to the cobol-parser distribution (cobol-parser/src/cobol_parser/model.py);
 re-exported here so existing imports keep working."""
 
 from cobol_parser.model import (  # noqa: F401
