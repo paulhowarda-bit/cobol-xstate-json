@@ -55,6 +55,10 @@ cobol-xstate prog.cbl --from-bundle ./b --from-parse prog.parse.json  # offline 
 # Our preprocessor stays the provenance owner - Koopa sees the pre-expanded stream.
 COBOL_PARSE_KOOPA_JAR=~/tools/koopa.jar cobol-parse prog.cbl --diff-producers
 
+# Db2 synonym->base-table map (catalog knowledge as input): lets a column-list-less
+# INSERT written under a synonym find the base table's DECLARE TABLE column order.
+cobol-xstate prog.cbl --synonym-map synonyms.json
+
 python -m pytest cobol/tests/test_emitter.py -q            # one module
 python -m pytest cobol/tests/test_reactive.py -k retarget  # one test by name substring
 ```

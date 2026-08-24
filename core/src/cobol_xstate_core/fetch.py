@@ -77,6 +77,9 @@ _KIND_TYPE: Dict[str, str] = {
     "program":          "cobol",
     "copybook":         "copybook",
     "db2-table":        "ddl",
+    # A stored procedure's implementation is very often a COBOL load module of the same
+    # name; asking the estate for it as COBOL lets a miss say "not found" honestly.
+    "db2-stored-procedure": "cobol",
     "file":             "cntl",
     "terminal-map":     "bms",
     "cics-transaction": "csd",

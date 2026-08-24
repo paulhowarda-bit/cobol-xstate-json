@@ -91,6 +91,14 @@ _CLASS: Dict[str, dict] = {
     "console": {"kind": "spool", "identity": "global",            "priority": 8,
                 "resolver": None,
                 "needs": None},
+    # EXEC SQL CALL: a Db2 STORED PROCEDURE. Priority appended (10) rather than wedged
+    # next to program (2): renumbering the established kinds would reshuffle every
+    # existing manifest for a cosmetic ordering gain.
+    "db2_proc": {"kind": "db2-stored-procedure", "identity": "global", "priority": 10,
+                "resolver": "Db2 catalog (SYSIBM.SYSROUTINES) / CREATE PROCEDURE DDL",
+                "needs": "the procedure's signature (parameter list with IN/OUT) to "
+                         "give its parameters direction; its implementation may itself "
+                         "be a COBOL program on the estate"},
 }
 
 # Endpoint types that are NOT a second thing the program touches - a subsystem's reply, a

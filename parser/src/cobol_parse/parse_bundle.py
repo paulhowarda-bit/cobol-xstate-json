@@ -48,7 +48,12 @@ from .model import (Action, AlterStmt, CallStmt, ContinueStmt, EvaluateStmt,
 from .normalizer import SourceFormat
 
 FORMAT = "cobol-parse"
-VERSION = 1
+# Version history (a bump per model field-set change; older versions still open, the
+# missing fields taking their dataclass defaults - a NEWER version is refused):
+#   1  the initial contract
+#   2  Program.sql_cursors / Program.declared_tables (whole-stream SQL declaration
+#      scan) and ExecStmt.table / ExecStmt.values_list (column-list-less INSERT)
+VERSION = 2
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parse-python"

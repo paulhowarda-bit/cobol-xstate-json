@@ -351,6 +351,7 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     prog.working_values = _scan_value_clauses(lines)
     prog.data_items, prog.data_by_name = parse_data_division(lines)
     prog.files = _parse_file_control(lines)
+    prog.sql_cursors, prog.declared_tables = _scan_sql_declarations(lines)
 
     body = _procedure_lines(lines)
     if not body:
@@ -367,6 +368,95 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     # Collect CICS HANDLE CONDITION registrations across all statements.
     prog.cics_handlers = _collect_cics_handlers(prog.paragraphs + prog.declaratives)
     return prog
+
+
+def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
+    """Every SQL cursor DECLARE and DECLARE TABLE in the WHOLE expanded stream.
+
+    The statement parser walks only the PROCEDURE DIVISION, but production code keeps
+    both declarations in WORKING-STORAGE - a DCLGEN arrives as `EXEC SQL INCLUDE`
+    carrying `DECLARE t TABLE (...)`, and cursor DECLAREs sit beside it in copybooks.
+    Declared anywhere, they are program-wide facts: this scan runs over the full
+    origin-tagged line stream so a FETCH can find its cursor's columns and a
+    column-list-less INSERT its table's declared order, wherever the DECLARE lives.
+
+    Returns ``(cursors, tables)``:
+      cursors: [{cursor, selectList, table, line, member}]
+      tables:  [{table, columns, line, member}]
+    """
+    cursors: List[dict] = []
+    tables: List[dict] = []
+    toks = tokenize(lines)
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if not (t.kind == "word" and t.up == "EXEC" and i + 1 < len(toks)
+                and toks[i + 1].kind == "word" and toks[i + 1].up == "SQL"):
+            i += 1
+            continue
+        j = i + 2
+        block: List[Token] = []
+        while j < len(toks) and not (toks[j].kind == "word"
+                                     and toks[j].up == "END-EXEC"):
+            block.append(toks[j])
+            j += 1
+        i = j + 1
+        words = [b for b in block if b.kind == "word"]
+        if not words or words[0].up != "DECLARE":
+            continue
+        head = block[0]
+        cursor = StmtParser._exec_declare_cursor(block)
+        if cursor:
+            select_list, _note = StmtParser._exec_select_columns(block)
+            cursors.append({"cursor": cursor, "selectList": select_list,
+                            "table": _declare_from_table(block),
+                            "line": head.line, "member": head.origin})
+            continue
+        entry = _declare_table_columns(block)
+        if entry:
+            entry.update({"line": head.line, "member": head.origin})
+            tables.append(entry)
+    return cursors, tables
+
+
+def _declare_from_table(block: List[Token]) -> Optional[str]:
+    """The FROM table of a cursor DECLARE's select, at paren depth 0 (a literal in the
+    select list is a single token here, so it cannot supply a phantom FROM)."""
+    depth = 0
+    for i, t in enumerate(block):
+        if t.kind == "punct" and t.text == "(":
+            depth += 1
+        elif t.kind == "punct" and t.text == ")":
+            depth -= 1
+        elif depth == 0 and t.kind == "word" and t.up == "FROM":
+            return StmtParser._table_name(block[i + 1:])
+    return None
+
+
+def _declare_table_columns(block: List[Token]) -> Optional[dict]:
+    """`DECLARE t TABLE (c1 type, c2 type, ...)` -> {table, columns}, else None.
+
+    This is the DCLGEN's own statement of the table's declared column ORDER - the
+    fact a column-list-less INSERT needs, stated in the source rather than fetched
+    from the catalog.
+    """
+    i_table = next((i for i, t in enumerate(block)
+                    if t.kind == "word" and t.up == "TABLE"), None)
+    if i_table is None or i_table == 0:
+        return None
+    name = StmtParser._table_name(block[1:i_table])
+    if not name:
+        return None
+    inner = StmtParser._paren_group(block, i_table + 1)
+    if not inner:
+        return None
+    columns: List[str] = []
+    for item in StmtParser._split_top_commas(inner):
+        col = next((t.up for t in item if t.kind == "word"), None)
+        if col is None:
+            return None      # not a column-definition list after all
+        columns.append(col)
+    return {"table": name, "columns": columns}
 
 
 # Fields naming a PARAGRAPH (never a data item or a program), by statement type. A
@@ -1174,6 +1264,8 @@ class StmtParser:
         select_list: List[Optional[str]] = []
         column_note: Optional[str] = None
         cursor: Optional[str] = None
+        table: Optional[str] = None
+        values_list: List[Optional[str]] = []
         if lang == "CICS":
             if verb in ("RETURN", "ABEND"):
                 kind = "terminate"
@@ -1216,12 +1308,20 @@ class StmtParser:
             elif verb == "UPDATE":
                 columns = self._exec_update_sets(toks)
             elif verb == "INSERT":
-                columns, column_note = self._exec_insert_columns(toks)
+                columns, column_note, table, values_list = \
+                    self._exec_insert_columns(toks)
+            elif verb == "CALL":
+                # EXEC SQL CALL proc(:p1, :p2): a stored-procedure invocation. The
+                # operands are the procedure's PARAMETERS, not table columns - carrying
+                # the name here is what lets the interface classify it as a procedure
+                # endpoint instead of manufacturing a phantom table.
+                target = self._exec_sql_call_target(toks)
         return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
                         target=target, dynamic=dynamic,
                         host_vars=host_vars, conditions=conditions,
                         into_vars=into_vars, columns=columns, select_list=select_list,
-                        column_note=column_note, cursor=cursor)
+                        column_note=column_note, cursor=cursor,
+                        table=table, values_list=values_list)
 
     # -- SQL column <-> host-variable correlation ---------------------------
     #
@@ -1360,8 +1460,37 @@ class StmtParser:
                     return toks[i + 1:j]
         return None
 
+    #: The note a column-list-less INSERT carries out of the parse. Build time re-tries
+    #: it against the program's DECLARE TABLE / DCLGEN declarations (and any synonym
+    #: map), so the note doubles as the marker that correlation is still pending -
+    #: statechart._correlate_inserts matches on it.
+    INSERT_NO_COLUMN_LIST = (
+        "INSERT without an explicit column list: the target columns are the table's "
+        "declared order, which is not in the source; resolving it needs the table's "
+        "DECLARE TABLE / DCLGEN or the Db2 catalog")
+
+    @staticmethod
+    def _table_name(item: List[Token]) -> Optional[str]:
+        """A (possibly qualified) table name from the START of a token run: `T` or
+        `OWNER.T`, joined as written. Stops at the first word unless a `.` qualifier
+        continues it - two adjacent words (`T WHERE ...`) are a name and the next
+        clause, not one long name."""
+        if not item or item[0].kind != "word":
+            return None
+        parts = [item[0].up]
+        i = 1
+        while (i + 1 < len(item)
+               and (item[i].kind == "period"
+                    or (item[i].kind == "punct" and item[i].text == "."))
+               and item[i + 1].kind == "word"):
+            parts.append(item[i + 1].up)
+            i += 2
+        return ".".join(parts)
+
     @classmethod
-    def _exec_insert_columns(cls, toks: List[Token]) -> Tuple[List[dict], Optional[str]]:
+    def _exec_insert_columns(cls, toks: List[Token]
+                             ) -> Tuple[List[dict], Optional[str],
+                                        Optional[str], List[Optional[str]]]:
         """`INSERT INTO t (c1, c2) VALUES (:h1, CURRENT TIMESTAMP, :h2)` -> the pairs.
 
         Positional, like `SELECT ... INTO`: the Nth VALUES item fills the Nth column. A
@@ -1372,46 +1501,79 @@ class StmtParser:
         INSERT is the WRITE half of the cross-program state identity. Without it a
         program that only ever inserts contributes no column evidence at all, and its
         rows look unrelated to the rows every reader of that table selects.
+
+        Returns ``(columns, note, table, values_list)``. The last two are set only for
+        an INSERT with NO column list: the columns then live in the table's DECLARE
+        TABLE / DCLGEN, which is a whole-program fact - so this site records the table
+        and the ordered VALUES slots, and build time finishes the zip
+        (statechart._correlate_inserts).
         """
         i_into = next((i for i, t in enumerate(toks)
                        if t.kind == "word" and t.up == "INTO"), None)
         if i_into is None:
-            return [], None
+            return [], None, None, []
         i_values = next((i for i, t in enumerate(toks)
                          if t.kind == "word" and t.up == "VALUES"), None)
         if i_values is None:
             return [], ("INSERT ... SELECT / fullselect: the values come from a query "
                         "rather than from host variables, so no column<->field mapping "
-                        "exists at this site - the source table's lineage does")
+                        "exists at this site - the source table's lineage does"), None, []
         col_toks = cls._paren_group(toks, i_into + 1, i_values)
         if col_toks is None:
-            return [], ("INSERT without an explicit column list: the target columns are "
-                        "the table's declared order, which is not in the source; "
-                        "resolving it needs the Db2 catalog")
+            table = cls._table_name(toks[i_into + 1:i_values])
+            val_toks = cls._paren_group(toks, i_values + 1)
+            values = [cls._host_var_of(item)
+                      for item in cls._split_top_commas(val_toks or [])]
+            return [], cls.INSERT_NO_COLUMN_LIST, table, values
         val_toks = cls._paren_group(toks, i_values + 1)
         if val_toks is None:
-            return [], "INSERT VALUES list is not parseable here - verify by hand"
+            return [], "INSERT VALUES list is not parseable here - verify by hand", \
+                None, []
         cols = [cls._column_of(item) for item in cls._split_top_commas(col_toks)]
         vals = cls._split_top_commas(val_toks)
         if len(cols) != len(vals):
             return [], (f"{len(cols)} column(s) vs {len(vals)} VALUES item(s): not "
                         f"correlatable (a host structure expanding to several columns) "
-                        f"- verify by hand")
+                        f"- verify by hand"), None, []
         out: List[dict] = []
         unsourced: List[str] = []
         for col, item in zip(cols, vals):
             if col is None:
                 continue
-            if (len(item) == 2 and item[0].kind == "punct" and item[0].text == ":"
-                    and item[1].kind == "word"):
-                out.append({"column": col, "hostVar": item[1].up})
+            hv = cls._host_var_of(item)
+            if hv is not None:
+                out.append({"column": col, "hostVar": hv})
             else:
                 unsourced.append(col)
         if unsourced:
             return out, (f"{len(unsourced)} column(s) written from a literal or "
                          f"expression rather than a host variable "
-                         f"({', '.join(unsourced)}) - no program field maps to them")
-        return out, None
+                         f"({', '.join(unsourced)}) - no program field maps to them"), \
+                None, []
+        return out, None, None, []
+
+    @staticmethod
+    def _host_var_of(item: List[Token]) -> Optional[str]:
+        """The host variable one VALUES slot names (`:WS-X` -> WS-X), or None for a
+        literal/expression slot."""
+        if (len(item) == 2 and item[0].kind == "punct" and item[0].text == ":"
+                and item[1].kind == "word"):
+            return item[1].up
+        return None
+
+    @staticmethod
+    def _exec_sql_call_target(toks: List[Token]) -> Optional[str]:
+        """`CALL proc(...)` / `CALL owner.proc(...)` -> the procedure name as written.
+        None when the procedure itself is a host variable (`CALL :WS-PROC` - a
+        runtime-determined name, like a dynamic COBOL CALL)."""
+        i_call = next((i for i, t in enumerate(toks)
+                       if t.kind == "word" and t.up == "CALL"), None)
+        if i_call is None:
+            return None
+        rest = toks[i_call + 1:]
+        if rest and rest[0].kind == "punct" and rest[0].text == ":":
+            return None
+        return StmtParser._table_name(rest)
 
     # Db2 positioning keywords that may sit between FETCH and its cursor name.
     _FETCH_POS = frozenset({
@@ -1481,13 +1643,17 @@ class StmtParser:
             return [], (f"{len(columns)} column(s) vs {len(into_vars)} host variable(s): "
                         f"not correlatable (indicator variables, or a host structure "
                         f"expanding to several columns) - verify by hand")
-        mapped = [{"column": c, "hostVar": h} for c, h in zip(columns, into_vars)
-                  if c is not None]
-        # A derived slot (`SELECT 'Y'`, `COUNT(*)`, `A + B`) fills its host variable from
-        # something that is not a column, so there is no mapping to emit - but the field's
-        # origin is then unrecovered, which is a gap and not a benign fact. Say so, per
-        # variable: whether such a slot is resolvable at all is a judgement for the
-        # reviewer looking at the statement, not one to make here by staying quiet.
+        # A derived slot (`SELECT 'Y'`, `COUNT(*)`, `A + B`) fills its host variable
+        # from something that is not a column, so it gets an EXPLICIT `derived` entry
+        # rather than silence: without one, "an aggregate fills this field by
+        # construction" and "the recovery failed on this field" are indistinguishable
+        # to a consumer, which cannot skip the one without hiding the other. The note
+        # still says so per variable - whether a derived slot matters is a judgement
+        # for the reviewer looking at the statement, not one to make here by staying
+        # quiet.
+        mapped = [{"column": c, "hostVar": h} if c is not None
+                  else {"hostVar": h, "derived": True}
+                  for c, h in zip(columns, into_vars)]
         derived = [h for c, h in zip(columns, into_vars) if c is None]
         if derived:
             return mapped, (f"{len(derived)} select-list item(s) name no column (literal "
