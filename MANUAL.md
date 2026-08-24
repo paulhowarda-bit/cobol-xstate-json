@@ -145,6 +145,7 @@ cobol-xstate [-h] [--outdir DIR]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
              [--copybook-fetcher MODULE:FUNC]
              [--gather-only DIR] [--from-bundle DIR] [--from-parse FILE] [--no-fetch]
+             [--synonym-map FILE]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
              [--no-dynamic-calls] [--bind-jcl FILE]
              [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
@@ -1192,7 +1193,7 @@ two programs read or write the same state.
 "columns": [{ "table": "ACCOUNT", "column": "BAL", "hostVar": "WS-BAL" }]
 ```
 
-Recovered from four shapes, and **only** where the source proves the correspondence:
+Recovered from five shapes, and **only** where the source proves the correspondence:
 
 | Shape | How it correlates |
 |---|---|
@@ -1200,17 +1201,43 @@ Recovered from four shapes, and **only** where the source proves the corresponde
 | `UPDATE t SET c = :h` | explicit pairs — the highest fidelity there is |
 | `INSERT INTO t (c1, c2) VALUES (:a, :b)` | positionally, column list against VALUES list |
 | `DECLARE cur CURSOR FOR SELECT …` + `FETCH cur INTO …` | the columns are on the DECLARE and the host variables on the FETCH; the two are joined by cursor name after the whole program is compiled |
+| `INSERT INTO t VALUES (:a, :b)` (no column list) | Db2 defines the slots as the table's **declared order** — taken from the table's `DECLARE TABLE` (its DCLGEN, usually already in the source via `EXEC SQL INCLUDE`), joined after the whole program is compiled |
+
+**Declarations are found by a whole-stream scan** — DATA DIVISION and copybooks
+included, where production code actually keeps them. A cursor `DECLARE` in
+WORKING-STORAGE (the common estate pattern: declared beside the DCLGEN in a copybook)
+correlates its `FETCH`es and names their real table endpoint exactly as a
+procedure-division `DECLARE` does. On one measured estate, 77% of all unmapped lineage
+fields were `FETCH`es on exactly such cursors.
+
+**Synonyms need a map** (`--synonym-map file.json`): a column-list-less INSERT written
+under a Db2 SYNONYM/ALIAS finds only the *base* table's `DECLARE TABLE`, and the
+synonym→base join lives in the catalog, not the source. Supply it as input
+(`{"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}`) and the mapping resolves — with each entry's
+`table` stamped as the **base** name, the one the DDL declares and cross-program
+identity joins on. Without the map, the site flags and names this remedy.
 
 It **refuses** rather than guessing whenever the counts do not line up — indicator
 variables (`:WS-BAL:IND-BAL` is two host variables for one column) and host structures
 (`INTO :CUST-REC` is one for N) would otherwise zip into confidently wrong lineage. Every
 refusal emits a flag naming the reason; wrong lineage is worse than none.
 
-Slots that name no column are reported too, not dropped: `SELECT 'Y'`, `COUNT(*)`,
-`QTY * PRICE` and `VALUES (…, CURRENT TIMESTAMP)` each occupy a slot whose value has no
-column identity, so the field's origin is unresolved and says so. Note `COUNT(*)` is *not*
-`SELECT *` — the star inside a function is one derived item, and its sibling columns still
-correlate normally.
+Slots that name no column get an **explicit `derived` entry**, not silence:
+`SELECT 'Y'`, `COUNT(*)`, `QTY * PRICE` each fill their host variable from something
+that is not a column, and the entry `{ "hostVar": "WS-N", "derived": true }` says so —
+so a consumer can *skip* an aggregate receiver without also hiding a genuinely
+unrecovered field (absent, the two are indistinguishable). The per-variable note and
+flag remain. A literal `VALUES (…, CURRENT TIMESTAMP)` slot writes a column from no
+program field and is noted from the column's side. Note `COUNT(*)` is *not*
+`SELECT *` — the star inside a function is one derived item, and its sibling columns
+still correlate normally.
+
+**`EXEC SQL CALL proc(:p1, :p2)` is a stored procedure, not a table**: it produces
+`db2_proc` events (both directions — which parameters are IN and which OUT is the
+procedure's signature, not in this source) whose fields are the procedure's
+*parameters*, never `columns`. In the artifact manifest it is a
+`db2-stored-procedure` row. Classified as a table, downstream tooling would hunt for
+column identities that cannot exist.
 
 ### Field-level fidelity — what lands in `fields`
 
@@ -1292,7 +1319,7 @@ unrecovered spot is visible.
 | `dynamic CALL … ` | the target could not be proven constant. The reason spells out WHY: assigned from variables (genuinely runtime), several candidate literals, 88-level `VALUE`s present but no `SET … TO TRUE` visible (candidates listed), declared-but-never-assigned, or **not declared in the visible source** — the latter names the missing copybook that likely holds the `VALUE`; supply it and the target resolves. Constant propagation covers `VALUE` clauses, `MOVE 'lit'`, and `SET <88-condition> TO TRUE` |
 | `dynamic CICS <verb> <OPT>(…)` | a `PROGRAM`/`TRANSID`/`QUEUE`/`FILE`/`MAP`/`MAPSET` operand is a data name — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise (an `EIB*` operand is CICS-supplied, always runtime) |
 | `dynamic SQL: EXEC SQL PREPARE/EXECUTE` | the statement text is assembled at run time — operation and tables not statically knowable |
-| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree (indicator variable / host structure — verify by hand); `SELECT *` or an `INSERT` with no column list (the list is in the **Db2 catalog**, not the source); a select-list item or VALUES slot that names no column (a literal or expression — genuinely has no column identity); or, for a `FETCH`, that no `DECLARE` for its cursor is visible — usually a **copybook that did not arrive**, so supply it and the mapping resolves |
+| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree (indicator variable / host structure — verify by hand); `SELECT *` (the list is in the **Db2 catalog**, not the source); an `INSERT` with no column list whose table has **no visible `DECLARE TABLE`** — include its DCLGEN, or pass `--synonym-map` if it is written under a synonym, and the mapping resolves; a select-list item or VALUES slot that names no column (a literal or expression — the receiver carries an explicit `derived` entry so consumers can skip it knowingly); or, for a `FETCH`, that no `DECLARE` for its cursor is visible **anywhere in the expanded source** (data division and copybooks are scanned) — usually a copybook that did not arrive, so supply it, or a cursor PREPAREd dynamically |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
 | `NEXT SENTENCE` | differs from CONTINUE; verify the intended skip |
 | `arithmetic writes non-numeric X` | **S0C7 risk** — verify the type |
@@ -1501,6 +1528,10 @@ most are pinned by a test.
 | `sqlload.cbl` / `sqlunld.cbl` | file→Db2 load; Db2 cursor→file unload |
 | `txnflat.cbl` | flat transaction flow (reactive-target subject) |
 | `calltwice.cbl` | **one program CALLed twice with different operands — still one endpoint** |
+| `sqlcols.cbl` / `sqlgaps.cbl` | **column↔host-variable correlation** — the proven shapes, and the ones that must flag (indicator vars, `SELECT *`, derived slots, rowset FETCH, missing DECLARE) |
+| `sqlwscsr.cbl` | **cursor DECLAREd in WORKING-STORAGE** — the whole-stream scan correlating its FETCH and naming the real table endpoint |
+| `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` |
+| `sqlproc.cbl` | **`EXEC SQL CALL` as a `db2_proc` endpoint** — parameters, not columns |
 | `custrec.cpy` | a copybook (COPY expansion + `member` provenance) |
 
 ---

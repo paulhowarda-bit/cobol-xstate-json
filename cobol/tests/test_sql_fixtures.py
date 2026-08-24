@@ -144,11 +144,16 @@ def test_fetch_correlates_against_its_cursors_declare():
 
 
 def test_derived_expression_occupies_a_slot_but_names_no_column():
-    """SUM(DEBIT, CREDIT) must not break the comma split, and is not a column."""
+    """SUM(DEBIT, CREDIT) must not break the comma split, and is not a column - its
+    receiver gets an explicit `derived` entry, so a consumer can SKIP it without also
+    hiding a genuinely unrecovered field (the two used to be indistinguishable: both
+    were just absent)."""
     iface = _iface("sqlcols.cbl")
     sel = next(e for e in iface["events"]
                if e["verb"] == "SELECT" and e["endpoint"] == "LEDGER")
-    assert [(c["column"], c["hostVar"]) for c in sel["columns"]] == [("ID", "WS-ID")]
+    assert [(c.get("column"), c["hostVar"], c.get("derived", False))
+            for c in sel["columns"]] == [("ID", "WS-ID", False),
+                                         (None, "WS-TOT", True)]
 
 
 def test_indicator_variable_refuses_to_correlate():
@@ -257,7 +262,9 @@ def test_count_star_is_not_select_star():
     iface, flags = _iface("sqlgaps.cbl"), _flags("sqlgaps.cbl")
     assert "SELECT *" not in flags
     sel = next(e for e in iface["events"] if e["verb"] == "SELECT")
-    assert [(c["column"], c["hostVar"]) for c in sel["columns"]] == [("ID", "WS-ID")]
+    assert [(c.get("column"), c["hostVar"], c.get("derived", False))
+            for c in sel["columns"]] == [("ID", "WS-ID", False),
+                                         (None, "WS-N", True)]
     # ...while the slot that genuinely names no column is still reported
     assert "WS-N has no column identity" in flags
 
@@ -286,3 +293,141 @@ def test_why_no_mapping_reaches_the_event_itself():
                if e["verb"] == "INSERT" and e["endpoint"] == "ACCOUNT"
                and e.get("columns"))
     assert "columnNote" not in ins
+
+# --------------------------------------------------------------------------- #
+# sqlwscsr: the cursor DECLARE lives in WORKING-STORAGE (whole-stream scan)
+# --------------------------------------------------------------------------- #
+
+def _machine(name, synonyms=None):
+    src = (EXAMPLES / name).read_text()
+    return build_machine(parse_program(src), source_name=name, synonyms=synonyms)
+
+
+def test_working_storage_cursor_declare_still_correlates_its_fetch():
+    """The statement compiler never walks the DATA DIVISION, but production code keeps
+    cursor DECLAREs there (beside the DCLGEN, often in a copybook). 77% of one measured
+    estate's unmapped lineage fields were FETCHes on exactly such cursors."""
+    m = _machine("sqlwscsr.cbl")
+    fetch = next(e for e in m.interface()["events"] if e["verb"] == "FETCH")
+    assert [(c["column"], c["hostVar"]) for c in fetch["columns"]] == [
+        ("FUND_A", "WS-FUND"), ("ACCOUNT_N", "WS-ACCT"), ("BALANCE_A", "WS-BAL")]
+    assert not any("FETCH" in f["message"] for f in m.flags)
+
+
+def test_working_storage_cursor_names_the_real_table_endpoint():
+    """Without the scan the endpoint degraded to `<cursor ACCT_CSR>` - a phantom that
+    propagated into the artifact manifest and on into retrieval."""
+    iface = _iface("sqlwscsr.cbl")
+    assert "T_MMAA_ACC_ANAL" in _dirs(iface, "db2")
+    assert not any(e["endpoint"].startswith("<cursor")
+                   for e in iface["events"] if e["endpointType"] == "db2")
+
+
+def test_whole_stream_scan_records_the_declaration_with_provenance():
+    prog = parse_program((EXAMPLES / "sqlwscsr.cbl").read_text())
+    (decl,) = prog.sql_cursors
+    assert decl["cursor"] == "ACCT_CSR"
+    assert decl["selectList"] == ["FUND_A", "ACCOUNT_N", "BALANCE_A"]
+    assert decl["table"] == "T_MMAA_ACC_ANAL"
+    assert decl["line"] > 0 and decl["member"] is None
+
+
+# --------------------------------------------------------------------------- #
+# sqldclgen: DECLARE TABLE (DCLGEN) resolves a column-list-less INSERT
+# --------------------------------------------------------------------------- #
+
+def test_declare_table_gives_a_column_list_less_insert_its_columns():
+    """`INSERT INTO T VALUES (:H)` states no columns; Db2 defines the slots as the
+    table's declared order - which the DCLGEN's DECLARE TABLE states in the source."""
+    m = _machine("sqldclgen.cbl")
+    ins = next(e for e in m.interface()["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "T_MFER_ERROR")
+    assert [(c["column"], c["hostVar"]) for c in ins["columns"]] == [
+        ("MFER_ERROR", "MFER-ERROR")]
+    assert "columnNote" not in ins
+    assert not any("T_MFER_ERROR" in f["message"] for f in m.flags)
+
+
+def test_declare_table_scan_records_the_declared_order():
+    prog = parse_program((EXAMPLES / "sqldclgen.cbl").read_text())
+    tables = {t["table"]: t["columns"] for t in prog.declared_tables}
+    assert tables == {"T_MFER_ERROR": ["MFER_ERROR"],
+                      "T_RTAC_ACCOUNT": ["ACCT_ID", "ACCT_NAME"]}
+
+
+def test_synonym_insert_without_a_map_flags_and_names_the_remedy():
+    """The DECLARE is for the BASE table; the INSERT writes the SYNONYM. That join is
+    catalog knowledge - refusing to guess it, and saying what input closes it, is the
+    contract."""
+    m = _machine("sqldclgen.cbl")
+    flagged = [f["message"] for f in m.flags if "RTAC_ACCOUNT" in f["message"]]
+    assert flagged and "synonym map" in flagged[0]
+
+
+def test_synonym_map_resolves_the_insert_and_stamps_the_base_table():
+    """With the map supplied, the mapping lands on the BASE table's name - the one the
+    DDL declares, which is what cross-program identity joins on."""
+    m = _machine("sqldclgen.cbl", synonyms={"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"})
+    ins = next(e for e in m.interface()["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
+    assert [(c["table"], c["column"], c["hostVar"]) for c in ins["columns"]] == [
+        ("T_RTAC_ACCOUNT", "ACCT_ID", "WS-ACCT-ID"),
+        ("T_RTAC_ACCOUNT", "ACCT_NAME", "WS-ACCT-NAME")]
+    assert not any("RTAC_ACCOUNT" in f["message"] for f in m.flags)
+    spec = next(s for s in m.semantics["actions"].values()
+                if s.get("verb") == "INSERT" and s.get("table") == "RTAC_ACCOUNT")
+    assert spec["columnsFrom"] == "DECLARE TABLE T_RTAC_ACCOUNT via synonym RTAC_ACCOUNT"
+
+
+# --------------------------------------------------------------------------- #
+# sqlproc: EXEC SQL CALL is a stored PROCEDURE, not a table
+# --------------------------------------------------------------------------- #
+
+def test_sql_call_is_a_db2_proc_endpoint_not_a_phantom_table():
+    """Classified as a table, the call parameters read as 'columns' and downstream
+    tooling hunts for Column nodes that cannot exist. db2_proc is the discriminator."""
+    iface = _iface("sqlproc.cbl")
+    assert _dirs(iface, "db2_proc") == {"PCBEN171": ["create", "get"]}
+    assert "PCBEN171" not in _dirs(iface, "db2")
+    calls = [e for e in iface["events"] if e["verb"] == "CALL"]
+    assert {e["direction"] for e in calls} == {"get", "create"}
+    for e in calls:
+        assert e["endpointType"] == "db2_proc"
+        assert e["fields"] == ["IN-MESSAGE", "OUT-RETURN-CODE"]
+        assert "columns" not in e
+        assert "not table columns" in e["columnNote"]
+
+
+def test_sql_call_lands_in_the_artifact_manifest_as_a_stored_procedure():
+    from cobol_xstate.artifacts import build_artifacts
+    art = build_artifacts(_machine("sqlproc.cbl"))
+    row = next(r for r in art["artifacts"] if r["artifact"] == "PCBEN171")
+    assert row["kind"] == "db2-stored-procedure"
+    assert "signature" in row["needs"]
+
+
+def test_synonym_map_flag_reaches_the_run(tmp_path):
+    """--synonym-map is the CLI door for the catalog knowledge: same run, one input."""
+    import json
+    from cobol_xstate.cli import run
+    smap = tmp_path / "syn.json"
+    smap.write_text(json.dumps({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}), encoding="utf-8")
+    out = tmp_path / "o"
+    rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(out), "--no-fetch",
+              "--synonym-map", str(smap), "-qq"])
+    assert rc == 0
+    doc = json.loads((out / "sqldclgen.json").read_text(encoding="utf-8"))
+    ins = next(e for e in doc["interface"]["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
+    assert [c["table"] for c in ins["columns"]] == ["T_RTAC_ACCOUNT",
+                                                    "T_RTAC_ACCOUNT"]
+    assert not any("RTAC_ACCOUNT" in f["message"] for f in doc["flags"])
+
+
+def test_synonym_map_that_is_not_a_string_map_is_exit_2(tmp_path):
+    from cobol_xstate.cli import run
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"A": 1}', encoding="utf-8")
+    rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(tmp_path / "o"),
+              "--no-fetch", "--synonym-map", str(bad), "-qq"])
+    assert rc == 2

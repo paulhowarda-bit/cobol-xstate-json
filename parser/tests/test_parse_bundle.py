@@ -214,3 +214,47 @@ def test_producer_cli_refuses_gather_only(tmp_path):
                    encoding="utf-8")
     rc = run([str(src), "--gather-only", str(tmp_path / "b"), "-q"])
     assert rc == 2
+
+
+def test_v2_fields_round_trip_and_v1_bundles_still_open(tmp_path):
+    """VERSION 2 added the whole-stream SQL declarations and the column-list-less
+    INSERT's table/VALUES slots; a v1 bundle (without them) still opens, the missing
+    fields taking their dataclass defaults."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. V2RT.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-E PIC X(8).\n"
+        "           EXEC SQL DECLARE C1 CURSOR FOR\n"
+        "               SELECT E FROM T_E\n"
+        "           END-EXEC.\n"
+        "           EXEC SQL DECLARE T_E TABLE ( E CHAR(8) ) END-EXEC.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC SQL INSERT INTO T_E VALUES (:WS-E) END-EXEC\n"
+        "           STOP RUN.\n"
+    )
+    prog = parse_program(src)
+    assert prog.sql_cursors and prog.declared_tables
+    back = _roundtrip(prog)
+    assert back == prog
+    assert back.sql_cursors == prog.sql_cursors
+    assert back.declared_tables == prog.declared_tables
+    ins = back.paragraphs[0].statements[0]
+    assert ins.table == "T_E" and ins.values_list == ["WS-E"]
+    # A v1 bundle: strip the v2 fields and mark it version 1 - it must still open.
+    out = tmp_path / "v1.parse.json"
+    write_parse_bundle(out, source_name="v.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    doc["version"] = 1
+    for key in ("sql_cursors", "declared_tables"):
+        del doc["program"][key]
+    for st in doc["program"]["paragraphs"][0]["statements"]:
+        st.pop("table", None)
+        st.pop("values_list", None)
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    old = open_parse_bundle(out).program()
+    assert old.sql_cursors == [] and old.declared_tables == []
+    assert old.paragraphs[0].statements[0].table is None

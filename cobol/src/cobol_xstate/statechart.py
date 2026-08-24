@@ -111,6 +111,11 @@ class Machine:
     # worse, to parse it back out of a prose flag. `dynamic_calls` reads it to say WHY a
     # target is unresolvable, which is a different and more useful fact than THAT it is.
     unresolved_calls: Dict[str, dict] = field(default_factory=dict)
+    # Cursor DECLAREs from the whole-stream scan (data division / copybooks included):
+    # [{cursor, selectList, table, line, member}]. The interface overlay needs them to
+    # name a FETCH's real table endpoint when the DECLARE never became a
+    # procedure-division action (its columns were already joined at build time).
+    sql_cursors: List[dict] = field(default_factory=list)
     _iface_cache: Optional[dict] = field(default=None, repr=False, compare=False)
     _lineage_cache: object = field(default=None, repr=False, compare=False)
 
@@ -131,7 +136,8 @@ class Machine:
             self._iface_cache = build_interface(
                 self.config, self.semantics, self.provenance,
                 data=self.data, using=self.using, returning=self.returning,
-                files=self.files, internal_programs=set(self.nested_programs))
+                files=self.files, internal_programs=set(self.nested_programs),
+                sql_cursors=self.sql_cursors)
         return self._iface_cache
 
     def lineage(self):
@@ -246,6 +252,11 @@ class _BuildCtx:
     # cursor's DECLARE, which the compiler is not guaranteed to have reached yet, so the
     # correlation runs as a post-pass (_correlate_fetches) and needs each site back.
     fetch_sites: List[Tuple[str, str, int]] = field(default_factory=list)
+    # (action, paragraph, line) per column-list-less EXEC SQL INSERT: its columns are
+    # the table's declared order, a whole-program fact (DECLARE TABLE / DCLGEN, plus
+    # any synonym map) - correlated by the same post-pass pattern
+    # (_correlate_inserts).
+    insert_sites: List[Tuple[str, str, int]] = field(default_factory=list)
 
     def new_times_counter(self, line: int) -> str:
         n = sum(1 for k in self.synthetic_data if k.startswith("TIMES-CTR-")) + 1
@@ -375,6 +386,10 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         spec["columnNote"] = st.column_note
     if st.cursor:
         spec["cursor"] = st.cursor               # a FETCH's join back to its DECLARE
+    if st.table:
+        spec["table"] = st.table                 # a column-list-less INSERT's target...
+    if st.values_list:
+        spec["valuesList"] = st.values_list      # ...and its ordered VALUES slots
     return spec
 
 
@@ -651,8 +666,20 @@ class _ParaCompiler:
                     "raw": f"EXEC {st.lang} {st.text} END-EXEC"}
             if resources:
                 spec["resources"] = resources
+            if st.lang == "SQL" and st.verb == "CALL" and st.target:
+                # The stored-procedure name, so the interface can classify this as a
+                # procedure endpoint rather than manufacturing a phantom table.
+                spec["target"] = st.target
             self.ctx.action_sem.setdefault(name, _with_columns(spec, st))
-        if st.column_note:
+        # A column-list-less INSERT is not flagged HERE: its columns are the table's
+        # declared order, a whole-program fact, so correlation is still pending - the
+        # post-pass (_correlate_inserts) resolves it against the program's DECLARE
+        # TABLE declarations and flags only what stays unresolved.
+        insert_pending = (st.lang == "SQL" and st.verb == "INSERT"
+                          and st.table is not None)
+        if insert_pending:
+            self.ctx.insert_sites.append((name, self.pname, st.line))
+        if st.column_note and not insert_pending:
             self.ctx.flag(self.pname, st.line,
                           f"EXEC {st.lang} {st.verb}: column<->host-variable mapping not "
                           f"recovered ({st.column_note}); cross-program state identity "
@@ -1321,7 +1348,7 @@ def _section_map(program: Program) -> Dict[str, List[str]]:
     return out
 
 
-def _correlate_fetches(ctx: "_BuildCtx") -> None:
+def _correlate_fetches(ctx: "_BuildCtx", program: Program) -> None:
     """Zip every FETCH's host variables against its cursor's DECLARE, once the whole
     program is compiled.
 
@@ -1331,6 +1358,11 @@ def _correlate_fetches(ctx: "_BuildCtx") -> None:
     FLAGGED, not left silent: a FETCH with no column identity is exactly the gap a
     SELECT with none is, and the interface overlay that used to recover this is a pure
     read with no way to raise one.
+
+    Cursors come from TWO places: DECLAREs compiled as procedure-division statements
+    (``ctx.action_sem``), and DECLAREs the whole-stream scan found in the data
+    division and copybooks (``program.sql_cursors``) - where production code actually
+    keeps them, and where the statement compiler never looks.
     """
     from .interface import _fetch_columns
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
@@ -1338,6 +1370,9 @@ def _correlate_fetches(ctx: "_BuildCtx") -> None:
         if (spec.get("verb") == "DECLARE" and spec.get("cursor")
                 and spec.get("selectList")):
             cols_by_cursor.setdefault(spec["cursor"], spec["selectList"])
+    for decl in program.sql_cursors:
+        if decl.get("cursor") and decl.get("selectList"):
+            cols_by_cursor.setdefault(decl["cursor"], decl["selectList"])
     for name, para, line in ctx.fetch_sites:
         spec = ctx.action_sem.get(name)
         if not spec or spec.get("columns") or spec.get("columnNote"):
@@ -1357,7 +1392,87 @@ def _correlate_fetches(ctx: "_BuildCtx") -> None:
                      f"unresolved")
 
 
-def build_machine(program: Program, source_name: str = "<source>") -> Machine:
+def _correlate_inserts(ctx: "_BuildCtx", program: Program,
+                       synonyms: Optional[Dict[str, str]] = None) -> None:
+    """Zip every column-list-less INSERT's VALUES slots against its table's declared
+    column order, once the whole program is compiled.
+
+    `INSERT INTO t VALUES (:h1, :h2)` states no columns - Db2 defines the slots as the
+    table's declared order, which the source DOES carry whenever the table's DCLGEN is
+    included: its `DECLARE t TABLE (c1 ..., c2 ...)` is exactly that order
+    (``program.declared_tables``, from the whole-stream scan). A table written under a
+    SYNONYM resolves through ``synonyms`` (an external map - the catalog's knowledge,
+    supplied as input, never guessed), and its column entries are then stamped with
+    the BASE table so cross-program identity lands on the name the DDL declares.
+    Whatever stays unresolved keeps its note and is flagged, exactly as before.
+    """
+    if not ctx.insert_sites:
+        return
+    declared: Dict[str, dict] = {}
+    for entry in program.declared_tables:
+        name = str(entry.get("table", "")).upper()
+        if not name:
+            continue
+        declared.setdefault(name, entry)
+        # `OWNER.T` declares T too: DML most often writes the unqualified name.
+        declared.setdefault(name.rsplit(".", 1)[-1], entry)
+    synonyms = {str(k).upper(): str(v).upper()
+                for k, v in (synonyms or {}).items()}
+    for name, para, line in ctx.insert_sites:
+        spec = ctx.action_sem.get(name)
+        if not spec or spec.get("columns"):
+            continue
+        table = str(spec.get("table", "")).upper()
+        values: List[Optional[str]] = spec.get("valuesList") or []
+        entry = declared.get(table)
+        base: Optional[str] = None
+        if entry is None and table in synonyms:
+            base = synonyms[table]
+            entry = declared.get(base) or declared.get(base.rsplit(".", 1)[-1])
+        note: Optional[str] = None
+        if entry is None:
+            hint = (f" (synonym of {synonyms[table]}, whose DECLARE TABLE is also "
+                    f"absent)" if table in synonyms else "")
+            note = (f"INSERT without an explicit column list, and no DECLARE TABLE "
+                    f"for {table or '?'} is visible in this program{hint} - the "
+                    f"columns are the table's declared order; include its DCLGEN, or "
+                    f"supply a synonym map if it is written under a synonym")
+        elif not values or len(entry["columns"]) != len(values):
+            note = (f"{table}: {len(entry['columns'])} declared column(s) vs "
+                    f"{len(values)} VALUES item(s): not correlatable (a host "
+                    f"structure expanding to several columns) - verify by hand")
+        if note:
+            spec["columnNote"] = note
+            ctx.flag(para, line,
+                     f"EXEC SQL INSERT: column<->host-variable mapping not recovered "
+                     f"({note}); cross-program state identity for these fields is "
+                     f"unresolved")
+            continue
+        cols: List[dict] = []
+        unsourced: List[str] = []
+        for col, hv in zip(entry["columns"], values):
+            if hv is None:
+                unsourced.append(col)
+                continue
+            mapping = {"column": col, "hostVar": hv}
+            if base:
+                # Pre-stamped with the BASE table; interface._qualify leaves an
+                # existing table key alone, so the synonym does not overwrite it.
+                mapping["table"] = base
+            cols.append(mapping)
+        spec["columns"] = cols
+        spec["columnsFrom"] = (f"DECLARE TABLE {entry['table']}"
+                               + (f" via synonym {table}" if base else ""))
+        spec.pop("columnNote", None)
+        if unsourced:
+            spec["columnNote"] = (
+                f"{len(unsourced)} column(s) written from a literal or expression "
+                f"rather than a host variable ({', '.join(unsourced)}) - no program "
+                f"field maps to them")
+
+
+def build_machine(program: Program, source_name: str = "<source>",
+                  synonyms: Optional[Dict[str, str]] = None) -> Machine:
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
                     data=program.data_by_name)
     _compute_alter_targets(program, ctx)
@@ -1472,7 +1587,8 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         if program_initial:
             config["initial"] = program_initial
 
-    _correlate_fetches(ctx)
+    _correlate_fetches(ctx, program)
+    _correlate_inserts(ctx, program, synonyms)
 
     notes = list(program.notes)
     if not program.has_procedure_division:
@@ -1508,4 +1624,5 @@ def build_machine(program: Program, source_name: str = "<source>") -> Machine:
         copybooks=program.copybooks,
         nested_programs=program.nested_programs,
         unresolved_calls=ctx.unresolved_calls,
+        sql_cursors=program.sql_cursors,
     )

@@ -160,6 +160,14 @@ class ExecStmt(Stmt):
     # behind positioning keywords). It is the join back to the DECLARE that holds the
     # columns, and it names the endpoint the FETCH crosses.
     cursor: Optional[str] = None
+    # The DML target table, recorded when a later pass still has work to do on this
+    # statement: an INSERT with no explicit column list keeps its table here (with the
+    # VALUES slots below) so build time can zip them against the table's DECLARE
+    # TABLE / DCLGEN column order. An SQL CALL keeps the procedure name in `target`.
+    table: Optional[str] = None
+    # One entry per VALUES slot of a column-list-less INSERT: the host variable that
+    # fills the slot, or None for a literal/expression slot (which maps to no field).
+    values_list: List[Optional[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -262,6 +270,15 @@ class Program:
     # INTERNAL call, not an external dependency - so the classifier can tell a contained
     # program (e.g. USEMQ inside FBBMQPNT) apart from a missing external module.
     nested_programs: List[str] = field(default_factory=list)
+    # SQL declarations recovered from the WHOLE expanded stream - data division and
+    # copybooks included, where production code actually keeps them. The statement
+    # parser only walks the PROCEDURE DIVISION, so a cursor DECLAREd in
+    # WORKING-STORAGE (the common case: a DCLGEN-adjacent copybook) was invisible to
+    # FETCH correlation, and every FETCH on it lost its column identity.
+    #   sql_cursors:     [{cursor, selectList, table, line, member}]
+    #   declared_tables: [{table, columns, line, member}]  (DECLARE TABLE / DCLGEN)
+    sql_cursors: List[dict] = field(default_factory=list)
+    declared_tables: List[dict] = field(default_factory=list)
 
 
 def walk_statements(stmts: List[Stmt]):

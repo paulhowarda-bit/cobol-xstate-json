@@ -37,6 +37,10 @@ _FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE
     "file", "db2", "program", "console", "terminal", "caller", "condition", "ims",
     "response")
 _QUEUE, _SYSTEM, _TRANSACTION = "queue", "system", "transaction"
+# A Db2 STORED PROCEDURE is its own endpoint kind: its operands are the procedure's
+# PARAMETERS (linkage, not table columns), so classifying `EXEC SQL CALL` as a table
+# would send downstream tooling looking for Column nodes that cannot exist.
+_DB2_PROC = "db2_proc"
 
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|TSQUEUE|TDQUEUE)\s*\(\s*'?"
@@ -59,6 +63,7 @@ _SQL_FROM = re.compile(r"\bFROM\s+" + _QUALIFIED, re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+" + _QUALIFIED, re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+" + _QUALIFIED, re.I)
 _SQL_HOSTVAR = re.compile(r":\s*([A-Z0-9-]+)", re.I)
+_SQL_CALL = re.compile(r"\bCALL\s+(?:[A-Z0-9_$#@-]+\s*\.\s*)?([A-Z0-9_$#@-]+)", re.I)
 _DECLARE_CURSOR = re.compile(
     r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
 _CALL_USING = re.compile(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", re.I | re.S)
@@ -339,8 +344,12 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
         return None, (f"cursor {cursor} selects {len(cols)} column(s) but this FETCH "
                       f"has {len(into_fields)} host variable(s): not correlatable "
                       f"(indicator variables, or a host structure) - verify by hand")
-    return [{"column": c, "hostVar": h} for c, h in zip(cols, into_fields)
-            if c is not None], None
+    # A derived slot gets an explicit `derived` entry, same rule as parser._correlate:
+    # "an aggregate fills this by construction" must stay distinguishable from "the
+    # recovery failed here", or a consumer cannot skip one without hiding the other.
+    return [{"column": c, "hostVar": h} if c is not None
+            else {"hostVar": h, "derived": True}
+            for c, h in zip(cols, into_fields)], None
 
 
 def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
@@ -418,6 +427,21 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             for h in hits:
                 h["dynamic"] = True
             return hits
+        if verb == "CALL":
+            # A STORED PROCEDURE, not a table: the operands are the procedure's
+            # parameters (linkage), so there are no columns to map - and saying so on
+            # the event stops downstream tooling from hunting for them. Both
+            # directions, because which parameters are IN and which are OUT is the
+            # procedure's signature, which is not in this source.
+            proc = (spec or {}).get("target")
+            if not proc:
+                m = _SQL_CALL.search(mup)
+                proc = m.group(1).upper() if m else "<procedure>"
+            note = ("stored-procedure parameters, not table columns; their IN/OUT "
+                    "direction is the procedure's signature, which is not in this "
+                    "source")
+            return [_note(_hit(d, _DB2_PROC, proc, verb, host_vars), note)
+                    for d in ("get", "create")]
         return []  # OPEN/CLOSE cursor, DECLARE, COMMIT, WHENEVER - not a data crossing
 
     if is_cics:
@@ -794,7 +818,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                     data: Optional[dict] = None, using: Optional[List[str]] = None,
                     returning: Optional[str] = None,
                     files: Optional[Dict[str, dict]] = None,
-                    internal_programs: Optional[set] = None) -> dict:
+                    internal_programs: Optional[set] = None,
+                    sql_cursors: Optional[List[dict]] = None) -> dict:
     """Return the external-interface overlay: events, per-state get/create, endpoints,
     and the program's own parameter interface.
 
@@ -808,6 +833,11 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     ``PROGRAM-ID``): a CALL / LINK / XCTL to one of them is an INTERNAL call, so the
     program endpoint it produces is tagged ``internal`` rather than presented as an
     external module dependency.
+
+    ``sql_cursors`` is the whole-stream cursor-DECLARE scan (Machine.sql_cursors) -
+    cursors declared in the DATA DIVISION or a copybook, which the provenance texts
+    (procedure-division statements only) never carry. Without it a FETCH on such a
+    cursor lost its real table endpoint and read as ``<cursor X>``.
     """
     actions = (semantics or {}).get("actions", {})
     guards = (semantics or {}).get("guards", {})
@@ -816,6 +846,14 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     dv = _DataView(data)
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
+    for decl in (sql_cursors or []):
+        cname = str(decl.get("cursor", "")).upper()
+        if not cname:
+            continue
+        if decl.get("table"):
+            cursors.setdefault(cname, str(decl["table"]).upper())
+        if decl.get("selectList"):
+            cursor_cols.setdefault(cname, decl["selectList"])
     linkage_all = {n.upper() for n, it in (data or {}).items()
                    if isinstance(it, dict) and it.get("section") == "LINKAGE"}
     # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and

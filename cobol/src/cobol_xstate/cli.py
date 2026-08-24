@@ -107,6 +107,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--copybook-ext", action="append", default=[], metavar="EXT",
                    help="extra copybook extension to try, e.g. .cpy (repeatable)")
     add_retrieval_args(p)
+    p.add_argument("--synonym-map", metavar="FILE",
+                   help="JSON file mapping Db2 SYNONYM/ALIAS table names to their base "
+                        "tables ({\"RTAC_ACCOUNT\": \"T_RTAC_ACCOUNT\", ...}) - "
+                        "catalog knowledge supplied as input, never guessed. Lets a "
+                        "column-list-less INSERT written under a synonym find the base "
+                        "table's DECLARE TABLE / DCLGEN column order; its column "
+                        "mappings are then stamped with the BASE table name.")
     p.add_argument("--from-parse", metavar="FILE",
                    help="model from a parse bundle written upfront by cobol-parse, "
                         "skipping the parse entirely. The bundle records the sha256 of "
@@ -303,6 +310,26 @@ def _run(args, timing_sink=None) -> int:
             _log.error(f"error: {exc}")
             return 2
 
+    synonyms = None
+    if args.synonym_map:
+        import json as _sjson
+        sp = Path(args.synonym_map)
+        if not sp.exists():
+            _log.error(f"error: no such file: {sp} (--synonym-map)")
+            return 2
+        try:
+            raw = _sjson.loads(sp.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            _log.error(f"error: --synonym-map {sp} is not valid JSON: {exc}")
+            return 2
+        if (not isinstance(raw, dict)
+                or not all(isinstance(k, str) and isinstance(v, str)
+                           for k, v in raw.items())):
+            _log.error(f"error: --synonym-map {sp} must be a JSON object of "
+                       f"\"SYNONYM\": \"BASE_TABLE\" strings")
+            return 2
+        synonyms = raw
+
     bundle = None
     if args.from_bundle:
         try:
@@ -358,7 +385,8 @@ def _run(args, timing_sink=None) -> int:
                            fetcher=fetcher, paths=search_paths,
                            exts=tuple(args.copybook_ext), dest=deps, unavailable=why,
                            jobs=_jobs(args), jcl=jcl_sources, timer=timer,
-                           bundle=bundle, parse=parse, retrieve=not args.no_fetch)
+                           bundle=bundle, parse=parse, synonyms=synonyms,
+                           retrieve=not args.no_fetch)
     except JclSupportMissing as exc:
         _log.error(f"error: {exc}")
         return 2
