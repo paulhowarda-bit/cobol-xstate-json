@@ -6,14 +6,15 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 
 ## Commands
 
-**Three distributions ship from this repo**, each with its own `pyproject.toml`; the JCL
-front-end is its **own repository**:
+**One distribution ships from this repo**; its two dependencies ship from the sibling
+**mainframe-common repository** (one repo, two distributions, each with its own
+`pyproject.toml`), and the JCL front-end is its **own repository**:
 
-| Directory | Distribution | What it is | Depends on |
+| Where | Distribution | What it is | Depends on |
 |---|---|---|---|
-| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
-| `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), reusable by any program | core |
 | `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) | core + parser |
+| [`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable bundle | nothing |
+| [`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), reusable by any program | core |
 | *(sibling repo)* | [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies) | JCL → dataflow + dependencies (`jcl-dependencies`) | core only |
 
 `cobol_parse` carries no modelling engine: `parse_program(source, fmt, resolver) ->
@@ -25,18 +26,23 @@ The boundary is enforced by `cobol/tests/test_package_boundaries.py` and
 The two front-ends are **peers**: neither imports the other, and a JCL install carries no
 COBOL modelling engine. They meet only at `--bind-jcl`, through a plain manifest dict, via
 the lazy orchestrator in `cobol/src/cobol_xstate/bind.py`. `pip install cobol-xstate[jcl]`
-adds that one join. There used to be a `jcl/` directory here — it was lifted out and the
-duplicate deleted, so that parser has exactly one source. The suite finds a sibling
-`../jcl-dependencies` checkout automatically (see `cobol/tests/conftest.py`; override with
-`JCL_DEPENDENCIES_REPO`); without one, the bridge tests skip with the pip command.
+adds that one join. There used to be `jcl/`, then `core/` and `parser/` directories here —
+each was lifted out and the duplicate deleted, so every package has exactly one source
+(pre-split history stays reachable here via `git log --follow`). The suite finds sibling
+`../mainframe-common` and `../jcl-dependencies` checkouts automatically (see
+`cobol/tests/conftest.py` and `_mainframe_common.py`; override with
+`MAINFRAME_COMMON_REPO` / `JCL_DEPENDENCIES_REPO`). Without a jcl checkout the bridge
+tests skip with the pip command; without mainframe-common nothing here can import, so
+the run collapses to ONE clean skip (`test_sibling_distributions.py`) naming the exact
+pip command.
 
 ```bash
-# Run from a checkout, no install needed (the root pyproject puts all three on sys.path)
-python -m pytest -q                                        # this repo's suite (~660 tests)
-PYTHONPATH="core/src;parser/src;cobol/src" python -m cobol_xstate cobol/examples/custrpt.cbl
+# Run from a checkout, no install needed (root pyproject + conftest sibling discovery)
+python -m pytest -q                                        # this repo's suite (~645 tests)
+PYTHONPATH="../mainframe-common/core/src;../mainframe-common/parser/src;cobol/src" python -m cobol_xstate cobol/examples/custrpt.cbl
 
 # Or install for real (editable), which is what gives you the console scripts
-python -m pip install -e core -e parser -e cobol
+python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
 python -m pip install -e ../jcl-dependencies      # optional: the JCL front-end + --bind-jcl
 cobol-xstate prog.cbl --summary        # 8 JSON views into ./out/
 cobol-xstate prog.cbl --target js      # runnable ES module + cobolRuntime.mjs
@@ -75,7 +81,7 @@ Node-backed tests live in `cobol/` and need `npm install` **there** (`cobol/node
 
 ### The pipeline builds one hub object, then many views project it
 
-Source → **`Machine`** (`statechart.build_machine`) via: `normalizer` (fixed/free format, column-7, continuation-literal stitching) → `preprocessor` (COPY/REPLACING/EXEC SQL INCLUDE expansion) → `lexer` → `parser` (+ `model`, `data_division`) → `statechart` (+ `semantics`, `analysis`, `naming`). The front-end half up to and including `parser`/`data_division`/`model` lives in the **`cobol_parse` package** (`parser/src/cobol_parse/`); the seam is exactly `parse_program(...) -> Program` then `build_machine(program) -> Machine` (two adjacent calls in `api.py`). The `Machine` carries `.config` (the XState config), `.data` (typed dictionary), `.semantics` (actions/guards), `.provenance`, `.flags`, plus `.paragraph_order`, `.sections`, `.files`.
+Source → **`Machine`** (`statechart.build_machine`) via: `normalizer` (fixed/free format, column-7, continuation-literal stitching) → `preprocessor` (COPY/REPLACING/EXEC SQL INCLUDE expansion) → `lexer` → `parser` (+ `model`, `data_division`) → `statechart` (+ `semantics`, `analysis`, `naming`). The front-end half up to and including `parser`/`data_division`/`model` lives in the **`cobol_parse` package** (`parser/src/cobol_parse/` in the mainframe-common repository); the seam is exactly `parse_program(...) -> Program` then `build_machine(program) -> Machine` (two adjacent calls in `api.py`). The `Machine` carries `.config` (the XState config), `.data` (typed dictionary), `.semantics` (actions/guards), `.provenance`, `.flags`, plus `.paragraph_order`, `.sections`, `.files`.
 
 **`Machine.config` is deliberately FLAT**: one state per program point, hierarchy encoded only in mangled names (`0000-MAIN__loop3`, `__seq2`, `__if4`), and `PERFORM p` recorded as a **marker action** `perform_p` with no target and no return. This is the convenient working IR for analyses that walk it — it is *not* the final statechart. Every "view" is a **pure function over the `Machine`** that transforms this flat IR into one answer:
 
@@ -120,7 +126,7 @@ Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `
   Goldens live in `goldens/`. `tools/byteproof.py` covers the views (estate-free); `tools/byteproof_reports.py` covers `.prefetch.json`/`.fetch.json` against the recorded fake estate client in `cobol/tests/fakes/estate.py` (which deliberately covers local / fetched / not-found / **error** / probe-chain / alternatives). Re-record with `python tools/gate.py --record` **only** when an output change is intended and reviewed — re-recording to turn a red gate green destroys the guarantee. Actor/chart key ordering is sorted deliberately; don't iterate a set into output.
 
   Two things genuinely are machine-dependent and are normalized before hashing, rather than pretended away: `copiedTo` in both reports, and the `source` of any member resolved from disk (a copybook row in the artifact manifest carries it, so `<program>::artifacts` embeds a local path). Note also that `core.autocrlf=true` here, so a fresh clone gets CRLF example files while this working tree has LF — which changes the `bytes:` count in the prefetch report. The goldens are recorded from the working tree.
-- **Prove the distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds four throwaway venvs and checks that a `core+jcl` box cannot even find `cobol_xstate` or `cobol_parse`, that a `core+parser` box parses (and runs `cobol-parse`) with no modelling engine at all, and that `--bind-jcl` on a `core+parser+cobol` box fails naming the exact pip command. `cobol/tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
-- **The parse bundle is a versioned contract over `model.py`.** Any change to a dataclass field set in `parser/src/cobol_parse/model.py` (or `DataItem`/`PicType`) is a `VERSION` bump in `parse_bundle.py`; a newer bundle is refused, never partially read.
+- **Prove the distributions still stand apart** after touching any `pyproject.toml`: `python tools/prove_separation.py` builds four throwaway venvs (installing core/parser from the sibling `../mainframe-common` checkout; `MAINFRAME_COMMON_REPO` overrides, and without one it refuses to run rather than proving nothing) and checks that a `core+jcl` box cannot even find `cobol_xstate` or `cobol_parse`, that a `core+parser` box parses (and runs `cobol-parse`) with no modelling engine at all, and that `--bind-jcl` on a `core+parser+cobol` box fails naming the exact pip command. `cobol/tests/test_package_boundaries.py` is the fast in-process version that runs in the suite.
+- **The parse bundle is a versioned contract over `model.py`.** Any change to a dataclass field set in mainframe-common's `parser/src/cobol_parse/model.py` (or `DataItem`/`PicType`) is a `VERSION` bump in `parse_bundle.py`; a newer bundle is refused, never partially read — and it is a change in ANOTHER repository that this repo's gate and `--from-parse` consume, so run both repos' ratchets (`python tools/gate.py` here, `python tools/byteproof.py --check goldens/parse.sha256` there).
 - **Prove runnable changes under real XState**, not just in Python — an emitted machine that type-checks can still compute the wrong decimal.
 - One test module per pipeline stage/view in `tests/`; `examples/*.cbl` are the fixtures each construct is exercised against (add one when adding a construct).

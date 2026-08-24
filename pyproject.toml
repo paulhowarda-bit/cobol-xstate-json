@@ -1,19 +1,25 @@
-# Development root. This is NOT a distribution - the three that ship from THIS repo
-# live in core/, parser/ and cobol/, each with its own pyproject.toml:
+# Development root. This is NOT a distribution - the one that ships from THIS repo
+# lives in cobol/, with its own pyproject.toml:
+#
+#   cobol/  cobol-xstate  Program -> XState statechart + all views
+#
+# Its two dependencies live in the mainframe-common repository -
+# https://github.com/paulhowarda-bit/mainframe-common - one repo shipping both:
 #
 #   core/   cobol-xstate-core  the estate boundary and two-stage retrieval, shared
 #   parser/ cobol-parse        COBOL source -> Program AST     (depends on core)
-#   cobol/  cobol-xstate       Program -> XState statechart    (depends on core + parser)
 #
 # The JCL front-end (jcl-dependencies) lives in its OWN repository -
-# https://github.com/paulhowarda-bit/jcl-dependencies - and depends on core only. It
-# used to be a jcl/ directory here; it was lifted out and the duplicate deleted, so
-# there is exactly one source for that parser.
+# https://github.com/paulhowarda-bit/jcl-dependencies - and depends on core only.
+# Both used to be directories here (jcl/, then core/ and parser/); each was lifted out
+# and the duplicate deleted, so there is exactly one source for each. Pre-split history
+# stays reachable here via `git log --follow`.
 #
 # What this file exists for is running this repo's suite from a checkout with nothing
-# installed. Install for real with:
+# installed: cobol/tests/conftest.py finds a ../mainframe-common checkout automatically
+# (override with MAINFRAME_COMMON_REPO). Install for real with:
 #
-#   python -m pip install -e core -e parser -e cobol
+#   python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
 #   python -m pip install -e ../jcl-dependencies   # optional: the --bind-jcl join
 #
 # The JCL half is an EXTRA of cobol-xstate rather than a dependency (`pip install
@@ -21,7 +27,8 @@
 # close the ddname->dataset join that --bind-jcl performs.
 
 [tool.pytest.ini_options]
-# All three source trees on sys.path, so `python -m pytest` works with nothing installed
-# (pytest >= 7). jcl-dependencies, when present, arrives installed or via its own repo.
-pythonpath = ["core/src", "parser/src", "cobol/src", "cobol/tests"]
-testpaths = ["core/tests", "parser/tests", "cobol/tests"]
+# This repo's source tree on sys.path, so `python -m pytest` works with nothing
+# installed (pytest >= 7). core/parser arrive installed or via the sibling checkout
+# (cobol/tests/conftest.py); jcl-dependencies likewise, via its own repo.
+pythonpath = ["cobol/src", "cobol/tests"]
+testpaths = ["cobol/tests"]

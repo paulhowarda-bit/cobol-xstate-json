@@ -67,15 +67,17 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 
 ## 2. Install and first run
 
-**Three distributions ship from this repository**, each a normal Python package; the JCL
-front-end is its **own repository**. Pure standard library — **no runtime
-dependencies**, no build step. Python ≥ 3.9. `pytest` only for the tests.
+**One distribution ships from this repository**; its two dependencies ship from the
+[mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) repository (one
+repo, two distributions), and the JCL front-end is its **own repository**. Each is a
+normal Python package. Pure standard library — **no runtime dependencies**, no build
+step. Python ≥ 3.9. `pytest` only for the tests.
 
 | Where | Distribution | What it is |
 |---|---|---|
-| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by every front-end |
-| `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), usable on its own |
 | `cobol/` | `cobol-xstate` | `Program` → statechart and every view (this manual's main subject) |
+| [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle — shared by every front-end |
+| [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) `parser/` | `cobol-parse` | the COBOL parse front-end: source → `Program` AST (normalize / preprocess / lex / parse / data division), usable on its own |
 | [its own repo](https://github.com/paulhowarda-bit/jcl-dependencies) | `jcl-dependencies` | JCL → dataflow + dependency manifest |
 
 The two estate front-ends (COBOL, JCL) are **peers**: neither imports the other, and a
@@ -86,7 +88,7 @@ paths (`cobol_xstate.parser`, `.model`, `.normalizer`, …) so imports written b
 split keep working.
 
 ```bash
-python -m pip install -e core -e parser -e cobol   # COBOL work (core+parser come with it)
+python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
 python -m pip install -e ../jcl-dependencies    # add the JCL front-end (sibling checkout)
 # or, installing cobol-xstate from an index:  pip install cobol-xstate[jcl]
 ```
@@ -1436,8 +1438,8 @@ raw source
 ### Module map
 
 The first six modules are the parse front-end and live in the **`cobol_parse` package**
-(`parser/src/cobol_parse/`, its own distribution); `cobol_xstate` re-exports them at the
-old paths. The rest are `cobol_xstate`'s.
+(`parser/src/cobol_parse/` in the mainframe-common repository, its own distribution);
+`cobol_xstate` re-exports them at the old paths. The rest are `cobol_xstate`'s.
 
 | Module | Responsibility |
 |---|---|
@@ -1539,10 +1541,11 @@ most are pinned by a test.
 ## 13. Development and testing
 
 ```bash
-python -m pytest -q      # ~654 tests across core/tests and cobol/tests
-                         # (the root pyproject puts both src trees on sys.path; the
-                         #  JCL suite lives in the jcl-dependencies repository, and the
-                         #  bridge tests here find a sibling checkout automatically)
+python -m pytest -q      # ~645 tests in cobol/tests
+                         # (core/parser suites live in the mainframe-common repository,
+                         #  the JCL suite in jcl-dependencies; the tests here find
+                         #  sibling checkouts of both automatically - override with
+                         #  MAINFRAME_COMMON_REPO / JCL_DEPENDENCIES_REPO)
 ```
 
 Tests requiring Node + a local `xstate` (`npm install` in `cobol/`) — the `--target js`
@@ -1563,10 +1566,10 @@ python tools/prove_separation.py   # four throwaway venvs: a core+jcl box cannot
 
 | Test module | Covers |
 |---|---|
-| `test_normalizer.py` (in `parser/tests/`) | format detection, column handling, continuation |
-| `test_lexer.py` (in `parser/tests/`) | tokenization |
+| `test_normalizer.py` (in mainframe-common's `parser/tests/`) | format detection, column handling, continuation |
+| `test_lexer.py` (in mainframe-common's `parser/tests/`) | tokenization |
 | `test_preprocessor.py` | COPY / REPLACE / missing members |
-| `test_parser.py` (in `parser/tests/`) | statement AST, handlers, headers, GO TO |
+| `test_parser.py` (in mainframe-common's `parser/tests/`) | statement AST, handlers, headers, GO TO |
 | `test_data_semantics.py` | PIC types, `target := expr`, conditions |
 | `test_statechart.py` | the compiled config, flags, ALTER |
 | `test_emitter.py` | ops/guards + **Node integration under stock XState** |

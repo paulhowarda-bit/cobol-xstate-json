@@ -1,16 +1,22 @@
-"""Development convenience: find jcl-dependencies in its sibling checkout.
+"""Development convenience: find the sibling checkouts this suite builds on.
 
-The JCL front-end lives in its own repository now. Installed (pip install
-jcl-dependencies, or the [jcl] extra) it is simply importable and none of this runs.
-From a bare dual-checkout - this repo and jcl-dependencies side by side, nothing
-installed - the bridge tests (the auto-fork agreement, --bind-jcl, the dynamic-call
-join) would silently skip, which on a developer machine is coverage lost for no reason.
-So when the package is not importable but the sibling checkout is there, its src goes
-on sys.path.
+Two repositories feed this one now. mainframe-common carries the distributions
+cobol-xstate depends on (cobol-xstate-core and cobol-parse); jcl-dependencies carries
+the JCL front-end that --bind-jcl joins with. Installed (pip install), each is simply
+importable and none of this runs. From a bare multi-checkout - the repos side by side,
+nothing installed - the suite would fail (core/parser are hard dependencies) or the
+bridge tests would silently skip (the JCL join), which on a developer machine is
+coverage lost for no reason. So when a package is not importable but its sibling
+checkout is there, its src goes on sys.path (see _mainframe_common.py for the
+core/parser half; override the locations with MAINFRAME_COMMON_REPO /
+JCL_DEPENDENCIES_REPO).
 
-Deliberately NOT an install and NOT magic beyond this: if neither is present, the
-bridge tests skip with the exact pip command, exactly as they do for any user without
-the extra. Override the checkout location with JCL_DEPENDENCIES_REPO.
+Deliberately NOT an install and NOT magic beyond this. If mainframe-common is neither
+installed nor checked out, nothing here can even import - so every module except the
+sentinel (test_sibling_distributions.py) is ignored, and the run ends as one clean
+skip naming the exact pip command instead of a wall of collection errors. If the JCL
+package is absent, only the bridge tests skip, exactly as they do for any user
+without the extra.
 """
 
 import importlib.util
@@ -18,9 +24,18 @@ import os
 import sys
 from pathlib import Path
 
+from _mainframe_common import ensure_on_path
+
+_HERE = Path(__file__).resolve().parent
+
+if ensure_on_path() is not None:
+    collect_ignore = sorted(
+        p.name for p in _HERE.glob("test_*.py")
+        if p.name != "test_sibling_distributions.py")
+
 if importlib.util.find_spec("jcl_dependencies") is None:
     _sibling = Path(os.environ.get(
         "JCL_DEPENDENCIES_REPO",
-        Path(__file__).resolve().parents[2].parent / "jcl-dependencies")) / "src"
+        _HERE.parents[1].parent / "jcl-dependencies")) / "src"
     if (_sibling / "jcl_dependencies" / "__init__.py").is_file():
         sys.path.insert(0, str(_sibling))

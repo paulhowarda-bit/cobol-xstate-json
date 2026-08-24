@@ -22,8 +22,10 @@ on runtime data is *flagged*, never smoothed over.
 
 ## Install
 
-**Three distributions ship from this repository** — a shared retrieval core, the COBOL
-parse front-end, and the statechart modelling engine. The JCL front-end,
+**One distribution ships from this repository** — the statechart modelling engine. Its
+two dependencies, the shared retrieval core and the COBOL parse front-end, ship from
+[`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) (one repo,
+two distributions). The JCL front-end,
 [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies),
 lives in its own repository and depends only on the core. The two estate front-ends are
 peers: neither imports the other, and a JCL install carries no COBOL modelling engine.
@@ -32,13 +34,13 @@ The parse front-end stands alone too — any program can `pip install cobol-pars
 
 | Where | Distribution | What it is |
 |---|---|---|
-| `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle |
-| `parser/` | `cobol-parse` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
 | `cobol/` | `cobol-xstate` | `Program` → statechart + all views (`cobol-xstate`) |
+| mainframe-common `core/` | `cobol-xstate-core` | the estate boundary, two-stage retrieval, the replayable estate bundle |
+| mainframe-common `parser/` | `cobol-parse` | COBOL source → `Program` AST (normalize / preprocess / lex / parse / data division) |
 | its own repo | `jcl-dependencies` | JCL → dataflow + dependencies (`jcl-dependencies`) |
 
 ```bash
-python -m pip install -e core -e parser -e cobol   # COBOL work (core+parser come with it)
+python -m pip install -e ../mainframe-common/core -e ../mainframe-common/parser -e cobol
 python -m pip install -e ../jcl-dependencies  # optional: the JCL front-end
 # or: pip install cobol-xstate[jcl]           # adds the --bind-jcl join
 
@@ -406,9 +408,10 @@ parsed carelessly.
 ## Development
 
 ```bash
-python -m pytest -q     # ~654 tests across core/tests and cobol/tests (the JCL suite
-                        # lives in the jcl-dependencies repository; the bridge tests
-                        # here find a sibling ../jcl-dependencies checkout automatically)
+python -m pytest -q     # ~645 tests in cobol/tests (core/parser suites live in the
+                        # mainframe-common repository, the JCL suite in jcl-dependencies;
+                        # the tests here find sibling ../mainframe-common and
+                        # ../jcl-dependencies checkouts automatically)
 ```
 
 The emitter (`--target js`) and golden-master tests need Node + a local `xstate`
@@ -416,16 +419,12 @@ install (`npm install` **in `cobol/`**); they skip cleanly when those are absent
 check the skip count when a change touches the emitters. Two more proofs run before
 merging: `python tools/gate.py` (byte-stability of every view and both retrieval
 reports against `goldens/`, across hash seeds and `--jobs` levels) and
-`python tools/prove_separation.py` (three throwaway venvs proving the distributions
-stand apart).
+`python tools/prove_separation.py` (throwaway venvs proving the distributions
+stand apart, installing core/parser from the sibling mainframe-common checkout).
 
-Layout:
+Layout (core/src and parser/src live in the mainframe-common repository):
 
 ```
-core/src/cobol_xstate_core/   what both front-ends share: artifact_service (the estate
-                    boundary) · prefetch/fetch (two-stage retrieval) · bundle (the
-                    replayable estate bundle) · protocol · categories · cliargs ·
-                    output · report · detect · logging_setup · profiling
 cobol/src/cobol_xstate/       normalizer · lexer · model · parser · preprocessor ·
                     data_division · semantics · analysis · naming · statechart ·
                     emitter · harel · interface · business · lineage · artifacts ·
@@ -438,8 +437,9 @@ cobol/examples/     custrpt.cbl (canonical batch loop) · banktran.cbl (EVALUATE
                     dynamic CALL) · altswitch.cbl (ALTER) · errlit.cbl (keywords
                     inside literals) · ... one fixture per construct
 goldens/ + tools/   the byte-stability ratchet (gate.py, byteproof*.py) and the
-                    separation proof (prove_separation.py, which installs
-                    jcl-dependencies from its sibling checkout)
+                    separation proof (prove_separation.py, which installs core/parser
+                    from the sibling mainframe-common checkout and jcl-dependencies
+                    from its own)
 
 The JCL front-end (parser · views · prefetch · api · cli, plus its examples, tests and
 its own ratchet) lives in the jcl-dependencies repository.
