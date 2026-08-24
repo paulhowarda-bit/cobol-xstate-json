@@ -51,6 +51,10 @@ cobol-parse prog.cbl -o prog.parse.json
 cobol-xstate prog.cbl --from-parse prog.parse.json           # skips the parse
 cobol-xstate prog.cbl --from-bundle ./b --from-parse prog.parse.json  # offline + parse-free
 
+# Optional second parser (Java): per-line coverage diff vs the Koopa island grammar.
+# Our preprocessor stays the provenance owner - Koopa sees the pre-expanded stream.
+COBOL_PARSE_KOOPA_JAR=~/tools/koopa.jar cobol-parse prog.cbl --diff-producers
+
 python -m pytest cobol/tests/test_emitter.py -q            # one module
 python -m pytest cobol/tests/test_reactive.py -k retarget  # one test by name substring
 ```
