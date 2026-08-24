@@ -12,7 +12,7 @@ test regenerates it. A schema change now fails HERE, in the repository that made
 before it can be released to a consumer that cannot parse it.
 
 When this fails and the change is intended: regenerate the fixture, check the JCL
-package's tests still pass against it, and release core/COBOL before the JCL side
+package's tests still pass against it, and release mainframe-artifacts/COBOL before the JCL side
 depends on the new shape.
 """
 
