@@ -147,7 +147,10 @@ def cobol_views(path: Path, via_parse_bundle: bool = False) -> Dict[str, str]:
     if via_parse_bundle:
         from cobol_parser.parse_bundle import program_from_dict, program_to_dict
         program = program_from_dict(json.loads(json.dumps(program_to_dict(program))))
-    machine = build_machine(program, source_name=path.name)
+    # conventions=None is the determinism pin, not an absence fallback: goldens must
+    # hash the same bytes on every machine, so they can never depend on the contents
+    # of the local mfdep.db (mfdep is otherwise always-on at build time).
+    machine = build_machine(program, source_name=path.name, conventions=None)
 
     art = build_artifacts(machine)
     art = attribute_resolution(art, program, {})

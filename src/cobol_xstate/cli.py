@@ -29,7 +29,6 @@ from mainframe_artifacts.report import report_stages as _report_stages
 from . import PACKAGE_LOGGER
 from .api import analyze, gather
 from .bind import JclSupportMissing
-from .conventions import load as _load_conventions
 from .bind import jcl_api as _jcl_api
 from .errors import CobolXstateError
 from .normalizer import SourceFormat
@@ -384,13 +383,6 @@ def _run(args, timing_sink=None) -> int:
                   f"{args.gather_only}")
         timer.report()
         return 0
-
-    # Say when the naming-conventions fallback is live: it changes what the views
-    # carry (heuristic column mappings, marked viaConventions), so a run's output
-    # should never depend on an installed package the log never mentioned.
-    if _load_conventions() is not None:
-        _log.info(f"[{source_name}] mfdep conventions active: unmapped SQL columns "
-                  f"will be resolved by naming convention where possible")
 
     try:
         analysis = analyze(source, source_name=source_name, fmt=_format(args.format),

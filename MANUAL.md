@@ -1224,25 +1224,37 @@ variables (`:WS-BAL:IND-BAL` is two host variables for one column) and host stru
 (`INTO :CUST-REC` is one for N) would otherwise zip into confidently wrong lineage. Every
 refusal emits a flag naming the reason; wrong lineage is worse than none.
 
-**Naming-convention fallback (mfdep)** — always on wherever the `mfdep` package is
-importable, and completely inert (byte-identical output) where it is not. When a
-`SELECT`/`FETCH` correlation *fails* — the cursor's DECLARE is not visible, or the
-counts disagree — the estate's DCLGEN naming conventions get one more shot: every DB2
-table's DCLGEN declares its host variables under a consistent prefix (`NAMES(AA)` →
-`AA-FUND-A` fills `FUND_A` on `T_MMAA_ACC_ANAL`, COPY REPLACING variants included), and
-mfdep indexes them. The lookup runs per host variable
-(`mfdep.conventions.resolve_field_variants`), validates the prefix against the endpoint
-table where one is known, and narrows an ambiguous prefix (two entities sharing it) to
-the one candidate table this program provably references — anything still ambiguous
-stays unresolved, because a guessed table is wrong lineage. A recovery by convention is
-a **heuristic, and is never dressed up as proof**: each resolved entry is marked
-`"viaConventions": true` (an unplaced sibling gets an explicit `"unresolved": true`
-entry, same rule as `derived`), the spec carries
+**Naming-convention fallback (mfdep)** — always on: `mfdep` ships in the runtime
+environment, is imported lazily on the first failed correlation that needs it, and a
+machine that needs it and lacks it fails **loudly** (never a silent conventions-less
+run — silent degradation is exactly the v50 failure). When a `SELECT`/`FETCH`'s column
+list is *unknown* — the cursor's DECLARE is not visible, or `SELECT *` — the estate's
+DCLGEN naming conventions get one more shot: every DB2 table's DCLGEN declares its
+host variables under a consistent prefix (`NAMES(AA)` → `AA-FUND-A` fills `FUND_A` on
+`T_MMAA_ACC_ANAL`, COPY REPLACING variants included), and mfdep indexes them. A
+**count mismatch is never convention-resolved**: a visible select list that disagrees
+with the INTO count means indicator variables or a host structure — the 1:1
+column↔variable assumption itself is broken, and per-field prefix resolution would
+inject exactly the wrong lineage the refusal exists to prevent
+(`docs/issues/conventions-indicator-variable-bug.md`). The lookup runs per host
+variable (`mfdep.conventions.resolve_field_variants`) — classifying indicator
+variables and derived slots is mfdep's job, its verdict taken verbatim — and the
+table evidence must **agree**, not merely exist: the statement's own table (FROM, or
+the cursor's DECLARE) must validate the prefix; with no table known, a unique or
+program-disambiguated candidate resolves only if the program's own table references
+don't contradict it (`WS-` is somebody's DCLGEN prefix *and* the universal
+working-storage prefix — a lone hit proves nothing). Anything ambiguous or
+contradicted stays unresolved, because a guessed table is wrong lineage. A recovery
+by convention is a **heuristic, and is never dressed up as proof**: each resolved
+entry is marked `"viaConventions": true` (an unplaced sibling gets an explicit
+`"unresolved": true` entry, same rule as `derived`), the spec carries
 `"columnsFrom": "mfdep naming conventions"`, the `columnNote` keeps the original
 failure reason, and the site flags `recovered by mfdep NAMING CONVENTION` — verify
 against the table's DCLGEN. If mfdep itself errors mid-run, resolution stops, the
 output degrades to exactly the conventions-less model, and one flag says why (see
-§8). Design notes: `docs/mfdep-conventions-integration.md`.
+§8). Tests and the byte-stability goldens pin `conventions=None` — a determinism
+seam (output must not depend on the day's `mfdep.db`), not an absence mode. Design
+notes: `docs/mfdep-conventions-integration.md`.
 
 Slots that name no column get an **explicit `derived` entry**, not silence:
 `SELECT 'Y'`, `COUNT(*)`, `QTY * PRICE` each fill their host variable from something

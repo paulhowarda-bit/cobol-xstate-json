@@ -7,12 +7,24 @@ mfdep indexes those conventions; when the *statement* evidence for a column<->ho
 variable mapping is missing (cursor DECLARE not visible, count mismatch), the naming
 convention can still recover it. See ``docs/mfdep-conventions-integration.md``.
 
-This module is the only place ``mfdep`` is touched, and only ever lazily: the package
-is estate-side knowledge, not a dependency of this one, so a machine without it runs
-exactly as before (``load()`` -> ``None``). A convention-recovered mapping is a
-HEURISTIC, not a proof - every entry it produces is marked ``viaConventions`` and the
-call sites flag it, per the no-invented-logic rule: recovered-by-convention must never
-read as recovered-from-the-source.
+This module is the only place ``mfdep`` is touched. The package is ASSUMED PRESENT -
+it is part of the runtime environment, always installed beside this tool - so there is
+no degraded conventions-less mode: the import happens lazily on the first failed
+correlation that needs recovering (a program with nothing to recover never imports
+it), and if it is needed and missing the run dies on the ImportError rather than
+silently emitting unmapped columns (exactly the silent-degradation failure the v50
+trace was). Tests and the byte-stability goldens pass an explicit
+``conventions=None`` to ``build_machine`` - a determinism pin, so their outputs never
+depend on the day's ``mfdep.db`` contents, not an absence fallback.
+
+Two division-of-labour rules. A convention-recovered mapping is a HEURISTIC, not a
+proof - every entry it produces is marked ``viaConventions`` and the call sites flag
+it, per the no-invented-logic rule: recovered-by-convention must never read as
+recovered-from-the-source. And classifying the slots is MFDEP'S JOB, not this
+module's: indicator variables and derived columns are whatever
+``resolve_field_variants`` says they are - its verdict is taken verbatim, and a
+variable it declines to place stays an explicit ``unresolved`` entry. No second-
+guessing here.
 """
 
 from __future__ import annotations
@@ -26,17 +38,15 @@ def base_table(name: str) -> str:
     return name.rsplit(".", 1)[-1]
 
 
-def load() -> Optional["Conventions"]:
-    """The mfdep conventions API, wrapped - or ``None`` where mfdep is not importable.
+def load() -> "Conventions":
+    """The mfdep conventions API, wrapped. mfdep is assumed present; if it is not,
+    the ImportError propagates - a loud failure beats silently unmapped columns.
 
     Deliberately uncached: the import system already memoizes the module, and a fresh
     wrapper per build keeps one run's failure (``disabled_reason``) from silently
     muting every later run in the same process.
     """
-    try:
-        import mfdep.conventions as api  # deliberate lazy import - see module docstring
-    except ImportError:
-        return None
+    import mfdep.conventions as api  # deliberate lazy import - see module docstring
     return Conventions(api)
 
 
@@ -72,12 +82,24 @@ class Conventions:
                       ) -> Optional[dict]:
         """One host variable -> ``{"column", "table"}`` by naming convention, or None.
 
-        The table is picked deterministically, strongest evidence first: the caller's
-        table context when the prefix's own candidates validate it; a prefix that maps
-        to exactly one table; an ambiguous prefix narrowed to exactly one of the tables
-        this program provably references (the doc's collision disambiguation); finally
-        whatever single table mfdep itself inferred. Anything still ambiguous stays
-        unresolved - a guessed table is wrong lineage, which is worse than none.
+        The table evidence must AGREE, not merely exist - the generic-prefix hazard
+        (``WS-`` is the estate's working-storage prefix on nearly every program, AND
+        somebody's DCLGEN prefix) means a lone prefix->table hit can be flatly wrong
+        (docs/issues/conventions-indicator-variable-bug.md). So:
+
+        * ``table`` known (the statement's own FROM / the cursor's DECLARE): that is
+          the ground truth. The prefix must VALIDATE against it (the table is among
+          the prefix's candidates, or is what mfdep itself inferred) - a prefix whose
+          tables contradict the statement resolves nothing.
+        * ``table`` unknown: a unique candidate, or an ambiguous prefix narrowed to
+          exactly one of the tables this program provably references (the doc's
+          collision disambiguation), or mfdep's own single inference - and then the
+          program's references get a veto: a resolution naming a table this program
+          never touches is the WS- hazard again. An EMPTY reference set vetoes
+          nothing (a pure reader whose only table mention was the missing DECLARE).
+
+        Anything still ambiguous or contradicted stays unresolved - a guessed table
+        is wrong lineage, which is worse than none.
         """
         field = (field or "").upper()
         r = self._call("resolve_field_variants", field, table or "")
@@ -90,20 +112,24 @@ class Conventions:
         raw = self._call("infer_table_from_prefix", prefix) if prefix else None
         candidates = (sorted({base_table(str(t).upper()) for t in raw})
                       if isinstance(raw, (list, tuple)) else [])
+        inferred = base_table(str(r.get("table") or "").upper())
+        ptables = {base_table(t.upper()) for t in program_tables}
         table = base_table((table or "").upper())
         resolved: Optional[str] = None
-        if table and table in candidates:
-            resolved = table
-        elif len(candidates) == 1:
-            resolved = candidates[0]
-        elif len(candidates) > 1:
-            hits = sorted(set(candidates) & {base_table(t.upper())
-                                             for t in program_tables})
-            if len(hits) == 1:
-                resolved = hits[0]
-        if resolved is None:
-            inferred = base_table(str(r.get("table") or "").upper())
-            resolved = inferred or None
+        if table:
+            if table in candidates or (inferred and table == inferred):
+                resolved = table
+        else:
+            if len(candidates) == 1:
+                resolved = candidates[0]
+            elif len(candidates) > 1:
+                hits = sorted(set(candidates) & ptables)
+                if len(hits) == 1:
+                    resolved = hits[0]
+            else:
+                resolved = inferred or None
+            if resolved and ptables and resolved not in ptables:
+                resolved = None
         if not resolved:
             return None
         return {"column": column, "table": resolved}
@@ -116,8 +142,11 @@ class Conventions:
         Each resolved entry is marked ``viaConventions``; a variable the conventions
         cannot place keeps an explicit ``unresolved`` entry, so "recovered by
         convention" and "the recovery failed on this field" stay distinguishable per
-        slot (the same rule the parser's ``derived`` entries follow). A list with no
-        resolved entry at all - or a lookup that failed partway - is no list.
+        slot (the same rule the parser's ``derived`` entries follow). Whether a slot
+        is an indicator variable or a derived column is MFDEP'S determination - every
+        variable goes to it and its verdict is taken verbatim, never re-classified
+        here. A list with no resolved entry at all - or a lookup that failed partway
+        - is no list.
         """
         entries: List[dict] = []
         resolved = 0

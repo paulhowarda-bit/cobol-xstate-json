@@ -2,18 +2,31 @@
 
 When the statement evidence for a column<->host-variable mapping is missing (cursor
 DECLARE not visible, count mismatch), the DCLGEN naming conventions indexed by mfdep
-can still recover it - marked ``viaConventions`` and flagged as the heuristic it is,
-per docs/mfdep-conventions-integration.md. mfdep itself is estate-side and not
-installed here, so these tests drive the ``Conventions`` wrapper over a doc-faithful
-fake of its API; the always-on auto-load path is proven inert without mfdep.
+recover it - marked ``viaConventions`` and flagged as the heuristic it is, per
+docs/mfdep-conventions-integration.md. mfdep is ASSUMED PRESENT in the runtime
+environment: the import is deferred to the first failed correlation that needs it,
+and a machine that needs it and lacks it (this one) fails LOUDLY - there is no
+silent conventions-less mode. These tests drive the ``Conventions`` wrapper over a
+doc-faithful fake of mfdep's API; classifying indicator variables and derived
+columns is mfdep's job, so the fake's verdicts are taken verbatim, exactly as the
+real one's are.
 """
+
+import importlib.util
+import sys
 
 import json
 
-from cobol_xstate.conventions import Conventions, base_table, load
+import pytest
+
+from cobol_xstate import conventions as conventions_module
+from cobol_xstate import statechart as statechart_module
+from cobol_xstate.conventions import Conventions, base_table
 from cobol_xstate.lineage import build_lineage
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
+
+HAVE_MFDEP = importlib.util.find_spec("mfdep") is not None
 
 
 class FakeMfdep:
@@ -21,13 +34,20 @@ class FakeMfdep:
 
     AA is a plain DCLGEN prefix, AAR its COPY REPLACING variant (same table), and NP
     the documented collision: two entities share it, so it resolves only with table
-    context or program-reference disambiguation.
+    context or program-reference disambiguation. WS is the generic-prefix hazard
+    from docs/issues/conventions-indicator-variable-bug.md: somebody's DCLGEN
+    prefix AND the estate's universal working-storage prefix, so a lone WS->table
+    hit is usually wrong. Classifying indicator variables and derived slots is
+    mfdep's job, never the wrapper's: this fake declines what it does not know
+    (IND-X, ZZ-*), exactly as the real one declines a slot it classifies as an
+    indicator, and the wrapper takes that verdict verbatim.
     """
 
     PREFIXES = {
         "AA":  ["T_MMAA_ACC_ANAL"],
         "AAR": ["T_MMAA_ACC_ANAL"],
         "NP":  ["T_MMNP_NCMM_POSN", "T_SMNP_NWK_PART"],
+        "WS":  ["T_APWS_WKFL_STEP"],
     }
 
     def resolve_field_variants(self, field, table=""):
@@ -95,11 +115,13 @@ FETCH_NODECL = (
 
 # --------------------------------------------------------------------- the wrapper
 
-def test_load_returns_none_without_mfdep():
-    # mfdep is estate-side and deliberately not a dependency; on this machine the
-    # always-on auto-load must come back empty, which is what keeps every output
-    # byte-identical (the gate proves the bytes; this pins the mechanism).
-    assert load() is None
+@pytest.mark.skipif(HAVE_MFDEP, reason="mfdep installed: the requirement is met")
+def test_load_fails_loudly_without_mfdep():
+    # mfdep is assumed present in the runtime environment. A machine that needs the
+    # conventions and lacks the package must DIE on the import, never degrade to
+    # silently unmapped columns (the v50 stale-build failure, as a policy).
+    with pytest.raises(ImportError):
+        conventions_module.load()
 
 
 def test_base_table_drops_schema_qualifier():
@@ -138,10 +160,30 @@ def test_resolve_field_ambiguous_stays_unresolved():
 
 
 def test_resolve_field_unknown_prefix_unresolved():
-    assert _conv().resolve_field("WS-CNT") is None
+    assert _conv().resolve_field("ZZ-FOO") is None
+
+
+def test_resolve_field_endpoint_contradiction_rejected():
+    # The statement's own table is the ground truth: a prefix whose candidate
+    # tables contradict it (WS -> T_APWS_WKFL_STEP vs FROM CUSTOMER) is the
+    # generic-prefix hazard, not evidence - it must resolve nothing.
+    assert _conv().resolve_field("WS-NAME", table="CUSTOMER") is None
+
+
+def test_resolve_field_program_reference_veto():
+    # Endpoint unknown: the program's own table references veto a resolution
+    # naming a table the program never touches...
+    assert _conv().resolve_field(
+        "WS-NAME", program_tables=frozenset({"CUSTOMER"})) is None
+    # ...while an EMPTY reference set vetoes nothing (a pure reader whose only
+    # table mention was the missing DECLARE).
+    assert _conv().resolve_field("WS-NAME") == {
+        "column": "NAME", "table": "T_APWS_WKFL_STEP"}
 
 
 def test_resolve_columns_marks_each_slot():
+    # The indicator variable is MFDEP'S call: it declines IND-X, and the wrapper
+    # records exactly that (an explicit unresolved entry) - no re-classification.
     cols, n = _conv().resolve_columns(["AA-FUND-A", "IND-X"], "T_MMAA_ACC_ANAL")
     assert n == 1
     assert cols == [
@@ -152,7 +194,7 @@ def test_resolve_columns_marks_each_slot():
 
 
 def test_resolve_columns_nothing_resolved_is_no_list():
-    assert _conv().resolve_columns(["WS-CNT", "IND-X"], "") == (None, 0)
+    assert _conv().resolve_columns(["ZZ-A", "IND-X"], "") == (None, 0)
 
 
 def test_mfdep_failure_disables_not_crashes():
@@ -193,32 +235,52 @@ def test_fetch_without_conventions_unchanged():
                for x in _messages(m))
 
 
-def test_auto_load_defaults_to_off_without_mfdep():
-    # The always-on default (no conventions argument at all) must equal an explicit
-    # conventions=None build on a machine without mfdep - same bytes, same flags.
-    src_spec = _machine(FETCH_NODECL, conv=None)
-    auto = build_machine(parse_program(
-        "       IDENTIFICATION DIVISION.\n"
-        "       PROGRAM-ID. CONVTEST.\n"
-        "       DATA DIVISION.\n"
-        "       WORKING-STORAGE SECTION.\n"
-        "       01  AA-FUND-A       PIC X(6).\n"
-        "       01  AA-ACCT-NBR     PIC 9(9).\n"
-        "       01  AAR-FUND-A      PIC X(6).\n"
-        "       01  NP-ID-POSN-A    PIC 9(9).\n"
-        "       01  IND-X           PIC S9(4) COMP.\n"
-        "       01  WS-CNT          PIC S9(9) COMP.\n"
-        "       PROCEDURE DIVISION.\n"
-        "       0000-MAIN.\n"
-        + FETCH_NODECL +
-        "           STOP RUN.\n"), source_name="convtest.cbl")
-    assert auto.to_json() == src_spec.to_json()
+def test_suite_pin_equals_explicit_none():
+    # conftest pins the suite's default builds conventions-less (a determinism pin:
+    # test output can no more depend on the day's mfdep.db than a golden can). The
+    # pinned default must be byte-identical to an explicit conventions=None build.
+    pinned = _machine(FETCH_NODECL, conv=statechart_module._AUTO_CONVENTIONS)
+    explicit = _machine(FETCH_NODECL, conv=None)
+    assert pinned.to_json() == explicit.to_json()
 
 
-# ------------------------------------- FETCH count mismatch, DECLARE visible (§1)
-
-def test_fetch_count_mismatch_partial_resolution_with_cursor_table():
+def test_mfdep_is_imported_only_on_first_need(monkeypatch):
+    # The always-on default defers the mfdep import to the first FAILED correlation:
+    # a program with nothing to recover must never touch mfdep at all (which is also
+    # what keeps SQL-clean runs alive in environments like the separation-proof
+    # venvs). Un-pin the suite fixture so the real load path is live, and prove a
+    # cleanly-correlating program never triggers it.
+    monkeypatch.setattr(statechart_module, "_load_conventions",
+                        conventions_module.load)
+    monkeypatch.delitem(sys.modules, "mfdep", raising=False)
     m = _machine(
+        "           EXEC SQL\n"
+        "               SELECT FUND_A INTO :AA-FUND-A\n"
+        "               FROM T_MMAA_ACC_ANAL\n"
+        "           END-EXEC\n", conv=statechart_module._AUTO_CONVENTIONS)
+    assert _spec(m, "SELECT")["columns"] == [
+        {"column": "FUND_A", "hostVar": "AA-FUND-A"}]
+    assert "mfdep" not in sys.modules
+
+
+@pytest.mark.skipif(HAVE_MFDEP, reason="mfdep installed: the requirement is met")
+def test_needed_but_missing_mfdep_fails_the_build(monkeypatch):
+    # ...and a program that DOES need recovering, on a machine without mfdep, dies
+    # on the ImportError - loud beats silently unmapped.
+    monkeypatch.setattr(statechart_module, "_load_conventions",
+                        conventions_module.load)
+    with pytest.raises(ImportError):
+        _machine(FETCH_NODECL, conv=statechart_module._AUTO_CONVENTIONS)
+
+
+# ------------------- count mismatches are NEVER convention-resolved (bug doc)
+
+def test_fetch_count_mismatch_is_never_convention_resolved():
+    # A visible DECLARE that still failed is a COUNT MISMATCH - the indicator
+    # variable breaks the 1:1 column<->variable assumption, so per-field prefix
+    # resolution would inject wrong lineage where the parser correctly refused.
+    # The refusal (and its flag) must stand, identical to a pinned build.
+    body = (
         "           EXEC SQL\n"
         "               DECLARE C1 CURSOR FOR\n"
         "                   SELECT FUND_A FROM T_MMAA_ACC_ANAL\n"
@@ -226,16 +288,12 @@ def test_fetch_count_mismatch_partial_resolution_with_cursor_table():
         "           EXEC SQL\n"
         "               FETCH C1 INTO :AA-FUND-A :IND-X\n"
         "           END-EXEC\n")
-    spec = _spec(m, "FETCH")
-    assert spec["columns"] == [
-        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
-         "viaConventions": True},
-        {"hostVar": "IND-X", "unresolved": True},
-    ]
-    assert any("(1 of 2 host variable(s) resolved" in x for x in _messages(m))
+    with_conv = _machine(body)
+    pinned = _machine(body, conv=None)
+    assert _spec(with_conv, "FETCH") == _spec(pinned, "FETCH")
+    assert _messages(with_conv) == _messages(pinned)
+    assert "not correlatable" in _spec(with_conv, "FETCH")["columnNote"]
 
-
-# --------------------------------------------------- SELECT count mismatch (§2)
 
 SELECT_MISMATCH = (
     "           EXEC SQL\n"
@@ -245,17 +303,67 @@ SELECT_MISMATCH = (
     "           END-EXEC\n")
 
 
-def test_select_count_mismatch_recovered_by_convention():
-    m = _machine(SELECT_MISMATCH)
+def test_select_count_mismatch_is_never_convention_resolved():
+    with_conv = _machine(SELECT_MISMATCH)
+    pinned = _machine(SELECT_MISMATCH, conv=None)
+    assert _spec(with_conv, "SELECT") == _spec(pinned, "SELECT")
+    assert _messages(with_conv) == _messages(pinned)
+
+
+def test_bug_doc_reproduction_indicator_refusal_stands():
+    # docs/issues/conventions-indicator-variable-bug.md verbatim: 2 columns,
+    # 2 real host variables + 1 null indicator. The parser refuses (2 vs 3);
+    # the conventions must not overrule it - especially not to WS's table.
+    m = _machine(
+        "           EXEC SQL\n"
+        "               SELECT NAME, BAL\n"
+        "               INTO :WS-NAME, :WS-BAL:IND-BAL\n"
+        "               FROM CUSTOMER\n"
+        "           END-EXEC\n")
     spec = _spec(m, "SELECT")
-    assert spec["columns"][0] == {"column": "FUND_A", "hostVar": "AA-FUND-A",
-                                  "table": "T_MMAA_ACC_ANAL",
-                                  "viaConventions": True}
+    assert "columns" not in spec
+    assert "not correlatable" in spec["columnNote"]
+    assert any("mapping not recovered" in x for x in _messages(m))
+
+
+# ------------------------------------------- SELECT * IS recoverable (§2)
+
+def test_select_star_recovered_by_convention():
+    # SELECT * fails for a different reason - the column list is simply not in
+    # the source - so the 1:1 assumption holds and the conventions may recover
+    # it, validated against the statement's own FROM table.
+    m = _machine(
+        "           EXEC SQL\n"
+        "               SELECT *\n"
+        "               INTO :AA-FUND-A\n"
+        "               FROM T_MMAA_ACC_ANAL\n"
+        "           END-EXEC\n")
+    spec = _spec(m, "SELECT")
+    assert spec["columns"] == [
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+         "viaConventions": True}]
     assert spec["columnsFrom"] == "mfdep naming conventions"
-    msgs = _messages(m)
     assert any("EXEC SQL SELECT: column<->host-variable mapping recovered by mfdep "
-               "NAMING CONVENTION" in x for x in msgs)
-    assert not any("mapping not recovered" in x for x in msgs)
+               "NAMING CONVENTION" in x for x in _messages(m))
+
+
+def test_correlated_select_with_derived_slot_is_not_deferred():
+    # A SELECT that correlated fine but carries a residual note (COUNT(*) fills a
+    # derived slot) has nothing for the conventions to recover: its columns and its
+    # flag must come through exactly as in a pinned build - deferral would silently
+    # drop the flag (this bit: the suite caught it on sqlgaps.cbl).
+    body = (
+        "           EXEC SQL\n"
+        "               SELECT FUND_A, COUNT(*)\n"
+        "               INTO :AA-FUND-A, :WS-CNT\n"
+        "               FROM T_MMAA_ACC_ANAL GROUP BY FUND_A\n"
+        "           END-EXEC\n")
+    with_conv = _machine(body)
+    pinned = _machine(body, conv=None)
+    assert _spec(with_conv, "SELECT") == _spec(pinned, "SELECT")
+    assert _messages(with_conv) == _messages(pinned)
+    assert _spec(with_conv, "SELECT")["columns"][1] == {"hostVar": "WS-CNT",
+                                                        "derived": True}
 
 
 def test_select_without_conventions_keeps_original_flag():
@@ -293,6 +401,24 @@ def test_ambiguous_prefix_without_context_degrades_to_todays_output():
     without = _machine(AMBIG_FETCH, conv=None)
     assert _spec(with_conv, "FETCH") == _spec(without, "FETCH")
     assert _messages(with_conv) == _messages(without)
+
+
+def test_generic_prefix_vetoed_by_program_references():
+    # WS- is somebody's DCLGEN prefix AND the universal working-storage prefix.
+    # A no-DECLARE FETCH of a WS- field must not resolve to that somebody's
+    # table when this program's own references contradict it (the bug doc's
+    # secondary issue) - the refusal stands instead.
+    m = _machine(
+        "           EXEC SQL\n"
+        "               UPDATE T_MMAA_ACC_ANAL SET FUND_A = :AA-FUND-A\n"
+        "           END-EXEC\n"
+        "           EXEC SQL\n"
+        "               FETCH C9 INTO :WS-CNT\n"
+        "           END-EXEC\n")
+    spec = _spec(m, "FETCH")
+    assert "columns" not in spec
+    assert any("EXEC SQL FETCH: column<->host-variable mapping not recovered" in x
+               for x in _messages(m))
 
 
 # ------------------------------------------------------------- failure surface

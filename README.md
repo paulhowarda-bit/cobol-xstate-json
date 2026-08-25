@@ -354,14 +354,17 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   crossing LINKAGE (not just MOVE), guards reading linkage fields, and `RETURN-CODE`
   writes classify as caller traffic; `parameters.fields` expands each parameter record
   to its elementary fields.
-- **Unproven column mappings fall back to the estate's naming conventions — marked.**
+- **Unknown column lists fall back to the estate's naming conventions — marked.**
   Db2 events carry `columns` (which column fills which host variable) only where the
-  source proves it. When that correlation fails (cursor `DECLARE` not visible, count
-  mismatch) *and* the [mfdep](docs/mfdep-conventions-integration.md) package is
-  importable, the DCLGEN naming conventions it indexes recover the mapping
+  source proves it. When the column list is simply *unknown* (cursor `DECLARE` not
+  visible, `SELECT *`), the DCLGEN naming conventions indexed by
+  [mfdep](docs/mfdep-conventions-integration.md) — required in the runtime
+  environment, imported on first need, missing = loud failure — recover the mapping
   heuristically: entries are marked `viaConventions`, the failure reason stays in
-  `columnNote`, and the site is flagged for DCLGEN verification. Without mfdep the
-  fallback is inert and output is byte-identical.
+  `columnNote`, and the site is flagged for DCLGEN verification. A **count mismatch
+  is never convention-resolved** (indicator variables / host structures break the
+  positional assumption), and a resolution whose table contradicts the statement or
+  the program's own references is rejected — wrong lineage is worse than none.
 - **Data semantics are captured but not *evaluated*.** `data` carries the types and
   `semantics` carries the `target := expr` / Boolean-tree logic, but the bare config
   can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must
