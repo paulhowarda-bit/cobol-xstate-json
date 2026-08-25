@@ -1224,6 +1224,26 @@ variables (`:WS-BAL:IND-BAL` is two host variables for one column) and host stru
 (`INTO :CUST-REC` is one for N) would otherwise zip into confidently wrong lineage. Every
 refusal emits a flag naming the reason; wrong lineage is worse than none.
 
+**Naming-convention fallback (mfdep)** — always on wherever the `mfdep` package is
+importable, and completely inert (byte-identical output) where it is not. When a
+`SELECT`/`FETCH` correlation *fails* — the cursor's DECLARE is not visible, or the
+counts disagree — the estate's DCLGEN naming conventions get one more shot: every DB2
+table's DCLGEN declares its host variables under a consistent prefix (`NAMES(AA)` →
+`AA-FUND-A` fills `FUND_A` on `T_MMAA_ACC_ANAL`, COPY REPLACING variants included), and
+mfdep indexes them. The lookup runs per host variable
+(`mfdep.conventions.resolve_field_variants`), validates the prefix against the endpoint
+table where one is known, and narrows an ambiguous prefix (two entities sharing it) to
+the one candidate table this program provably references — anything still ambiguous
+stays unresolved, because a guessed table is wrong lineage. A recovery by convention is
+a **heuristic, and is never dressed up as proof**: each resolved entry is marked
+`"viaConventions": true` (an unplaced sibling gets an explicit `"unresolved": true`
+entry, same rule as `derived`), the spec carries
+`"columnsFrom": "mfdep naming conventions"`, the `columnNote` keeps the original
+failure reason, and the site flags `recovered by mfdep NAMING CONVENTION` — verify
+against the table's DCLGEN. If mfdep itself errors mid-run, resolution stops, the
+output degrades to exactly the conventions-less model, and one flag says why (see
+§8). Design notes: `docs/mfdep-conventions-integration.md`.
+
 Slots that name no column get an **explicit `derived` entry**, not silence:
 `SELECT 'Y'`, `COUNT(*)`, `QTY * PRICE` each fill their host variable from something
 that is not a column, and the entry `{ "hostVar": "WS-N", "derived": true }` says so —
@@ -1322,6 +1342,8 @@ unrecovered spot is visible.
 | `dynamic CICS <verb> <OPT>(…)` | a `PROGRAM`/`TRANSID`/`QUEUE`/`FILE`/`MAP`/`MAPSET` operand is a data name — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise (an `EIB*` operand is CICS-supplied, always runtime) |
 | `dynamic SQL: EXEC SQL PREPARE/EXECUTE` | the statement text is assembled at run time — operation and tables not statically knowable |
 | `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree (indicator variable / host structure — verify by hand); `SELECT *` (the list is in the **Db2 catalog**, not the source); an `INSERT` with no column list whose table has **no visible `DECLARE TABLE`** — include its DCLGEN, or pass `--synonym-map` if it is written under a synonym, and the mapping resolves; a select-list item or VALUES slot that names no column (a literal or expression — the receiver carries an explicit `derived` entry so consumers can skip it knowingly); or, for a `FETCH`, that no `DECLARE` for its cursor is visible **anywhere in the expanded source** (data division and copybooks are scanned) — usually a copybook that did not arrive, so supply it, or a cursor PREPAREd dynamically |
+| `mapping recovered by mfdep NAMING CONVENTION` | the columns were recovered from the estate's DCLGEN naming conventions, **not** from the statement or a DECLARE — a heuristic, marked `viaConventions` per entry. The flag says how many of the host variables resolved and why the real correlation failed; verify against the table's DCLGEN |
+| `mfdep conventions lookup failed mid-run` | mfdep errored (reason quoted); resolution stopped and the output is the conventions-less model — fix mfdep and re-run |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
 | `NEXT SENTENCE` | differs from CONTINUE; verify the intended skip |
 | `arithmetic writes non-numeric X` | **S0C7 risk** — verify the type |

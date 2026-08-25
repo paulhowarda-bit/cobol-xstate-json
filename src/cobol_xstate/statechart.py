@@ -32,9 +32,11 @@ import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from .analysis import CallAnalysis, analyze_calls
+from .conventions import base_table as _base_table
+from .conventions import load as _load_conventions
 from .interface import build_interface
 from .semantics import (mask_literals, parse_condition, parse_operation,
                         split_outside_literals)
@@ -257,6 +259,15 @@ class _BuildCtx:
     # any synonym map) - correlated by the same post-pass pattern
     # (_correlate_inserts).
     insert_sites: List[Tuple[str, str, int]] = field(default_factory=list)
+    # (action, paragraph, line) per EXEC SQL SELECT whose parse-time correlation
+    # failed, recorded ONLY when a conventions source is present - the compile step
+    # otherwise flags on the spot, exactly as before. Resolved by the same post-pass
+    # pattern (_correlate_selects).
+    select_sites: List[Tuple[str, str, int]] = field(default_factory=list)
+    # The mfdep naming-conventions lookup (conventions.Conventions), or None where
+    # mfdep is not importable - in which case every fallback below is inert and the
+    # output is byte-identical to a conventions-less build.
+    conventions: Optional[object] = None
 
     def new_times_counter(self, line: int) -> str:
         n = sum(1 for k in self.synthetic_data if k.startswith("TIMES-CTR-")) + 1
@@ -679,7 +690,16 @@ class _ParaCompiler:
                           and st.table is not None)
         if insert_pending:
             self.ctx.insert_sites.append((name, self.pname, st.line))
-        if st.column_note and not insert_pending:
+        # A failed SELECT correlation is likewise still pending when a naming-
+        # conventions source is present: the post-pass (_correlate_selects) gets one
+        # more shot at it, and flags only what stays unresolved - with the exact flag
+        # this site would have raised, so a machine without mfdep changes nothing.
+        select_pending = (st.lang == "SQL" and st.verb == "SELECT"
+                          and st.column_note is not None and bool(st.into_vars)
+                          and self.ctx.conventions is not None)
+        if select_pending:
+            self.ctx.select_sites.append((name, self.pname, st.line))
+        if st.column_note and not insert_pending and not select_pending:
             self.ctx.flag(self.pname, st.line,
                           f"EXEC {st.lang} {st.verb}: column<->host-variable mapping not "
                           f"recovered ({st.column_note}); cross-program state identity "
@@ -1348,31 +1368,105 @@ def _section_map(program: Program) -> Dict[str, List[str]]:
     return out
 
 
-def _correlate_fetches(ctx: "_BuildCtx", program: Program) -> None:
+def _program_tables(ctx: "_BuildCtx", program: Program) -> FrozenSet[str]:
+    """Every Db2 table this program provably references, unqualified.
+
+    This is the conventions doc's collision-disambiguation set: a DCLGEN prefix shared
+    by several entities resolves when exactly ONE of its candidate tables is a table
+    the program actually touches. Gathered from the whole-program evidence - DECLARE
+    TABLEs, cursor DECLAREs, and the statement specs' own table references.
+    """
+    from .interface import _SQL_FROM, _SQL_UPDATE
+    out = set()
+    for entry in program.declared_tables:
+        t = str(entry.get("table") or "").upper()
+        if t:
+            out.add(_base_table(t))
+    for decl in program.sql_cursors:
+        t = str(decl.get("table") or "").upper()
+        if t:
+            out.add(_base_table(t))
+    for spec in ctx.action_sem.values():
+        if spec.get("kind") not in ("input", "exec-sql"):
+            continue
+        t = str(spec.get("table") or "").upper()
+        if t:
+            out.add(_base_table(t))
+        verb = spec.get("verb")
+        if verb in ("SELECT", "DECLARE", "DELETE", "UPDATE"):
+            pat = _SQL_UPDATE if verb == "UPDATE" else _SQL_FROM
+            m = pat.search(mask_literals(str(spec.get("raw") or "").upper()))
+            if m:
+                out.add(m.group(1).upper())
+    return frozenset(out)
+
+
+def _conventions_recover(ctx: "_BuildCtx", spec: dict, verb: str, para: str, line: int,
+                         into: List[str], table: str,
+                         program_tables: FrozenSet[str], why: str) -> bool:
+    """Try the mfdep naming-convention fallback for one FAILED correlation.
+
+    On success the spec gains ``columns`` whose every resolved entry is marked
+    ``viaConventions``, a ``columnsFrom`` naming the source (the key
+    ``_correlate_inserts`` established), and a note + flag that keep the heuristic
+    labelled as one: recovered-by-convention must never read as recovered-from-the-
+    source, and ``why`` (the reason the real correlation failed) stays in both.
+    """
+    conv = ctx.conventions
+    if conv is None:
+        return False
+    columns, resolved = conv.resolve_columns(into, table, program_tables)
+    if not columns:
+        return False
+    spec["columns"] = columns
+    spec["columnsFrom"] = "mfdep naming conventions"
+    spec["columnNote"] = (f"columns recovered by NAMING CONVENTION (mfdep), not from "
+                          f"the statement or a DECLARE ({why}) - verify against the "
+                          f"table's DCLGEN")
+    ctx.flag(para, line,
+             f"EXEC SQL {verb}: column<->host-variable mapping recovered by mfdep "
+             f"NAMING CONVENTION ({resolved} of {len(into)} host variable(s) "
+             f"resolved; {why}) - heuristic, verify against the table's DCLGEN")
+    return True
+
+
+def _correlate_fetches(ctx: "_BuildCtx", program: Program,
+                       program_tables: FrozenSet[str] = frozenset()) -> None:
     """Zip every FETCH's host variables against its cursor's DECLARE, once the whole
     program is compiled.
 
     A cursor splits the evidence over two statements - the DECLARE holds the columns,
     the FETCH the host variables - and nothing guarantees the DECLARE was compiled
-    first, so this cannot run at the FETCH's own site. Whatever fails to correlate is
-    FLAGGED, not left silent: a FETCH with no column identity is exactly the gap a
-    SELECT with none is, and the interface overlay that used to recover this is a pure
-    read with no way to raise one.
+    first, so this cannot run at the FETCH's own site. Whatever fails to correlate
+    gets one more shot via the mfdep naming conventions (where importable) - marked
+    and flagged as the heuristic it is - and whatever STILL fails is FLAGGED, not
+    left silent: a FETCH with no column identity is exactly the gap a SELECT with
+    none is, and the interface overlay that used to recover this is a pure read with
+    no way to raise one.
 
     Cursors come from TWO places: DECLAREs compiled as procedure-division statements
     (``ctx.action_sem``), and DECLAREs the whole-stream scan found in the data
     division and copybooks (``program.sql_cursors``) - where production code actually
-    keeps them, and where the statement compiler never looks.
+    keeps them, and where the statement compiler never looks. The same two places
+    yield each cursor's TABLE, which is the conventions fallback's context (a prefix
+    validated against the endpoint table beats one inferred alone).
     """
-    from .interface import _fetch_columns
+    from .interface import _SQL_FROM, _fetch_columns
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
+    table_by_cursor: Dict[str, str] = {}
     for spec in ctx.action_sem.values():
         if (spec.get("verb") == "DECLARE" and spec.get("cursor")
                 and spec.get("selectList")):
             cols_by_cursor.setdefault(spec["cursor"], spec["selectList"])
+            m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
+            if m:
+                table_by_cursor.setdefault(spec["cursor"], m.group(1).upper())
     for decl in program.sql_cursors:
         if decl.get("cursor") and decl.get("selectList"):
             cols_by_cursor.setdefault(decl["cursor"], decl["selectList"])
+        if decl.get("cursor") and decl.get("table"):
+            table_by_cursor.setdefault(decl["cursor"],
+                                       _base_table(str(decl["table"]).upper()))
     for name, para, line in ctx.fetch_sites:
         spec = ctx.action_sem.get(name)
         if not spec or spec.get("columns") or spec.get("columnNote"):
@@ -1385,11 +1479,45 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program) -> None:
         if columns:
             spec["columns"] = columns
         if note:
+            if _conventions_recover(ctx, spec, "FETCH", para, line, into,
+                                    table_by_cursor.get(spec.get("cursor") or "", ""),
+                                    program_tables, note):
+                continue
             spec["columnNote"] = note
             ctx.flag(para, line,
                      f"EXEC SQL FETCH: column<->host-variable mapping not recovered "
                      f"({note}); cross-program state identity for these fields is "
                      f"unresolved")
+
+
+def _correlate_selects(ctx: "_BuildCtx",
+                       program_tables: FrozenSet[str] = frozenset()) -> None:
+    """The mfdep naming-convention fallback for every SELECT whose parse-time
+    correlation failed (count mismatch: indicator variables, or a host structure).
+
+    Sites land in ``ctx.select_sites`` ONLY when a conventions source is present -
+    the compile step otherwise flags them on the spot, exactly as before - so this
+    pass is inert on a machine without mfdep. The table context is the statement's
+    own FROM clause; whatever the conventions cannot place gets the SAME flag the
+    compile step would have raised, so no-resolution degrades to today's output.
+    """
+    from .interface import _SQL_FROM
+    for name, para, line in ctx.select_sites:
+        spec = ctx.action_sem.get(name)
+        if not spec or spec.get("columns"):
+            continue
+        note = spec.get("columnNote") or ""
+        into = [a["target"] for a in spec.get("assignments", [])
+                if isinstance(a, dict) and "target" in a]
+        m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
+        table = _base_table(m.group(1).upper()) if m else ""
+        if into and _conventions_recover(ctx, spec, "SELECT", para, line, into,
+                                         table, program_tables, note):
+            continue
+        ctx.flag(para, line,
+                 f"EXEC SQL SELECT: column<->host-variable mapping not recovered "
+                 f"({note}); cross-program state identity for these fields is "
+                 f"unresolved")
 
 
 def _correlate_inserts(ctx: "_BuildCtx", program: Program,
@@ -1471,10 +1599,20 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
                 f"field maps to them")
 
 
+# Sentinel: build_machine's default is "use mfdep's conventions wherever mfdep is
+# importable" (always-on, no flag) - while an EXPLICIT conventions=None still means
+# OFF, which is what tests and determinism proofs pass to pin the conventions-less
+# output regardless of what the running environment has installed.
+_AUTO_CONVENTIONS = object()
+
+
 def build_machine(program: Program, source_name: str = "<source>",
-                  synonyms: Optional[Dict[str, str]] = None) -> Machine:
+                  synonyms: Optional[Dict[str, str]] = None,
+                  conventions: object = _AUTO_CONVENTIONS) -> Machine:
+    if conventions is _AUTO_CONVENTIONS:
+        conventions = _load_conventions()
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
-                    data=program.data_by_name)
+                    data=program.data_by_name, conventions=conventions)
     _compute_alter_targets(program, ctx)
 
     # Seed the machine memory (context) with each elementary item's start-of-run value
@@ -1587,8 +1725,18 @@ def build_machine(program: Program, source_name: str = "<source>",
         if program_initial:
             config["initial"] = program_initial
 
-    _correlate_fetches(ctx, program)
+    tables = (_program_tables(ctx, program) if ctx.conventions is not None
+              else frozenset())
+    _correlate_fetches(ctx, program, tables)
+    _correlate_selects(ctx, tables)
     _correlate_inserts(ctx, program, synonyms)
+    # A conventions source that ERRORED is not the same as one that had no answer:
+    # whatever it did not reach stays unresolved for a fixable reason, so say so.
+    reason = getattr(ctx.conventions, "disabled_reason", None)
+    if reason:
+        ctx.flag("CONVENTIONS", 0,
+                 f"mfdep conventions lookup failed mid-run ({reason}); columns it "
+                 f"did not reach stay unresolved - fix mfdep and re-run")
 
     notes = list(program.notes)
     if not program.has_procedure_division:

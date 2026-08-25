@@ -66,6 +66,12 @@ COBOL_PARSER_KOOPA_JAR=~/tools/koopa.jar cobol-parser prog.cbl --diff-producers
 # INSERT written under a synonym find the base table's DECLARE TABLE column order.
 cobol-xstate prog.cbl --synonym-map synonyms.json
 
+# mfdep naming-conventions fallback (docs/mfdep-conventions-integration.md): always on
+# when the estate's `mfdep` package is importable - a SELECT/FETCH whose column
+# correlation failed is recovered from the DCLGEN prefix index, marked viaConventions
+# and flagged as heuristic. Without mfdep (this machine) it is inert: byte-identical
+# output, which is what keeps the gate's goldens valid.
+
 python -m pytest tests/test_emitter.py -q            # one module
 python -m pytest tests/test_reactive.py -k retarget  # one test by name substring
 ```
