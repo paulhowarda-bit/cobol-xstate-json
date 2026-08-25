@@ -259,11 +259,15 @@ def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     except KeyboardInterrupt:
         _log.error("interrupted")
         return 130
-    except Exception:
+    except Exception as exc:
         if args.debug:
             raise  # the developer asked for the raw traceback
-        _log.critical("internal error while processing %r - re-run with --debug for the "
-                      "full traceback", args.source)
+        # The one-liner must carry the ACTUAL failure, not just point at --debug: a
+        # caller that captures stderr (a batch tracer, CI) otherwise records "internal
+        # error" with the reason hidden behind a re-run it will never do.
+        _log.critical("internal error while processing %r: %s: %s - re-run with "
+                      "--debug for the full traceback", args.source,
+                      type(exc).__name__, exc)
         _log.debug("internal error traceback", exc_info=True)
         return 1
 
@@ -411,6 +415,28 @@ def _run(args, timing_sink=None) -> int:
 
     import json as _json
 
+    def _companion_safe(view_name: str, writer, beside: Path) -> None:
+        """Run one companion-view writer behind its own error boundary.
+
+        Once the PRIMARY artifact is on disk the run has usable output, and the exit
+        code must keep saying so: a batch caller reads non-zero as "no usable output"
+        and discards the valid files it already has (the MXBNKSUM false negative - a
+        valid bundle + lineage thrown away over a crash in a later view). A companion
+        that CRASHES - as opposed to refusing, which each writer already handles - is
+        therefore a loud WARNING naming the view and the reason, never a changed exit
+        code. --debug still gets the raw traceback, same contract as the top-level
+        boundary in run()."""
+        try:
+            writer(beside)
+        except Exception as exc:
+            if args.debug:
+                raise
+            _log.warning(f"[{source_name}] WARNING: {view_name} view failed "
+                         f"({type(exc).__name__}: {exc}) - the other artifacts of "
+                         f"this run are unaffected; re-run with --debug for the "
+                         f"full traceback")
+            _log.debug("companion view traceback", exc_info=True)
+
     def _companion(beside: Path, suffix: str, obj) -> None:
         path = beside.with_name(base + suffix)
         if path == beside:
@@ -492,7 +518,7 @@ def _run(args, timing_sink=None) -> int:
         _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
         _log.info(f"[{source_name}] wrote {out_path}")
         if args.target == "business":
-            _write_lineage_companion(out_path)
+            _companion_safe("lineage", _write_lineage_companion, out_path)
     elif args.target in ("js", "reactive"):
         try:
             text = (analysis.reactive_module() if args.target == "reactive"
@@ -529,15 +555,18 @@ def _run(args, timing_sink=None) -> int:
         # came from), the reactive machine (what replaces it), the related artifacts
         # (what else it touches), and the dynamic calls (what it invokes but will not
         # name). All are things you READ or DRAW - the runnable modules stay behind their
-        # own --target. Each is opt-out-able.
-        _write_business_companion(out_path)
-        _write_lineage_companion(out_path)
-        _write_reactive_companion(out_path)
-        _write_artifacts_companion(out_path)
-        _write_dynamic_companion(out_path)
+        # own --target. Each is opt-out-able, and each runs behind _companion_safe:
+        # the bundle above is already usable output, so a crash in one view is a
+        # warning about that view, not a failure of the run.
+        _companion_safe("business", _write_business_companion, out_path)
+        _companion_safe("lineage", _write_lineage_companion, out_path)
+        _companion_safe("reactive", _write_reactive_companion, out_path)
+        _companion_safe("artifacts", _write_artifacts_companion, out_path)
+        _companion_safe("dynamic-calls", _write_dynamic_companion, out_path)
 
     timer.since("views", _t_views)
-    if args.summary:
+
+    def _summary() -> None:
         n_states = len(machine.config.get("states", {}))
         iface = machine.bundle()["interface"]
         _log.info(
@@ -573,6 +602,19 @@ def _run(args, timing_sink=None) -> int:
                 _log.info(f"    {label:18} {names}")
         for f in machine.flags:
             _log.info(f"  FLAG {f['paragraph']} (line {f['line']}): {f['message']}")
+
+    if args.summary:
+        # Same boundary as the companion views: every artifact is on disk by now, so a
+        # crash while PRINTING the summary must not turn the run's exit code non-zero.
+        try:
+            _summary()
+        except Exception as exc:
+            if args.debug:
+                raise
+            _log.warning(f"[{source_name}] WARNING: --summary failed "
+                         f"({type(exc).__name__}: {exc}) - the written artifacts are "
+                         f"unaffected; re-run with --debug for the full traceback")
+            _log.debug("summary traceback", exc_info=True)
 
     timer.report()
     return 0

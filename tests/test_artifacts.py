@@ -193,13 +193,18 @@ def test_dynamic_sql_row_is_honest_about_unknown_tables():
         data_body="       01 WS-SQL PIC X(200).\n",
     )
     row = _by_name(man)["<dynamic-sql>"]
-    assert row["kind"] == "db2-table"
+    # Its own kind, not db2-table: a run-time statement is not a catalog identity, and
+    # counting it as one made the db2-read/db2-write pattern proofs claim unload/load
+    # jobs that are not provable.
+    assert row["kind"] == "db2-dynamic-sql"
     assert row["identity"] == "program-local"
     assert row["dynamic"] is True
     assert row["io"] == "read-write"          # could be either - direction unknowable
     assert row["resolvedBy"] is None
     assert "assembled at run time" in row["needs"]
     assert any("<dynamic-sql>" in f for f in man["flags"])
+    # ...and it no longer feeds the unload/load pattern proofs on its own.
+    assert man["patterns"] == []
 
 
 def test_ambiguous_dynamic_program_target_lists_its_candidates():

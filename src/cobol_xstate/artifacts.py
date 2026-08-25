@@ -99,6 +99,16 @@ _CLASS: Dict[str, dict] = {
                 "needs": "the procedure's signature (parameter list with IN/OUT) to "
                          "give its parameters direction; its implementation may itself "
                          "be a COBOL program on the estate"},
+    # Dynamic SQL (PREPARE / EXECUTE): not a table - the statement text is a run-time
+    # value, so there is no catalog-global name to resolve, ever. Its own kind keeps it
+    # out of the db2-table pattern proofs (a program whose only "Db2 write" is an
+    # EXECUTE IMMEDIATE is not provably a load job). Priority appended, same rule as
+    # db2_proc: renumbering the established kinds reshuffles every existing manifest.
+    "dynamic_sql": {"kind": "db2-dynamic-sql", "identity": "program-local",
+                "priority": 11, "resolver": None,
+                "needs": "the SQL statement text is assembled at run time: trace the "
+                         "fields that build the statement string to name the real "
+                         "table(s) and operation"},
 }
 
 # Endpoint types that are NOT a second thing the program touches - a subsystem's reply, a
@@ -253,7 +263,11 @@ def build_artifacts(machine: Machine) -> dict:
     # corroborates MQ), and whether it uses EXEC SQL (corroborates a Db2 interface module).
     internal_programs = getattr(machine, "nested_programs", None) or []
     prog_copybooks = getattr(machine, "copybooks", None) or []
-    uses_sql = any(e.get("type") == "db2" for e in endpoints.values())
+    # Any SQL endpoint kind corroborates: a program whose only EXEC SQL is a stored-proc
+    # CALL or a PREPARE/EXECUTE still talks to Db2, and its DSNTIAR-style callees must
+    # still classify as the Db2 interface modules they are.
+    uses_sql = any(e.get("type") in ("db2", "db2_proc", "dynamic_sql")
+                   for e in endpoints.values())
     for name, ep in endpoints.items():
         etype = ep["type"]
         if etype in _NON_ARTIFACT:
@@ -301,8 +315,8 @@ def build_artifacts(machine: Machine) -> dict:
                                 "(PREPARE / EXECUTE): the operation and table(s) are "
                                 "not statically knowable - trace the fields that build "
                                 "the statement string")
-                flags.append("db2-table <dynamic-sql>: statement text assembled at "
-                             "run time - tables/operation unresolvable statically")
+                flags.append(f"{cls['kind']} <dynamic-sql>: statement text assembled at "
+                             f"run time - tables/operation unresolvable statically")
             else:
                 kind = cls["kind"]
                 needs = (f"{name} is a data item, not a {kind} name: the target "

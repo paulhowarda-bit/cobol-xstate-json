@@ -52,6 +52,10 @@ def _event_slug(event: str) -> str:
 
 # Endpoint types whose GET is an actual data crossing (a record/row to receive), as opposed
 # to a RESPONSE (SQLCODE/EIBRESP) or a CONDITION (a HANDLEd exception, deferred here).
+# "dynamic_sql" is deliberately NOT here: what a PREPARE/EXECUTE delivers is the run-time
+# statement's business, so there is no record to wait for - lowering it to an `on` wait
+# (as its old "db2" classification did) parked the machine on an event nobody can source.
+# It now falls through to the unhandled-perimeter flag instead: flagged, never guessed.
 _DATA_GET_TYPES = {"db2", "file", "console", "terminal", "ims"}
 
 # Verbs that classify as a `get` but do NOT deliver a record: they declare or position a

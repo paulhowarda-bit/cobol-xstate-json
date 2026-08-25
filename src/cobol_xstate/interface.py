@@ -41,6 +41,11 @@ _QUEUE, _SYSTEM, _TRANSACTION = "queue", "system", "transaction"
 # PARAMETERS (linkage, not table columns), so classifying `EXEC SQL CALL` as a table
 # would send downstream tooling looking for Column nodes that cannot exist.
 _DB2_PROC = "db2_proc"
+# Dynamic SQL (PREPARE / EXECUTE [IMMEDIATE]) is likewise its own kind, not "db2": the
+# statement text is a run-time value, so no table or column mapping can exist - and a
+# consumer that cannot tell this apart from static SQL counts every one of its host
+# variables as a mapping failure instead of an inherent unknown.
+_DYNAMIC_SQL = "dynamic_sql"
 
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|TSQUEUE|TDQUEUE)\s*\(\s*'?"
@@ -422,8 +427,8 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             # statement could read or write), marked dynamic; the fields are the host
             # variables that carry/parameterize the statement.
             v = verb + (" IMMEDIATE" if "IMMEDIATE" in up else "")
-            hits = [_hit("get", _DB2, "<dynamic-sql>", v, host_vars),
-                    _hit("create", _DB2, "<dynamic-sql>", v, host_vars)]
+            hits = [_hit("get", _DYNAMIC_SQL, "<dynamic-sql>", v, host_vars),
+                    _hit("create", _DYNAMIC_SQL, "<dynamic-sql>", v, host_vars)]
             for h in hits:
                 h["dynamic"] = True
             return hits
