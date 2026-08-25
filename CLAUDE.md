@@ -66,11 +66,16 @@ COBOL_PARSER_KOOPA_JAR=~/tools/koopa.jar cobol-parser prog.cbl --diff-producers
 # INSERT written under a synonym find the base table's DECLARE TABLE column order.
 cobol-xstate prog.cbl --synonym-map synonyms.json
 
-# mfdep naming-conventions fallback (docs/mfdep-conventions-integration.md): always on
-# when the estate's `mfdep` package is importable - a SELECT/FETCH whose column
-# correlation failed is recovered from the DCLGEN prefix index, marked viaConventions
-# and flagged as heuristic. Without mfdep (this machine) it is inert: byte-identical
-# output, which is what keeps the gate's goldens valid.
+# mfdep naming-conventions fallback (docs/mfdep-conventions-integration.md): always on.
+# mfdep ships in the runtime environment; it is imported lazily on the FIRST failed
+# correlation that needs it, and needed-but-missing is a loud ImportError, never a
+# silent conventions-less run. Only an UNKNOWN column list (invisible cursor DECLARE,
+# SELECT *) is recovered - a count mismatch (indicator variables / host structures)
+# never is, and a table contradicting the statement or the program's references is
+# rejected (docs/issues/conventions-indicator-variable-bug.md). Tests and the gate pin
+# conventions=None (tests/conftest.py autouse fixture + tools/byteproof*.py): a
+# determinism seam so output never depends on the day's mfdep.db - which is what keeps
+# the goldens valid on every machine, this mfdep-less one included.
 
 python -m pytest tests/test_emitter.py -q            # one module
 python -m pytest tests/test_reactive.py -k retarget  # one test by name substring

@@ -264,9 +264,11 @@ class _BuildCtx:
     # otherwise flags on the spot, exactly as before. Resolved by the same post-pass
     # pattern (_correlate_selects).
     select_sites: List[Tuple[str, str, int]] = field(default_factory=list)
-    # The mfdep naming-conventions lookup (conventions.Conventions), or None where
-    # mfdep is not importable - in which case every fallback below is inert and the
-    # output is byte-identical to a conventions-less build.
+    # The mfdep naming-conventions lookup: the _AUTO_CONVENTIONS sentinel (resolved
+    # to a conventions.Conventions by _conventions_of on first need - mfdep is part
+    # of the runtime environment, imported only when a failed correlation actually
+    # needs recovering), an injected instance (tests), or the explicit None pin that
+    # keeps test/golden output independent of the machine's mfdep.db.
     conventions: Optional[object] = None
 
     def new_times_counter(self, line: int) -> str:
@@ -690,12 +692,16 @@ class _ParaCompiler:
                           and st.table is not None)
         if insert_pending:
             self.ctx.insert_sites.append((name, self.pname, st.line))
-        # A failed SELECT correlation is likewise still pending when a naming-
+        # A FAILED SELECT correlation is likewise still pending when a naming-
         # conventions source is present: the post-pass (_correlate_selects) gets one
         # more shot at it, and flags only what stays unresolved - with the exact flag
-        # this site would have raised, so a machine without mfdep changes nothing.
+        # this site would have raised, so a pinned (conventions=None) build changes
+        # nothing. `not st.columns` is the failure gate: a SELECT that correlated
+        # fine but carries a residual note (a derived slot, a literal) has nothing
+        # to recover, and deferring it would silently drop its flag.
         select_pending = (st.lang == "SQL" and st.verb == "SELECT"
-                          and st.column_note is not None and bool(st.into_vars)
+                          and st.column_note is not None and not st.columns
+                          and bool(st.into_vars)
                           and self.ctx.conventions is not None)
         if select_pending:
             self.ctx.select_sites.append((name, self.pname, st.line))
@@ -1412,7 +1418,7 @@ def _conventions_recover(ctx: "_BuildCtx", spec: dict, verb: str, para: str, lin
     labelled as one: recovered-by-convention must never read as recovered-from-the-
     source, and ``why`` (the reason the real correlation failed) stays in both.
     """
-    conv = ctx.conventions
+    conv = _conventions_of(ctx)
     if conv is None:
         return False
     columns, resolved = conv.resolve_columns(into, table, program_tables)
@@ -1479,9 +1485,17 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
         if columns:
             spec["columns"] = columns
         if note:
-            if _conventions_recover(ctx, spec, "FETCH", para, line, into,
-                                    table_by_cursor.get(spec.get("cursor") or "", ""),
-                                    program_tables, note):
+            # The conventions fallback is for a column list that is UNKNOWN (no
+            # DECLARE visible). A visible DECLARE that still failed is a COUNT
+            # MISMATCH - indicator variables or a host structure - where the 1:1
+            # column<->variable assumption itself is broken, and per-field prefix
+            # resolution would inject exactly the wrong lineage the refusal exists
+            # to prevent (docs/issues/conventions-indicator-variable-bug.md).
+            declare_visible = spec.get("cursor") in cols_by_cursor
+            if not declare_visible and _conventions_recover(
+                    ctx, spec, "FETCH", para, line, into,
+                    table_by_cursor.get(spec.get("cursor") or "", ""),
+                    program_tables, note):
                 continue
             spec["columnNote"] = note
             ctx.flag(para, line,
@@ -1497,9 +1511,18 @@ def _correlate_selects(ctx: "_BuildCtx",
 
     Sites land in ``ctx.select_sites`` ONLY when a conventions source is present -
     the compile step otherwise flags them on the spot, exactly as before - so this
-    pass is inert on a machine without mfdep. The table context is the statement's
-    own FROM clause; whatever the conventions cannot place gets the SAME flag the
-    compile step would have raised, so no-resolution degrades to today's output.
+    pass is inert in a pinned (conventions=None) build. The table context is the
+    statement's own FROM clause; whatever the conventions cannot place gets the SAME
+    flag the compile step would have raised, so no-resolution degrades to today's
+    output.
+
+    Same failure-class rule as the FETCH pass: only an UNKNOWN column list
+    (``SELECT *`` - no ``selectList`` on the spec) is recoverable. A spec that
+    carries its select list and still failed is a COUNT MISMATCH - indicator
+    variables (``:WS-BAL:IND-BAL``) or a host structure - where the 1:1 assumption
+    is broken and per-field resolution would map the refused slots to whatever
+    table their generic prefixes happen to name
+    (docs/issues/conventions-indicator-variable-bug.md).
     """
     from .interface import _SQL_FROM
     for name, para, line in ctx.select_sites:
@@ -1511,8 +1534,10 @@ def _correlate_selects(ctx: "_BuildCtx",
                 if isinstance(a, dict) and "target" in a]
         m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
         table = _base_table(m.group(1).upper()) if m else ""
-        if into and _conventions_recover(ctx, spec, "SELECT", para, line, into,
-                                         table, program_tables, note):
+        count_mismatch = bool(spec.get("selectList"))
+        if (into and not count_mismatch
+                and _conventions_recover(ctx, spec, "SELECT", para, line, into,
+                                         table, program_tables, note)):
             continue
         ctx.flag(para, line,
                  f"EXEC SQL SELECT: column<->host-variable mapping not recovered "
@@ -1599,18 +1624,25 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
                 f"field maps to them")
 
 
-# Sentinel: build_machine's default is "use mfdep's conventions wherever mfdep is
-# importable" (always-on, no flag) - while an EXPLICIT conventions=None still means
-# OFF, which is what tests and determinism proofs pass to pin the conventions-less
-# output regardless of what the running environment has installed.
+# Sentinel: build_machine's default is "mfdep's conventions, always" - mfdep is part
+# of the runtime environment, so there is no conventions-less mode to fall back to.
+# The import is deferred to the FIRST failed correlation that needs recovering
+# (_conventions_of): a program with nothing to recover never imports mfdep, and one
+# that does on a machine missing it dies on the ImportError - loud beats silently
+# unmapped. An EXPLICIT conventions=None is the determinism pin tests and the golden
+# proofs pass, so their outputs never depend on the day's mfdep.db contents.
 _AUTO_CONVENTIONS = object()
+
+
+def _conventions_of(ctx: "_BuildCtx"):
+    if ctx.conventions is _AUTO_CONVENTIONS:
+        ctx.conventions = _load_conventions()
+    return ctx.conventions
 
 
 def build_machine(program: Program, source_name: str = "<source>",
                   synonyms: Optional[Dict[str, str]] = None,
                   conventions: object = _AUTO_CONVENTIONS) -> Machine:
-    if conventions is _AUTO_CONVENTIONS:
-        conventions = _load_conventions()
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
                     data=program.data_by_name, conventions=conventions)
     _compute_alter_targets(program, ctx)

@@ -105,7 +105,9 @@ def cobol_reports(path: Path, run_dir: Path, jobs: int = JOBS) -> Dict[str, str]
     resolver = CopybookResolver(paths=[str(EXAMPLES)], exts=DEFAULT_EXTS,
                                 fetcher=fetch_artifact, store=pre.store)
     program = parse_program(source, fmt, resolver=resolver)
-    machine = build_machine(program, source_name=path.name)
+    # conventions=None: the determinism pin (see byteproof.py) - report goldens must
+    # not depend on the local mfdep.db either.
+    machine = build_machine(program, source_name=path.name, conventions=None)
 
     art = build_artifacts(machine)
     art = attribute_resolution(art, program, pre.store)

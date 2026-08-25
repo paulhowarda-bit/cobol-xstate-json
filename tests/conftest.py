@@ -24,6 +24,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 from _mainframe_common import ensure_on_path
 
 _HERE = Path(__file__).resolve().parent
@@ -39,3 +41,19 @@ if importlib.util.find_spec("jcl_dependencies") is None:
         _HERE.parent.parent / "jcl-dependencies")) / "src"
     if (_sibling / "jcl_dependencies" / "__init__.py").is_file():
         sys.path.insert(0, str(_sibling))
+
+
+@pytest.fixture(autouse=True)
+def _pin_conventions_off(monkeypatch):
+    """Determinism pin: default builds run conventions-less inside the suite.
+
+    mfdep's naming conventions are ALWAYS-ON at build time (mfdep ships in the
+    runtime environment; the import is deferred to first need and its absence is a
+    loud failure, never a silent fallback) - but a test's expected output can no
+    more depend on the day's mfdep.db contents than a golden can. So the suite pins
+    build_machine's auto-load off, exactly as tools/byteproof*.py pin their builds
+    with conventions=None. test_conventions.py exercises the real path by injecting
+    its own Conventions explicitly, which bypasses this pin.
+    """
+    from cobol_xstate import statechart
+    monkeypatch.setattr(statechart, "_load_conventions", lambda: None)
