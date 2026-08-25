@@ -227,6 +227,43 @@ def test_a_refused_reactive_view_does_not_take_the_run_down(tmp_path):
     assert "cicsinq.reactive.json" not in names       # refused, and said so
 
 
+def test_a_crashing_companion_view_does_not_fail_a_run_with_a_written_bundle(
+        tmp_path, capsys, monkeypatch):
+    """Exit-code integrity: once the bundle is on disk the run HAS usable output, and
+    the exit code must keep saying so. A batch caller reads non-zero as "no usable
+    output" and discards the valid files it already copied - which is how a crash in
+    one late view threw away a whole program's valid bundle + lineage. A companion
+    that CRASHES (not refuses) is a loud warning naming the view, never exit != 0."""
+    from cobol_xstate import api
+
+    def boom(self):
+        raise RuntimeError("view exploded")
+
+    monkeypatch.setattr(api.Analysis, "business", boom)
+    src = _write_src(tmp_path)
+    assert run([str(src), "--outdir", str(tmp_path / "o")]) == 0
+    names = _names(tmp_path / "o")
+    assert "hello.json" in names                 # the primary artifact landed
+    assert "hello.lineage.json" in names         # ...and the later views still ran
+    assert "hello.business.json" not in names    # the crashed one is absent, not faked
+    err = capsys.readouterr().err
+    assert "business view failed" in err and "RuntimeError" in err
+    assert "view exploded" in err                # the reason, right there in stderr
+    assert "Traceback" not in err
+
+
+def test_a_crashing_companion_view_reraises_under_debug(tmp_path, monkeypatch):
+    from cobol_xstate import api
+
+    def boom(self):
+        raise RuntimeError("view exploded")
+
+    monkeypatch.setattr(api.Analysis, "business", boom)
+    src = _write_src(tmp_path)
+    with pytest.raises(RuntimeError):
+        run([str(src), "--outdir", str(tmp_path / "o"), "--debug"])
+
+
 def test_explicit_reactive_target_on_a_refused_program_errors_cleanly(tmp_path, capsys):
     src = Path(__file__).resolve().parents[1] / "examples" / "cicsinq.cbl"
     assert run([str(src), "--target", "reactive", "--outdir", str(tmp_path)]) == 3

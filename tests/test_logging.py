@@ -207,6 +207,10 @@ def test_unexpected_error_is_reported_without_a_traceback(pkg_logger, tmp_path, 
     assert rc == 1
     assert "Traceback" not in err
     assert "internal error" in err
+    # The one-liner carries the ACTUAL failure: a caller that captures stderr (a batch
+    # tracer, CI) must record the reason, not just a pointer at a --debug re-run it
+    # will never do.
+    assert "ValueError" in err and "kaboom" in err
 
 
 def test_debug_flag_reraises_the_full_traceback(pkg_logger, tmp_path, monkeypatch):

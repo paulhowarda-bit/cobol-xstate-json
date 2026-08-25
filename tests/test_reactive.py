@@ -150,6 +150,22 @@ def test_manifest_lists_inbound_events_and_no_flags():
     assert manifest["flags"] == []  # flat SELECT slice is fully lowered
 
 
+def test_dynamic_sql_get_is_flagged_not_lowered_to_a_wait():
+    """As a "db2" get, a PREPARE/EXECUTE lowered to an `on` wait - parking the machine on
+    an event nobody can source, since a run-time statement delivers no record the model
+    can name. As "dynamic_sql" it is outside _DATA_GET_TYPES: left synchronous and
+    FLAGGED, while the create half still publishes fire-and-forget."""
+    mod = emit_reactive_module(_machine("dynsql.cbl"))
+    cfg = _extract(mod, "machineConfig")
+    manifest = _extract(mod, "manifest")
+    assert "GET.DYNAMIC_SQL.<dynamic-sql>" not in manifest["inbound"]
+    for st in cfg["states"].values():
+        assert "GET.DYNAMIC_SQL.<dynamic-sql>" not in (st.get("on") or {})
+    assert any("GET.DYNAMIC_SQL.<dynamic-sql>" in f and "left synchronous" in f
+               for f in manifest["flags"])
+    assert "CREATE.DYNAMIC_SQL.<dynamic-sql>" in manifest["outbound"]
+
+
 def test_parallel_machine_is_refused_not_faked():
     # cicsinq has EXEC CICS HANDLE CONDITION -> a type:parallel handler-region machine,
     # which the slice does not lower. It must refuse loudly, not emit something wrong.

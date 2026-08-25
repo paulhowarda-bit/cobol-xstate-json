@@ -278,7 +278,10 @@ def test_return_transid_data_name_resolves_in_the_verb():
     assert "TRANSID(AB12)" in ev["verb"]
 
 
-def test_dynamic_sql_is_one_db2_endpoint_marked_dynamic():
+def test_dynamic_sql_is_its_own_endpoint_kind_marked_dynamic():
+    """Classified as "db2", every host variable of a PREPARE/EXECUTE read as a column-
+    mapping failure downstream; "dynamic_sql" is the discriminator that says the mapping
+    is inherently impossible here, not unrecovered (same move as db2_proc)."""
     iface = _iface(
         "       0000-MAIN.\n"
         "           EXEC SQL EXECUTE IMMEDIATE :WS-SQL END-EXEC.\n",
@@ -286,11 +289,17 @@ def test_dynamic_sql_is_one_db2_endpoint_marked_dynamic():
     )
     endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
     ep = endpoints["<dynamic-sql>"]
-    assert ep["type"] == "db2"
+    assert ep["type"] == "dynamic_sql"
     assert ep["dynamic"] is True
     assert sorted(ep["directions"]) == ["create", "get"]
     ev = next(e for e in iface["events"] if e["endpoint"] == "<dynamic-sql>")
     assert ev["fields"] == ["WS-SQL"]
+    assert ev["endpointType"] == "dynamic_sql"
+    # The event name follows the type, exactly as *.DB2_PROC.* does.
+    assert ev["event"] in ("GET.DYNAMIC_SQL.<dynamic-sql>",
+                           "CREATE.DYNAMIC_SQL.<dynamic-sql>")
+    assert "<dynamic-sql>" not in {
+        e["endpoint"] for e in iface["events"] if e["endpointType"] == "db2"}
 
 
 def test_perimeter_states_are_tagged_on_the_machine_nodes():
