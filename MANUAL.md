@@ -1236,9 +1236,13 @@ host variables under a consistent prefix (`NAMES(AA)` → `AA-FUND-A` fills `FUN
 with the INTO count means indicator variables or a host structure — the 1:1
 column↔variable assumption itself is broken, and per-field prefix resolution would
 inject exactly the wrong lineage the refusal exists to prevent
-(`docs/issues/conventions-indicator-variable-bug.md`). The lookup runs per host
-variable (`mfdep.conventions.resolve_field_variants`) — classifying indicator
-variables and derived slots is mfdep's job, its verdict taken verbatim — and the
+(`docs/issues/conventions-indicator-variable-bug.md`). Even at a recoverable site,
+the INTO clause's **null indicators are stripped before the lookup**: `INTO
+:WS-BAL:IND-BAL` names a second colon-variable in the comma group that carries
+null-status metadata, never column data, so it must never receive a column identity
+(`docs/issues/conventions-indicator-bug.md`). The lookup then runs per remaining host
+variable (`mfdep.conventions.resolve_field_variants`) — classifying anything else
+mfdep declines is mfdep's job, its verdict taken verbatim — and the
 table evidence must **agree**, not merely exist: the statement's own table (FROM, or
 the cursor's DECLARE) must validate the prefix; with no table known, a unique or
 program-disambiguated candidate resolves only if the program's own table references

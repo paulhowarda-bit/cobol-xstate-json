@@ -1407,6 +1407,36 @@ def _program_tables(ctx: "_BuildCtx", program: Program) -> FrozenSet[str]:
     return frozenset(out)
 
 
+# The INTO clause of the raw statement text, and the host variables inside it. Db2's
+# `INTO :WS-BAL:IND-BAL` names TWO variables in one comma group: the second is a NULL
+# INDICATOR for the first - null-status metadata, not column data. The raw text (the
+# lexer's space-joined tokens: `INTO : WS-BAL : IND-BAL`) preserves that grouping.
+_INTO_CLAUSE = re.compile(
+    r"\bINTO\b(.*?)(?:\bFROM\b|\bWHERE\b|\bORDER\b|\bGROUP\b|\bHAVING\b|\bFOR\b"
+    r"|\bEND-EXEC\b|$)", re.I | re.S)
+_INTO_HOSTVAR = re.compile(r":\s*([A-Z][A-Z0-9-]*)", re.I)
+
+
+def _indicator_vars(raw: str) -> FrozenSet[str]:
+    """The null-indicator host variables named by ``raw``'s INTO clause.
+
+    Any colon-variable after the first inside one comma group is an indicator
+    (``docs/issues/conventions-indicator-bug.md``): it carries null-status metadata,
+    never column data, so it must never receive a column identity mapping - a real
+    mfdep index would happily resolve ``IND-BAL`` to column ``BAL``. Masked before
+    scanning, like every other keyword scan over raw statement text.
+    """
+    m = _INTO_CLAUSE.search(mask_literals(raw.upper()) if raw else "")
+    if not m:
+        return frozenset()
+    indicators = set()
+    for group in m.group(1).split(","):
+        # First var in each comma group is data; subsequent vars are indicators.
+        for v in _INTO_HOSTVAR.findall(group)[1:]:
+            indicators.add(v.upper())
+    return frozenset(indicators)
+
+
 def _conventions_recover(ctx: "_BuildCtx", spec: dict, verb: str, para: str, line: int,
                          into: List[str], table: str,
                          program_tables: FrozenSet[str], why: str) -> bool:
@@ -1490,10 +1520,15 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             # MISMATCH - indicator variables or a host structure - where the 1:1
             # column<->variable assumption itself is broken, and per-field prefix
             # resolution would inject exactly the wrong lineage the refusal exists
-            # to prevent (docs/issues/conventions-indicator-variable-bug.md).
+            # to prevent (docs/issues/conventions-indicator-variable-bug.md). And
+            # even at a recoverable site, the INTO clause's null indicators are
+            # stripped first - the count gate above needed the full list, but an
+            # indicator must never reach the column lookup at all.
             declare_visible = spec.get("cursor") in cols_by_cursor
-            if not declare_visible and _conventions_recover(
-                    ctx, spec, "FETCH", para, line, into,
+            data_into = [v for v in into
+                         if v not in _indicator_vars(spec.get("raw") or "")]
+            if not declare_visible and data_into and _conventions_recover(
+                    ctx, spec, "FETCH", para, line, data_into,
                     table_by_cursor.get(spec.get("cursor") or "", ""),
                     program_tables, note):
                 continue
@@ -1535,8 +1570,12 @@ def _correlate_selects(ctx: "_BuildCtx",
         m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
         table = _base_table(m.group(1).upper()) if m else ""
         count_mismatch = bool(spec.get("selectList"))
-        if (into and not count_mismatch
-                and _conventions_recover(ctx, spec, "SELECT", para, line, into,
+        # Same indicator strip as the FETCH pass: a `SELECT * INTO :A:I` is
+        # recoverable, but only its DATA variables may reach the column lookup.
+        data_into = [v for v in into
+                     if v not in _indicator_vars(spec.get("raw") or "")]
+        if (data_into and not count_mismatch
+                and _conventions_recover(ctx, spec, "SELECT", para, line, data_into,
                                          table, program_tables, note)):
             continue
         ctx.flag(para, line,

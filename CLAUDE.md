@@ -71,8 +71,10 @@ cobol-xstate prog.cbl --synonym-map synonyms.json
 # correlation that needs it, and needed-but-missing is a loud ImportError, never a
 # silent conventions-less run. Only an UNKNOWN column list (invisible cursor DECLARE,
 # SELECT *) is recovered - a count mismatch (indicator variables / host structures)
-# never is, and a table contradicting the statement or the program's references is
-# rejected (docs/issues/conventions-indicator-variable-bug.md). Tests and the gate pin
+# never is, INTO-clause null indicators (:DATA:IND) are stripped before the lookup
+# even at recoverable sites (docs/issues/conventions-indicator-bug.md), and a table
+# contradicting the statement or the program's references is rejected
+# (docs/issues/conventions-indicator-variable-bug.md). Tests and the gate pin
 # conventions=None (tests/conftest.py autouse fixture + tools/byteproof*.py): a
 # determinism seam so output never depends on the day's mfdep.db - which is what keeps
 # the goldens valid on every machine, this mfdep-less one included.

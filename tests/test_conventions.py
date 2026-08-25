@@ -115,6 +115,16 @@ FETCH_NODECL = (
 
 # --------------------------------------------------------------------- the wrapper
 
+@pytest.mark.skipif(not HAVE_MFDEP, reason="mfdep not installed here")
+def test_load_returns_working_conventions_with_mfdep():
+    # The with-mfdep half of the loud-failure contract (the other team's Fix 3(B)):
+    # on a machine that has mfdep - the work machine - load() must hand back a
+    # healthy wrapper, not merely import. Skips on this mfdep-less dev checkout.
+    conv = conventions_module.load()
+    assert isinstance(conv, Conventions)
+    assert conv.disabled_reason is None
+
+
 @pytest.mark.skipif(HAVE_MFDEP, reason="mfdep installed: the requirement is met")
 def test_load_fails_loudly_without_mfdep():
     # mfdep is assumed present in the runtime environment. A machine that needs the
@@ -371,6 +381,50 @@ def test_select_without_conventions_keeps_original_flag():
     assert "columns" not in _spec(m, "SELECT")
     assert any("EXEC SQL SELECT: column<->host-variable mapping not recovered" in x
                for x in _messages(m))
+
+
+# ---------------------------------------- null indicators never reach the lookup
+
+def test_indicator_vars_from_raw_sql():
+    # The second colon-variable inside one comma group of the INTO clause is a
+    # Db2 null indicator. The four shapes the feedback doc tested, verbatim.
+    iv = statechart_module._indicator_vars
+    assert iv("INTO : WS-NAME , : WS-BAL : IND-BAL FROM CUSTOMER") == {"IND-BAL"}
+    assert iv("INTO : AA-FUND-A : IND-X , : AA-ACCT-NBR END-EXEC") == {"IND-X"}
+    assert iv("INTO : WS-ID , : WS-N FROM ACCOUNT") == frozenset()
+    assert iv("INTO : WS-ID , : WS-BAL END-EXEC") == frozenset()
+    assert iv("") == frozenset()
+
+
+def test_fetch_indicator_stripped_before_conventions():
+    # A no-DECLARE FETCH is recoverable - but its null indicator must never reach
+    # the column lookup (a real mfdep index would resolve IND-BAL to column BAL).
+    # The indicator simply does not appear in columns[] at all, and the flag
+    # counts data variables only.
+    m = _machine(
+        "           EXEC SQL\n"
+        "               FETCH C9 INTO :AA-FUND-A:IND-X\n"
+        "           END-EXEC\n")
+    spec = _spec(m, "FETCH")
+    assert spec["columns"] == [
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+         "viaConventions": True}]
+    assert not any("IND-X" in str(c) for c in spec["columns"])
+    assert any("(1 of 1 host variable(s) resolved" in x for x in _messages(m))
+
+
+def test_select_star_indicator_stripped_before_conventions():
+    m = _machine(
+        "           EXEC SQL\n"
+        "               SELECT *\n"
+        "               INTO :AA-FUND-A:IND-X\n"
+        "               FROM T_MMAA_ACC_ANAL\n"
+        "           END-EXEC\n")
+    spec = _spec(m, "SELECT")
+    assert spec["columns"] == [
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+         "viaConventions": True}]
+    assert any("(1 of 1 host variable(s) resolved" in x for x in _messages(m))
 
 
 # ------------------------------------------------ collision disambiguation (§4)
