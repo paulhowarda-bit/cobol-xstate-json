@@ -286,17 +286,23 @@ def test_needed_but_missing_mfdep_fails_the_build(monkeypatch):
 # ------------------- count mismatches are NEVER convention-resolved (bug doc)
 
 def test_fetch_count_mismatch_is_never_convention_resolved():
-    # A visible DECLARE that still failed is a COUNT MISMATCH - the indicator
-    # variable breaks the 1:1 column<->variable assumption, so per-field prefix
-    # resolution would inject wrong lineage where the parser correctly refused.
-    # The refusal (and its flag) must stand, identical to a pinned build.
+    # A visible DECLARE that still failed is a COUNT MISMATCH - the 1:1
+    # column<->variable assumption is broken, so per-field prefix resolution would
+    # inject wrong lineage where the parser correctly refused. The refusal (and its
+    # flag) must stand, identical to a pinned build.
+    #
+    # ONE column, TWO host variables, and nothing in the statement explains the
+    # difference. A null indicator used to be the vehicle here and no longer is:
+    # `:AA-FUND-A :IND-X` is ONE slot and correlates exactly (the parser attaches the
+    # indicator). What this guards is the UNEXPLAINED count - the case conventions
+    # must never paper over.
     body = (
         "           EXEC SQL\n"
         "               DECLARE C1 CURSOR FOR\n"
         "                   SELECT FUND_A FROM T_MMAA_ACC_ANAL\n"
         "           END-EXEC\n"
         "           EXEC SQL\n"
-        "               FETCH C1 INTO :AA-FUND-A :IND-X\n"
+        "               FETCH C1 INTO :AA-FUND-A, :AA-ACCT-NBR\n"
         "           END-EXEC\n")
     with_conv = _machine(body)
     pinned = _machine(body, conv=None)
@@ -305,10 +311,12 @@ def test_fetch_count_mismatch_is_never_convention_resolved():
     assert "not correlatable" in _spec(with_conv, "FETCH")["columnNote"]
 
 
+# One column, two host variables: a count the statement does not explain, which is
+# what the conventions fallback must refuse. Not an indicator - that is one slot.
 SELECT_MISMATCH = (
     "           EXEC SQL\n"
     "               SELECT FUND_A\n"
-    "               INTO :AA-FUND-A :IND-X\n"
+    "               INTO :AA-FUND-A, :AA-ACCT-NBR\n"
     "               FROM T_MMAA_ACC_ANAL\n"
     "           END-EXEC\n")
 
@@ -320,10 +328,17 @@ def test_select_count_mismatch_is_never_convention_resolved():
     assert _messages(with_conv) == _messages(pinned)
 
 
-def test_bug_doc_reproduction_indicator_refusal_stands():
+def test_bug_doc_case_maps_from_the_source_and_never_by_convention():
     # docs/issues/conventions-indicator-variable-bug.md verbatim: 2 columns,
-    # 2 real host variables + 1 null indicator. The parser refuses (2 vs 3);
-    # the conventions must not overrule it - especially not to WS's table.
+    # 2 real host variables + 1 null indicator. That doc's complaint was that the
+    # conventions overruled the parser's refusal and resolved WS-NAME / WS-BAL to
+    # T_APWS_WKFL_STEP - a table this statement never mentions.
+    #
+    # The refusal was the weaker half of the answer. `:WS-BAL:IND-BAL` is host variable
+    # WS-BAL with a null indicator: 2 columns, 2 slots, and the statement says which
+    # fills which - so it maps, FROM THE SOURCE. The doc's real hazard is what still
+    # must not happen: nothing may be `viaConventions`, and the indicator must appear
+    # in no mapping at all.
     m = _machine(
         "           EXEC SQL\n"
         "               SELECT NAME, BAL\n"
@@ -331,9 +346,13 @@ def test_bug_doc_reproduction_indicator_refusal_stands():
         "               FROM CUSTOMER\n"
         "           END-EXEC\n")
     spec = _spec(m, "SELECT")
-    assert "columns" not in spec
-    assert "not correlatable" in spec["columnNote"]
-    assert any("mapping not recovered" in x for x in _messages(m))
+    assert spec["columns"] == [{"column": "NAME", "hostVar": "WS-NAME"},
+                               {"column": "BAL", "hostVar": "WS-BAL"}]
+    assert not any(c.get("viaConventions") for c in spec["columns"])
+    assert not any("IND-BAL" in str(c) for c in spec["columns"])
+    assert spec["indicatorVars"] == ["IND-BAL"]
+    assert "columnNote" not in spec
+    assert not any("mapping not recovered" in x for x in _messages(m))
 
 
 # ------------------------------------------- SELECT * IS recoverable (§2)

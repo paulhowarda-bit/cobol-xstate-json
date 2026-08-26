@@ -362,9 +362,17 @@ deliberately explicit about the gap (the skill's core principle — don't preten
   environment, imported on first need, missing = loud failure — recover the mapping
   heuristically: entries are marked `viaConventions`, the failure reason stays in
   `columnNote`, and the site is flagged for DCLGEN verification. A **count mismatch
-  is never convention-resolved** (indicator variables / host structures break the
-  positional assumption), and a resolution whose table contradicts the statement or
-  the program's own references is rejected — wrong lineage is worse than none.
+  is never convention-resolved** (the positional assumption is broken, and after
+  host-structure expansion nothing in the statement explains the difference), and a
+  resolution whose table contradicts the statement or the program's own references is
+  rejected — wrong lineage is worse than none.
+- **Host structures are expanded, the way Db2's precompiler expands them.** A
+  group-level host variable (`FETCH c INTO :CUST-REC`) stands for every elementary item
+  under it — `FILLER` and `REDEFINES` excluded, nested groups recursed into — so the
+  event's `fields` and `columns` name the fields Db2 actually reads, not one group name
+  that matches no column. The groups expanded are reported as `expandedStructures`. A
+  null indicator (`:BAL:IND-BAL`) is part of its variable's slot rather than a slot of
+  its own: reported as `indicatorVars`, still assigned by the statement, never a field.
 - **Data semantics are captured but not *evaluated*.** `data` carries the types and
   `semantics` carries the `target := expr` / Boolean-tree logic, but the bare config
   can't embed the decimal evaluator — the `setup({ guards, actions })` stubs must

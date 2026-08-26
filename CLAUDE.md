@@ -70,11 +70,15 @@ cobol-xstate prog.cbl --synonym-map synonyms.json
 # mfdep ships in the runtime environment; it is imported lazily on the FIRST failed
 # correlation that needs it, and needed-but-missing is a loud ImportError, never a
 # silent conventions-less run. Only an UNKNOWN column list (invisible cursor DECLARE,
-# SELECT *) is recovered - a count mismatch (indicator variables / host structures)
-# never is, INTO-clause null indicators (:DATA:IND) are stripped before the lookup
-# even at recoverable sites (docs/issues/conventions-indicator-bug.md), and a table
-# contradicting the statement or the program's references is rejected
-# (docs/issues/conventions-indicator-variable-bug.md). Tests and the gate pin
+# SELECT *) is recovered - a count mismatch never is, INTO-clause null indicators
+# (:DATA:IND) are stripped before the lookup even at recoverable sites
+# (docs/issues/conventions-indicator-bug.md; a backstop for pre-VERSION-4 parse
+# bundles now that the parser attaches indicators), and a table contradicting the
+# statement or the program's references is rejected
+# (docs/issues/conventions-indicator-variable-bug.md). What USED to cause most
+# mismatches no longer does: a group-level host variable is expanded to its elementary
+# items the way the Db2 precompiler expands it, and `:DATA:IND` is one slot
+# (docs/issues/host-structure-expansion.md). Tests and the gate pin
 # conventions=None (tests/conftest.py autouse fixture + tools/byteproof*.py): a
 # determinism seam so output never depends on the day's mfdep.db - which is what keeps
 # the goldens valid on every machine, this mfdep-less one included.

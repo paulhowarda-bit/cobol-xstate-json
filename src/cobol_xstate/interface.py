@@ -285,6 +285,26 @@ def _display_fields(cobol: str, data: dict) -> List[str]:
     return out
 
 
+def _data_targets(spec: Optional[dict]) -> List[str]:
+    """The assignment targets of a SELECT/FETCH that receive COLUMN DATA.
+
+    Every INTO target except the statement's null indicators. Db2 writes an indicator
+    too, so it IS an assignment (statechart._exec_action keeps it, or the variable would
+    look never-written and a program branching on it would read its seed) - but what it
+    receives is null status, not a column's value. Weighed against the select list it
+    makes the counts disagree and refuses a correlation the statement proves; reported
+    among the event's fields it becomes a field the tracer then cannot map to any
+    column. One rule, so those two cannot come to disagree about which is which.
+
+    A spec with no `indicatorVars` (none in the statement, or a parse bundle written
+    before VERSION 4) answers exactly as the plain target list always did.
+    """
+    targets = [a["target"] for a in (spec or {}).get("assignments", [])
+               if isinstance(a, dict) and "target" in a]
+    indicators = {str(v).upper() for v in ((spec or {}).get("indicatorVars") or ())}
+    return [t for t in targets if str(t).upper() not in indicators]
+
+
 def _sql_host_vars(text: str) -> List[str]:
     out = []
     for base, qualified in _SQL_HOSTVAR.findall(text or ""):
@@ -402,8 +422,10 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
                       f"dynamically), so its columns are unknown"), "cursor-declare-missing"
     if len(cols) != len(into_fields):
         return None, (f"cursor {cursor} selects {len(cols)} column(s) but this FETCH "
-                      f"has {len(into_fields)} host variable(s): not correlatable "
-                      f"(indicator variables, or a host structure) - verify by hand"),             "count-mismatch"
+                      f"has {len(into_fields)} host variable(s), host structures already "
+                      f"expanded and null indicators already attached: not correlatable "
+                      f"- a group whose data division entry did not arrive cannot be "
+                      f"expanded - verify by hand"), "count-mismatch"
     # A derived slot gets an explicit `derived` entry, same rule as parser._correlate:
     # "an aggregate fills this by construction" must stay distinguishable from "the
     # recovery failed here", or a consumer cannot skip one without hiding the other.
@@ -438,8 +460,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         verb = toks[1] if len(toks) > 1 and toks[0] in ("SQL", "CICS", "DLI") else (
             toks[0] if toks else "")
     verb = verb.upper()
-    into_fields = [a["target"] for a in (spec or {}).get("assignments", [])
-                   if isinstance(a, dict) and "target" in a]
+    into_fields = _data_targets(spec)
     # Masked for the keyword scans below: an SQL string constant can contain FROM
     # (`SELECT 'FROM AUDIT', COL1 ...` named the phantom Db2 table AUDIT - which the
     # artifact manifest then listed and the fetch stage requested from the estate),
@@ -479,7 +500,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             if endpoint is None:
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
-            params = [h for h in host_vars if h not in into_fields]
+            params = _dedup([h for h in host_vars if h not in into_fields])
             return [_note(_hit("get", _DB2, endpoint, verb, into_fields, params,
                                _qualify(columns, endpoint)), note, unresolved)]
         if verb == "INSERT":
@@ -640,8 +661,19 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     verb = up.split()[0] if up else ""
 
     if verb == "EXEC" or name.startswith(("exec_sql", "exec_cics", "exec_dli")):
-        return _classify_exec(name, up, spec, dv, cursors, cursor_cols,
+        hits = _classify_exec(name, up, spec, dv, cursors, cursor_cols,
                               cursor_derivations)
+        # What the Db2 precompiler rewrote on the way, stamped on every hit of the
+        # statement rather than at each of the SQL branch's return sites: both are facts
+        # about the STATEMENT, not about one crossing it makes. `fields` holds elementary
+        # items where the source wrote a group name, and the null indicators are in the
+        # source but in no field list - saying so here is what keeps the expansion from
+        # reading as a discrepancy between the event and the COBOL beside it.
+        for key in ("expandedStructures", "indicatorVars"):
+            if (spec or {}).get(key):
+                for h in hits:
+                    h[key] = spec[key]
+        return hits
 
     io = spec if (spec or {}).get("kind") == "io" else {}
 
@@ -1004,6 +1036,9 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             entry["columnNote"] = hit["columnNote"]
         if hit.get("columnsUnresolved"):
             entry["columnsUnresolved"] = hit["columnsUnresolved"]
+        for k in ("expandedStructures", "indicatorVars"):
+            if hit.get(k):
+                entry[k] = hit[k]
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
         # one came through, `candidates` the literals an ambiguous one may be.

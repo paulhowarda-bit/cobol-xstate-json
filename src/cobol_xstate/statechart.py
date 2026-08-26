@@ -409,6 +409,16 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         # What each DERIVED select-list slot is made of. Only carried when some slot IS
         # derived - an all-columns select list has nothing to say here.
         spec["selectDerivations"] = st.select_derivations
+    if st.expanded_structures:
+        # The GROUP names the source wrote where the lists above now carry elementary
+        # items, because that is what the Db2 precompiler sends. Carried so a reader can
+        # tell a field the program named from one this expansion supplied - the source
+        # spelling is otherwise only recoverable from the raw statement text.
+        spec["expandedStructures"] = st.expanded_structures
+    if st.indicator_vars:
+        # Null indicators: in the source, not among the host variables, and neither an
+        # omission nor a field. A nullable column is a fact about the interface.
+        spec["indicatorVars"] = st.indicator_vars
     return spec
 
 
@@ -672,8 +682,25 @@ class _ParaCompiler:
             # (external-sourced) assignment to each, not an opaque effect.
             spec = {
                 "verb": st.verb, "kind": "input",
+                # The INTO targets, and then the null indicators. Db2 writes an
+                # indicator too - it is how the program learns the column was NULL, and
+                # programs branch on exactly that - so leaving it unassigned would lose
+                # a write the source proves and make the variable look never-written.
+                # It is marked apart because what it receives is null STATUS, not the
+                # column's value: `interface._data_targets` is what keeps it out of the
+                # column correlation and out of the event's fields.
                 "assignments": [{"target": v, "expr": "<external: SQL row>"}
-                                for v in st.into_vars],
+                                for v in st.into_vars]
+                + [{"target": v, "expr": "<external: SQL null indicator>"}
+                   for v in st.indicator_vars],
+                # Every host variable the statement names, so the interface reads the
+                # PARSER's list here as it already does for the DML verbs, instead of
+                # falling back to its regex over the raw text. The two disagree now that
+                # the parser expands host structures: the raw text still says
+                # `:BSTI-TRNF-INIT`, which is in no assignment target, so the group name
+                # arrived as a phantom PARAMETER of the very event whose fields it had
+                # just been expanded into.
+                "hostVars": st.host_vars,
                 "raw": f"EXEC {st.lang} {st.text} END-EXEC",
             }
             self.ctx.action_sem[name] = _with_columns(spec, st)
@@ -1431,6 +1458,13 @@ def _indicator_vars(raw: str) -> FrozenSet[str]:
     never column data, so it must never receive a column identity mapping - a real
     mfdep index would happily resolve ``IND-BAL`` to column ``BAL``. Masked before
     scanning, like every other keyword scan over raw statement text.
+
+    A BACKSTOP now rather than the first line of defence: the parser attaches an
+    indicator to the host variable it qualifies, so a statement parsed by this version
+    never offers one here. A parse bundle written before it (``parse_bundle`` VERSION
+    < 4, which is still readable by design) does, and this is what keeps the guarantee
+    for it - so it is not dead code, and deleting it would silently reintroduce the
+    bug for exactly the inputs nobody re-parses.
     """
     m = _INTO_CLAUSE.search(mask_literals(raw.upper()) if raw else "")
     if not m:
@@ -1493,7 +1527,7 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
     yield each cursor's TABLE, which is the conventions fallback's context (a prefix
     validated against the endpoint table beats one inferred alone).
     """
-    from .interface import _SQL_FROM, _fetch_columns
+    from .interface import _SQL_FROM, _data_targets, _fetch_columns
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
     derivs_by_cursor: Dict[str, List[Optional[dict]]] = {}
     table_by_cursor: Dict[str, str] = {}
@@ -1518,8 +1552,7 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
         spec = ctx.action_sem.get(name)
         if not spec or spec.get("columns") or spec.get("columnNote"):
             continue
-        into = [a["target"] for a in spec.get("assignments", [])
-                if isinstance(a, dict) and "target" in a]
+        into = _data_targets(spec)
         if not into:
             continue
         columns, note, unresolved = _fetch_columns(
@@ -1529,13 +1562,18 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
         if note:
             # The conventions fallback is for a column list that is UNKNOWN (no
             # DECLARE visible). A visible DECLARE that still failed is a COUNT
-            # MISMATCH - indicator variables or a host structure - where the 1:1
-            # column<->variable assumption itself is broken, and per-field prefix
-            # resolution would inject exactly the wrong lineage the refusal exists
-            # to prevent (docs/issues/conventions-indicator-variable-bug.md). And
-            # even at a recoverable site, the INTO clause's null indicators are
-            # stripped first - the count gate above needed the full list, but an
-            # indicator must never reach the column lookup at all.
+            # MISMATCH - the 1:1 column<->variable assumption itself is broken, and
+            # per-field prefix resolution would inject exactly the wrong lineage the
+            # refusal exists to prevent
+            # (docs/issues/conventions-indicator-variable-bug.md). And even at a
+            # recoverable site, the INTO clause's null indicators are stripped first:
+            # an indicator must never reach the column lookup at all (a real mfdep
+            # index resolves IND-BAL to column BAL).
+            #
+            # The parser now attaches an indicator to the variable it qualifies, so
+            # `into` no longer holds one to strip - but a parse bundle written before
+            # that (parse_bundle VERSION < 4, which is still readable) does, and this
+            # is what keeps the guarantee for it.
             declare_visible = spec.get("cursor") in cols_by_cursor
             data_into = [v for v in into
                          if v not in _indicator_vars(spec.get("raw") or "")]
@@ -1575,14 +1613,13 @@ def _correlate_selects(ctx: "_BuildCtx",
     table their generic prefixes happen to name
     (docs/issues/conventions-indicator-variable-bug.md).
     """
-    from .interface import _SQL_FROM
+    from .interface import _SQL_FROM, _data_targets
     for name, para, line in ctx.select_sites:
         spec = ctx.action_sem.get(name)
         if not spec or spec.get("columns"):
             continue
         note = spec.get("columnNote") or ""
-        into = [a["target"] for a in spec.get("assignments", [])
-                if isinstance(a, dict) and "target" in a]
+        into = _data_targets(spec)
         m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
         table = _base_table(m.group(1).upper()) if m else ""
         count_mismatch = bool(spec.get("selectList"))

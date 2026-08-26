@@ -1229,12 +1229,28 @@ traceable field. The qualifier itself is dropped: the data dictionary already co
 same-named fields first-wins, so keeping it would disambiguate nothing that is not
 already collapsed.
 
-It **refuses** rather than guessing whenever the counts do not line up — indicator
-variables (`:WS-BAL:IND-BAL` is two host variables for one column) and host structures
-(`INTO :CUST-REC` is one for N) would otherwise zip into confidently wrong lineage. Every
-refusal emits a flag naming the reason; wrong lineage is worse than none. Resolving a
-qualified *name* does not change this: `:GFAC . AC-BAL-A :WS-IND-BAL` is still an
-indicator slot and is still refused.
+A **host structure** — a group-level host variable — is expanded to its elementary
+items first, because that is what the Db2 precompiler does to the statement before it
+reaches the database. `INTO :BSTI-TRNF-INIT` names one variable in the source and fifty
+targets to Db2; recovered the source's way it weighs 1 against the cursor's 50 columns,
+refuses, and leaves fifty fields mapped to nothing. The expansion is Db2's own:
+elementary items in declaration order, `FILLER` and `REDEFINES` (with their
+subordinates) excluded, nested groups recursed into, an `OCCURS` item once. The group
+names expanded are reported on the event as `expandedStructures`, so a reader can tell a
+field the program named from one the expansion supplied.
+
+A **null indicator** is part of the value it qualifies, not a value of its own:
+`INTO :A, :B:IND` (and `INTO :A INDICATOR :IND`) names TWO targets. It is reported apart
+as `indicatorVars`, never among `fields`, `params` or `columns` — it carries null status,
+never column data — but it IS still assigned by the statement, because Db2 writes it and
+programs branch on exactly that. The same holds in a `VALUES` / `SET` slot:
+`SET BAL_A = :GFAC . AC-BAL-A :WS-IND-BAL` writes `BAL_A` from `AC-BAL-A`, qualifier and
+indicator both.
+
+It **refuses** rather than guessing whenever the counts still do not line up after both —
+a group whose data division entry never arrived cannot be expanded, and a slot that is not
+one host variable (`:A + :B`) fills no single column. Every refusal emits a flag naming the
+reason; wrong lineage is worse than none.
 
 **Naming-convention fallback (mfdep)** — always on: `mfdep` ships in the runtime
 environment, is imported lazily on the first failed correlation that needs it, and a
@@ -1245,14 +1261,16 @@ DCLGEN naming conventions get one more shot: every DB2 table's DCLGEN declares i
 host variables under a consistent prefix (`NAMES(AA)` → `AA-FUND-A` fills `FUND_A` on
 `T_MMAA_ACC_ANAL`, COPY REPLACING variants included), and mfdep indexes them. A
 **count mismatch is never convention-resolved**: a visible select list that disagrees
-with the INTO count means indicator variables or a host structure — the 1:1
-column↔variable assumption itself is broken, and per-field prefix resolution would
-inject exactly the wrong lineage the refusal exists to prevent
-(`docs/issues/conventions-indicator-variable-bug.md`). Even at a recoverable site,
-the INTO clause's **null indicators are stripped before the lookup**: `INTO
-:WS-BAL:IND-BAL` names a second colon-variable in the comma group that carries
-null-status metadata, never column data, so it must never receive a column identity
-(`docs/issues/conventions-indicator-bug.md`). The lookup then runs per remaining host
+with the INTO count means the 1:1 column↔variable assumption itself is broken — after
+host-structure expansion and indicator attachment, nothing in the statement explains the
+difference — and per-field prefix resolution would inject exactly the wrong lineage the
+refusal exists to prevent (`docs/issues/conventions-indicator-variable-bug.md`). Even at
+a recoverable site, the INTO clause's **null indicators are stripped before the lookup**:
+they carry null-status metadata, never column data, so they must never receive a column
+identity (`docs/issues/conventions-indicator-bug.md`). That strip is now a *backstop* —
+the parser attaches an indicator to the variable it qualifies, so a statement parsed by
+this version never offers one — kept for parse bundles written before
+`parse_bundle` VERSION 4, which are still readable. The lookup then runs per remaining host
 variable (`mfdep.conventions.resolve_field_variants`) — classifying anything else
 mfdep declines is mfdep's job, its verdict taken verbatim — and the
 table evidence must **agree**, not merely exist: the statement's own table (FROM, or
@@ -1389,7 +1407,7 @@ unrecovered spot is visible.
 | `dynamic CALL … ` | the target could not be proven constant. The reason spells out WHY: assigned from variables (genuinely runtime), several candidate literals, 88-level `VALUE`s present but no `SET … TO TRUE` visible (candidates listed), declared-but-never-assigned, or **not declared in the visible source** — the latter names the missing copybook that likely holds the `VALUE`; supply it and the target resolves. Constant propagation covers `VALUE` clauses, `MOVE 'lit'`, and `SET <88-condition> TO TRUE` |
 | `dynamic CICS <verb> <OPT>(…)` | a `PROGRAM`/`TRANSID`/`QUEUE`/`FILE`/`MAP`/`MAPSET` operand is a data name — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise (an `EIB*` operand is CICS-supplied, always runtime) |
 | `dynamic SQL: EXEC SQL PREPARE/EXECUTE` | the statement text is assembled at run time — operation and tables not statically knowable |
-| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree (indicator variable / host structure — verify by hand); `SELECT *` (the list is in the **Db2 catalog**, not the source); an `INSERT` with no column list whose table has **no visible `DECLARE TABLE`** — include its DCLGEN, or pass `--synonym-map` if it is written under a synonym, and the mapping resolves; a select-list item or VALUES slot that names no column (a literal or expression — the receiver carries an explicit `derived` entry so consumers can skip it knowingly); or, for a `FETCH`, that no `DECLARE` for its cursor is visible **anywhere in the expanded source** (data division and copybooks are scanned) — usually a copybook that did not arrive, so supply it, or a cursor PREPAREd dynamically |
+| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree even after host-structure expansion and indicator attachment — a group whose data division entry did not arrive, or a slot that is not one host variable (verify by hand); `SELECT *` (the list is in the **Db2 catalog**, not the source); an `INSERT` with no column list whose table has **no visible `DECLARE TABLE`** — include its DCLGEN, or pass `--synonym-map` if it is written under a synonym, and the mapping resolves; a select-list item or VALUES slot that names no column (a literal or expression — the receiver carries an explicit `derived` entry so consumers can skip it knowingly); or, for a `FETCH`, that no `DECLARE` for its cursor is visible **anywhere in the expanded source** (data division and copybooks are scanned) — usually a copybook that did not arrive, so supply it, or a cursor PREPAREd dynamically |
 | `mapping recovered by mfdep NAMING CONVENTION` | the columns were recovered from the estate's DCLGEN naming conventions, **not** from the statement or a DECLARE — a heuristic, marked `viaConventions` per entry. The flag says how many of the host variables resolved and why the real correlation failed; verify against the table's DCLGEN |
 | `mfdep conventions lookup failed mid-run` | mfdep errored (reason quoted); resolution stopped and the output is the conventions-less model — fix mfdep and re-run |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
@@ -1601,7 +1619,8 @@ most are pinned by a test.
 | `txnflat.cbl` | flat transaction flow (reactive-target subject) |
 | `calltwice.cbl` | **one program CALLed twice with different operands — still one endpoint** |
 | `sqlcols.cbl` / `sqlgaps.cbl` | **column↔host-variable correlation** — the proven shapes, and the ones that must flag (indicator vars, `SELECT *`, derived slots, rowset FETCH, missing DECLARE) |
-| `sqlqual.cbl` | **qualified host variables** (`:GFAC . AC-ACC-N`) in VALUES, SET, INTO and WHERE — and the indicator slot that is still refused once the name resolves |
+| `sqlqual.cbl` | **qualified host variables** (`:GFAC . AC-ACC-N`) in VALUES, SET, INTO and WHERE — including the slot that carries a null indicator too |
+| `sqlhost.cbl` | **host structures** — a group in `INTO` and in `VALUES` (with and without a column list), a nested group, `FILLER`/`REDEFINES` excluded, a null indicator beside a group, and the group whose copybook never arrived that is still refused |
 | `sqlderiv.cbl` | **what a derived slot was made of** — `SUM(COL)`, nested `VALUE(SUM(COL),0)`, a literal, `COUNT(*)`, an expression over two columns, the `CASE` that refuses, and a `FETCH` taking its derivation from the cursor's `DECLARE` |
 | `sqlwscsr.cbl` | **cursor DECLAREd in WORKING-STORAGE** — the whole-stream scan correlating its FETCH and naming the real table endpoint |
 | `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` |

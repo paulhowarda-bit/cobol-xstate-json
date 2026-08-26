@@ -181,19 +181,49 @@ def test_derived_expression_occupies_a_slot_but_names_no_column():
                                          (None, "WS-TOT", True)]
 
 
-def test_indicator_variable_refuses_to_correlate():
-    """THE hazard: `INTO :WS-NAME, :WS-BAL:IND-BAL` is 2 columns and 3 host variables.
-    A naive positional zip maps BAL -> IND-BAL and states it as fact. Wrong lineage is
-    worse than none, so it must emit NO mapping and say why."""
-    from cobol_xstate.parser import parse_program
-    from cobol_xstate.statechart import build_machine
-    m = build_machine(parse_program((EXAMPLES / "sqlcols.cbl").read_text()))
-    msgs = " ".join(f["message"] for f in m.flags)
-    assert "2 column(s) vs 3 host variable(s)" in msgs
-    # ...and no event claims a mapping for that SELECT
-    for e in m.bundle()["interface"]["events"]:
+def test_an_indicator_is_one_slot_with_its_variable_not_a_second_one():
+    """`INTO :WS-NAME, :WS-BAL:IND-BAL` is 2 columns and TWO slots, not three.
+
+    THE hazard is unchanged - a positional zip slipping by one would map BAL ->
+    IND-BAL and state it as fact - but reading the indicator as a slot of its own was
+    the wrong way to avoid it: it made the counts disagree and refused a correlation
+    the statement proves. Db2 spells `:DATA:IND` as one value with its null status, so
+    the pairing is exact, and IND-BAL is not a field at all - it is reported apart, on
+    `indicatorVars`.
+    """
+    iface = _iface("sqlcols.cbl")
+    ind = next(e for e in iface["events"] if e["state"] == "5000-INDICATOR")
+    assert [(c["column"], c["hostVar"]) for c in ind["columns"]] == [
+        ("NAME", "WS-NAME"), ("BAL", "WS-BAL")]
+    assert ind["indicatorVars"] == ["IND-BAL"]
+    # An indicator carries null STATUS, never column data: it is no field, no
+    # parameter, and above all no column's source anywhere in the program.
+    for e in iface["events"]:
+        assert "IND-BAL" not in e["fields"]
+        assert "IND-BAL" not in (e.get("params") or [])
         for c in e.get("columns", []):
             assert c["hostVar"] != "IND-BAL"
+
+
+def test_an_indicator_is_still_written_by_the_statement():
+    """Not a field, but not unwritten either.
+
+    Db2 sets the indicator - it is how the program learns the column was NULL, and
+    programs branch on exactly that. Dropping it from the assignments along with the
+    field lists would leave a variable the emitted machine never writes and the lineage
+    shows no origin for: a lost write, which is a worse answer than the one this fix
+    replaced.
+    """
+    from cobol_xstate.lineage import build_lineage
+    m = build_machine(parse_program((EXAMPLES / "sqlcols.cbl").read_text()),
+                      source_name="sqlcols.cbl")
+    spec = next(s for s in m.semantics["actions"].values()
+                if isinstance(s, dict) and s.get("indicatorVars") == ["IND-BAL"])
+    assert {"target": "IND-BAL", "expr": "<external: SQL null indicator>"} \
+        in spec["assignments"]
+    # ...and it is still no column's source and no boundary field.
+    assert all(c["hostVar"] != "IND-BAL" for c in spec["columns"])
+    assert not any(r["field"] == "IND-BAL" for r in build_lineage(m)["rows"])
 
 
 def test_select_star_is_flagged_not_guessed():
@@ -493,17 +523,20 @@ def test_qualified_host_var_maps_in_a_set_clause_and_an_into_clause():
     assert sel["params"] == ["AC-ACC-N"]
 
 
-def test_a_qualified_value_with_an_indicator_is_still_refused():
-    """Resolving the NAME does not make the slot 1:1.
+def test_a_qualified_value_with_an_indicator_maps_the_column_it_writes():
+    """A qualified name AND a null indicator in one slot, and the mapping survives both.
 
-    `:GFAC . AC-BAL-A :WS-IND-BAL` hangs a null indicator off the value, so it fills no
-    single column - the same refusal an unqualified `:WS-BAL:IND-BAL` already gets.
+    `SET BAL_A = :GFAC . AC-BAL-A :WS-IND-BAL` writes column BAL_A from AC-BAL-A
+    exactly as the unqualified, unindicated form does - the qualifier says where the
+    field lives and the indicator says whether the value is null. Neither is a second
+    value, so refusing the slot threw away a mapping the source states outright.
     """
     iface = _iface("sqlqual.cbl")
-    ind = next(e for e in iface["events"]
-               if e["verb"] == "UPDATE" and not e.get("columns"))
-    assert "AC-BAL-A" in ind["fields"]
+    ind = next(e for e in iface["events"] if e["state"] == "4000-INDICATOR")
+    assert [(c["column"], c["hostVar"]) for c in ind["columns"]] == [("BAL_A", "AC-BAL-A")]
+    assert ind["fields"] == ["AC-BAL-A"]
     assert ind["params"] == ["AC-ACC-N"]
+    assert ind["indicatorVars"] == ["WS-IND-BAL"]
 
 
 def test_qualified_lineage_names_fields_the_data_dictionary_holds():
@@ -634,3 +667,103 @@ def test_a_residual_note_is_not_an_unresolved_event():
     for e in iface["events"]:
         if e.get("columns") and any(c.get("column") for c in e["columns"]):
             assert "columnsUnresolved" not in e
+
+
+# --------------------------------------------------------------------------- #
+# sqlhost: Db2 host structures and null indicators
+# (docs/issues/host-structure-expansion.md)
+# --------------------------------------------------------------------------- #
+
+def test_a_group_host_variable_becomes_one_field_per_elementary_item():
+    """`FETCH c INTO :BSTI-TRNF-INIT` reads FOUR fields, which is what Db2 does.
+
+    The precompiler expands the group before the statement reaches the database, so a
+    recovery that keeps the source spelling weighs one host variable against the
+    cursor's four columns, refuses, and leaves four fields with nothing to map to.
+    FILLER is not a host variable and a REDEFINES shares its original's storage, so
+    neither appears - Db2 excludes them too.
+    """
+    iface = _iface("sqlhost.cbl")
+    fetch = next(e for e in iface["events"] if e["state"] == "1000-FETCH-GROUP")
+    assert fetch["fields"] == ["TRNF-NBR", "SBRX-OFFC-C", "SBRX-BASE-C", "BRCH-CORR-I"]
+    assert [(c["column"], c["hostVar"]) for c in fetch["columns"]] == [
+        ("TRNF_NBR", "TRNF-NBR"), ("SBRX_OFFC_C", "SBRX-OFFC-C"),
+        ("SBRX_BASE_C", "SBRX-BASE-C"), ("BRCH_CORR_I", "BRCH-CORR-I")]
+    assert "columnsUnresolved" not in fetch
+    # The group name is NOT a leftover parameter of the event whose fields it became.
+    assert "BSTI-TRNF-INIT" not in (fetch.get("params") or [])
+
+
+def test_a_group_values_slot_fills_every_column_it_expands_to():
+    """One slot in the source, four columns to Db2 - with and without a column list.
+
+    The arity has to be compared AFTER expansion or it is a comparison between two
+    counts that were never meant to agree: five columns against the two slots written.
+    """
+    iface = _iface("sqlhost.cbl")
+    expected = [("TRNF_NBR", "TRNF-NBR"), ("SBRX_OFFC_C", "SBRX-OFFC-C"),
+                ("SBRX_BASE_C", "SBRX-BASE-C"), ("BRCH_CORR_I", "BRCH-CORR-I"),
+                ("MULTI_CO_N", "WS-MULTI-CO-N")]
+    for state in ("2000-INSERT-COLS", "3000-INSERT-NO-COLS"):
+        ins = next(e for e in iface["events"] if e["state"] == state)
+        assert [(c["column"], c["hostVar"]) for c in ins["columns"]] == expected, state
+        # Every mapped host variable is a FIELD of the event: a column mapping whose
+        # host variable is in no field list is exactly an unmapped field downstream.
+        assert [c["hostVar"] for c in ins["columns"]] == ins["fields"], state
+
+
+def test_a_group_a_scalar_and_an_indicator_correlate_together():
+    iface = _iface("sqlhost.cbl")
+    sel = next(e for e in iface["events"] if e["state"] == "4000-MIXED")
+    assert sel["fields"] == ["TRNF-NBR", "SBRX-OFFC-C", "SBRX-BASE-C",
+                             "BRCH-CORR-I", "WS-MULTI-CO-N"]
+    assert sel["indicatorVars"] == ["WS-NULL-IND-01"]
+    assert "WS-NULL-IND-01" not in sel["fields"]
+    assert "WS-NULL-IND-01" not in (sel.get("params") or [])
+
+
+def test_a_nested_group_expands_on_its_own():
+    iface = _iface("sqlhost.cbl")
+    sel = next(e for e in iface["events"] if e["state"] == "6000-NESTED")
+    assert sel["fields"] == ["SBRX-OFFC-C", "SBRX-BASE-C"]
+    assert sel["expandedStructures"] == ["SBRX-GRP"]
+
+
+def test_a_group_the_data_division_does_not_hold_is_still_refused():
+    """The refusal has to survive the fix, or the fix is a guess.
+
+    A group whose copybook never arrived cannot be expanded. Keeping the name as
+    written leaves the counts disagreeing - which is the honest answer, and the event
+    says so with the token a consumer skips on.
+    """
+    iface = _iface("sqlhost.cbl")
+    absent = next(e for e in iface["events"] if e["state"] == "5000-ABSENT")
+    assert absent["fields"] == ["COPY-MISSING-REC"]
+    assert absent["columnsUnresolved"] == "count-mismatch"
+    assert not absent.get("columns")
+
+
+def test_the_expansion_says_so_on_the_event():
+    """What the source wrote, beside what Db2 sends.
+
+    Without it, `fields` names four items the statement never mentions and nothing
+    connects them back to the one name in the COBOL beside them.
+    """
+    iface = _iface("sqlhost.cbl")
+    for state in ("1000-FETCH-GROUP", "2000-INSERT-COLS", "3000-INSERT-NO-COLS",
+                  "4000-MIXED"):
+        e = next(x for x in iface["events"] if x["state"] == state)
+        assert e["expandedStructures"] == ["BSTI-TRNF-INIT"], state
+
+
+def test_no_group_name_reaches_the_lineage():
+    """A lineage row for the GROUP is untraceable: the reader cannot tell which of its
+    fields crossed, and no column matches it either."""
+    from cobol_xstate.lineage import build_lineage
+    m = build_machine(parse_program((EXAMPLES / "sqlhost.cbl").read_text()),
+                      source_name="sqlhost.cbl")
+    fields = {r["field"] for r in build_lineage(m)["rows"]}
+    assert "BSTI-TRNF-INIT" not in fields
+    assert "SBRX-GRP" not in fields
+    assert "WS-NULL-IND-01" not in fields
+    assert {"TRNF-NBR", "SBRX-OFFC-C", "SBRX-BASE-C", "BRCH-CORR-I"} <= fields
