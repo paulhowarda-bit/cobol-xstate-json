@@ -403,6 +403,12 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         spec["table"] = st.table                 # a column-list-less INSERT's target...
     if st.values_list:
         spec["valuesList"] = st.values_list      # ...and its ordered VALUES slots
+    if st.where_vars:
+        spec["whereVars"] = st.where_vars        # the row SELECTOR, not data written
+    if st.select_derivations and any(st.select_derivations):
+        # What each DERIVED select-list slot is made of. Only carried when some slot IS
+        # derived - an all-columns select list has nothing to say here.
+        spec["selectDerivations"] = st.select_derivations
     return spec
 
 
@@ -1489,17 +1495,22 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
     """
     from .interface import _SQL_FROM, _fetch_columns
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
+    derivs_by_cursor: Dict[str, List[Optional[dict]]] = {}
     table_by_cursor: Dict[str, str] = {}
     for spec in ctx.action_sem.values():
         if (spec.get("verb") == "DECLARE" and spec.get("cursor")
                 and spec.get("selectList")):
             cols_by_cursor.setdefault(spec["cursor"], spec["selectList"])
+            if spec.get("selectDerivations"):
+                derivs_by_cursor.setdefault(spec["cursor"], spec["selectDerivations"])
             m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
             if m:
                 table_by_cursor.setdefault(spec["cursor"], m.group(1).upper())
     for decl in program.sql_cursors:
         if decl.get("cursor") and decl.get("selectList"):
             cols_by_cursor.setdefault(decl["cursor"], decl["selectList"])
+            if decl.get("selectDerivations"):
+                derivs_by_cursor.setdefault(decl["cursor"], decl["selectDerivations"])
         if decl.get("cursor") and decl.get("table"):
             table_by_cursor.setdefault(decl["cursor"],
                                        _base_table(str(decl["table"]).upper()))
@@ -1511,7 +1522,8 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
                 if isinstance(a, dict) and "target" in a]
         if not into:
             continue
-        columns, note = _fetch_columns(spec.get("cursor"), into, cols_by_cursor)
+        columns, note, unresolved = _fetch_columns(
+            spec.get("cursor"), into, cols_by_cursor, derivs_by_cursor)
         if columns:
             spec["columns"] = columns
         if note:
@@ -1533,6 +1545,10 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
                     program_tables, note):
                 continue
             spec["columnNote"] = note
+            # The same answer as a token, so a consumer can skip the whole EVENT
+            # instead of reporting each of its fields as separately unmapped.
+            if unresolved:
+                spec["columnsUnresolved"] = unresolved
             ctx.flag(para, line,
                      f"EXEC SQL FETCH: column<->host-variable mapping not recovered "
                      f"({note}); cross-program state identity for these fields is "
@@ -1585,7 +1601,8 @@ def _correlate_selects(ctx: "_BuildCtx",
 
 
 def _correlate_inserts(ctx: "_BuildCtx", program: Program,
-                       synonyms: Optional[Dict[str, str]] = None) -> None:
+                       synonyms: Optional[Dict[str, str]] = None,
+                       program_tables: FrozenSet[str] = frozenset()) -> None:
     """Zip every column-list-less INSERT's VALUES slots against its table's declared
     column order, once the whole program is compiled.
 
@@ -1633,8 +1650,29 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
             note = (f"{table}: {len(entry['columns'])} declared column(s) vs "
                     f"{len(values)} VALUES item(s): not correlatable (a host "
                     f"structure expanding to several columns) - verify by hand")
+        if note and entry is None:
+            # Same failure-class rule the FETCH and SELECT passes enforce: only an
+            # UNKNOWN column list is recoverable by convention. `entry is None` means
+            # no DECLARE TABLE is visible at all - nothing contradicts a naming
+            # match. The `elif` branch above is a COUNT MISMATCH, where the declared
+            # order IS known and disagrees with the VALUES arity (a host structure
+            # expanding to several columns), so the 1:1 assumption is already broken
+            # and per-field resolution would inject exactly the wrong lineage the
+            # refusal exists to prevent
+            # (docs/issues/conventions-indicator-variable-bug.md).
+            #
+            # Only the slots that NAME a host variable are offered: a literal or
+            # expression slot is None here, and an indicator-qualified one is too
+            # (parser._host_var_of takes a whole slot or nothing), so neither can
+            # reach the lookup.
+            named = [v for v in values if v]
+            if named and _conventions_recover(ctx, spec, "INSERT", para, line,
+                                              named, table, program_tables, note):
+                continue
         if note:
             spec["columnNote"] = note
+            spec["columnsUnresolved"] = ("insert-no-column-list" if entry is None
+                                         else "count-mismatch")
             ctx.flag(para, line,
                      f"EXEC SQL INSERT: column<->host-variable mapping not recovered "
                      f"({note}); cross-program state identity for these fields is "
@@ -1800,7 +1838,7 @@ def build_machine(program: Program, source_name: str = "<source>",
               else frozenset())
     _correlate_fetches(ctx, program, tables)
     _correlate_selects(ctx, tables)
-    _correlate_inserts(ctx, program, synonyms)
+    _correlate_inserts(ctx, program, synonyms, tables)
     # A conventions source that ERRORED is not the same as one that had no answer:
     # whatever it did not reach stays unresolved for a fixable reason, so say so.
     reason = getattr(ctx.conventions, "disabled_reason", None)

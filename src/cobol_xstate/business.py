@@ -135,6 +135,7 @@ class _BusinessView:
         # host-var <-> Db2 column correlation for a cursor FETCH; without it a FETCH's
         # boundary action carried no columns (only the interface build passed this).
         self._cursor_cols = _iface._cursor_columns(machine.semantics, machine.provenance)
+        self._cursor_derivs = _iface._cursor_derivations(machine.semantics)
         self.ordered: List[str] = machine.paragraph_order
         self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
@@ -405,7 +406,8 @@ class _BusinessView:
             prov = self.provenance.get(aname, {})
             hits = _iface._classify(aname, prov.get("cobol", ""),
                                     self.actions.get(aname), self._dv,
-                                    self.files, self._cursors, self._cursor_cols)
+                                    self.files, self._cursors, self._cursor_cols,
+                                    self._cursor_derivs)
             if hits:
                 for hit in hits:
                     # The FIELDS crossing here are the point of a boundary state: an

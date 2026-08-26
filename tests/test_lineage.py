@@ -524,3 +524,29 @@ def test_inspect_tallying_for_a_literal_spelling_replacing_is_still_a_read():
     recv, src = _dep_only_flow(
         "INSPECT", "INSPECT WS-X REPLACING ALL ' ' BY '0'", known)
     assert recv == ["WS-X"]
+
+
+# --------------------------------------------------------------------------- #
+# a WHERE-clause filter is not a field flowing to Db2
+# (docs/issues/unmapped-fields-v52.md, Issue 2)
+# --------------------------------------------------------------------------- #
+
+def test_a_dml_row_selector_emits_no_lineage_row():
+    """The point of the fields/params split, at the view that consumes it.
+
+    `UPDATE ACCOUNT SET BALANCE = :WS-BAL WHERE ID = :WS-ID` writes BALANCE from
+    :WS-BAL. :WS-ID chooses the row. A lineage row for :WS-ID claims a field crossed to
+    a column, so the reader goes looking for the column and finds none - which is the
+    "unmapped field" the v52 trace reported thousands of. Reported as a parameter it is
+    still ON the event, just not claimed as a write.
+    """
+    d = _lin("sqldml.cbl")
+    written = {(r["verb"], r["field"]) for r in d["rows"]
+               if r.get("event") == "CREATE.DB2.ACCOUNT" and r["direction"] == "output"}
+    assert written == {
+        ("UPDATE", "WS-BAL"),                                  # SET BALANCE = :WS-BAL
+        ("INSERT", "WS-ID"), ("INSERT", "WS-NAME"), ("INSERT", "WS-BAL"),
+    }
+    # ("UPDATE", "WS-ID") and ("DELETE", "WS-ID") were both here, and both were the
+    # WHERE clause's `ID = :WS-ID`. The DELETE writes nothing at all, so it now
+    # contributes no output row whatsoever.
