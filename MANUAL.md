@@ -1178,9 +1178,10 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 |---|---|
 | `event` | `GET.<TYPE>.<ENDPOINT>` / `CREATE.<TYPE>.<ENDPOINT>` |
 | `fields` | **the data crossing in the event's direction** |
-| `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) |
+| `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) — on **every** Db2 verb, not just `SELECT`: an `UPDATE`'s `WHERE` variable picks the row rather than writing a column, and a `DELETE` writes nothing at all, so all of its host variables are parameters |
 | `columns` | for Db2 events, **which column fills which host variable** — see below |
 | `columnNote` | why `columns` is absent or partial — distinguishes "nothing to map here" (a literal slot, `SELECT *`, a missing DECLARE) from a recovery failure, which an absent key alone cannot |
+| `columnsUnresolved` | the same answer as a **stable token** to branch on, present only on a real recovery failure: `cursor-unidentified`, `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`. A consumer skips the whole event on this instead of reporting each of its fields as separately unmapped — and a *residual* note (a derived slot, a literal-written column) carries no token, because those events did correlate |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |
 
@@ -1219,10 +1220,21 @@ synonym→base join lives in the catalog, not the source. Supply it as input
 `table` stamped as the **base** name, the one the DDL declares and cross-program
 identity joins on. Without the map, the site flags and names this remedy.
 
+A **qualified** host variable (`:GFAC . AC-ACC-N` — COBOL for "field `AC-ACC-N` inside
+group `GFAC`") resolves to the **elementary field name**, which is what the data
+dictionary holds and what the naming conventions resolve. Reading only the word after
+the `:` named the *group*, so every slot of `VALUES (:GFAC . AC-MULTI-CO-N, :GFAC .
+AC-ACC-N, …)` came back as one repeated `GFAC` that matched no column and named no
+traceable field. The qualifier itself is dropped: the data dictionary already collapses
+same-named fields first-wins, so keeping it would disambiguate nothing that is not
+already collapsed.
+
 It **refuses** rather than guessing whenever the counts do not line up — indicator
 variables (`:WS-BAL:IND-BAL` is two host variables for one column) and host structures
 (`INTO :CUST-REC` is one for N) would otherwise zip into confidently wrong lineage. Every
-refusal emits a flag naming the reason; wrong lineage is worse than none.
+refusal emits a flag naming the reason; wrong lineage is worse than none. Resolving a
+qualified *name* does not change this: `:GFAC . AC-BAL-A :WS-IND-BAL` is still an
+indicator slot and is still refused.
 
 **Naming-convention fallback (mfdep)** — always on: `mfdep` ships in the runtime
 environment, is imported lazily on the first failed correlation that needs it, and a
@@ -1265,7 +1277,27 @@ Slots that name no column get an **explicit `derived` entry**, not silence:
 that is not a column, and the entry `{ "hostVar": "WS-N", "derived": true }` says so —
 so a consumer can *skip* an aggregate receiver without also hiding a genuinely
 unrecovered field (absent, the two are indistinguishable). The per-variable note and
-flag remain. A literal `VALUES (…, CURRENT TIMESTAMP)` slot writes a column from no
+flag remain.
+
+A derived entry also carries **what it was derived from**, where the statement proves
+it — `expression` (the outermost function, or `literal` / `expression` / `CASE`) and
+`derivedFrom` (the source columns it read):
+
+```json
+{ "hostVar": "W-TOTAL-SPOKE", "derived": true,
+  "expression": "SUM", "derivedFrom": ["SPOKE_DOL_A"], "table": "T_MMJT_JRNL_TXN" }
+```
+
+This is **provenance, never identity**: `SUM(SPOKE_DOL_A)` aggregates over many rows,
+so the variable is not that column, the entry keeps `derived`, and **no `column` key is
+ever added**. It answers a different question — *where did this value read?* — that an
+`{ "hostVar", "derived" }` entry alone left as "nowhere". An **empty** `derivedFrom` is
+a fact, not a failure to look: `COUNT(*)` and `SELECT 'Y'` genuinely read no column,
+which is what distinguishes them from a `SUM(COL)` whose source was lost. A `CASE`
+expression reports none — which branch supplied the value is a run-time fact, so its
+columns are not a proven dependency. A cursor splits the evidence across two
+statements, so a `FETCH`'s derived slot takes its derivation from the `DECLARE` that
+holds the aggregate. A literal `VALUES (…, CURRENT TIMESTAMP)` slot writes a column from no
 program field and is noted from the column's side. Note `COUNT(*)` is *not*
 `SELECT *` — the star inside a function is one derived item, and its sibling columns
 still correlate normally.
@@ -1569,6 +1601,8 @@ most are pinned by a test.
 | `txnflat.cbl` | flat transaction flow (reactive-target subject) |
 | `calltwice.cbl` | **one program CALLed twice with different operands — still one endpoint** |
 | `sqlcols.cbl` / `sqlgaps.cbl` | **column↔host-variable correlation** — the proven shapes, and the ones that must flag (indicator vars, `SELECT *`, derived slots, rowset FETCH, missing DECLARE) |
+| `sqlqual.cbl` | **qualified host variables** (`:GFAC . AC-ACC-N`) in VALUES, SET, INTO and WHERE — and the indicator slot that is still refused once the name resolves |
+| `sqlderiv.cbl` | **what a derived slot was made of** — `SUM(COL)`, nested `VALUE(SUM(COL),0)`, a literal, `COUNT(*)`, an expression over two columns, the `CASE` that refuses, and a `FETCH` taking its derivation from the cursor's `DECLARE` |
 | `sqlwscsr.cbl` | **cursor DECLAREd in WORKING-STORAGE** — the whole-stream scan correlating its FETCH and naming the real table endpoint |
 | `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` |
 | `sqlproc.cbl` | **`EXEC SQL CALL` as a `db2_proc` endpoint** — parameters, not columns |

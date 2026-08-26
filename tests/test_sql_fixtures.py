@@ -44,15 +44,40 @@ def test_dml_table_has_both_directions():
 
 
 def test_dml_write_fields_carry_host_variables():
-    # INSERT/UPDATE/DELETE capture their VALUES/SET/WHERE host variables as event
-    # fields, so the renderer can show WHAT is written (was a known gap).
+    # INSERT/UPDATE capture the host variables they WRITE as event fields, so the
+    # renderer can show WHAT is written (was a known gap).
     iface = _iface("sqldml.cbl")
     for e in iface["events"]:
-        if e["verb"] in ("INSERT", "UPDATE", "DELETE"):
+        if e["verb"] in ("INSERT", "UPDATE"):
             assert e["fields"], f"{e['verb']} must carry its host variables"
-            assert all(not f.startswith(":") for f in e["fields"])
+        assert all(not f.startswith(":") for f in e["fields"])
     upd = next(e for e in iface["events"] if e["verb"] == "UPDATE")
-    assert set(upd["fields"]) == {"WS-BAL", "WS-ID"}
+    assert upd["fields"] == ["WS-BAL"]                 # SET BALANCE = :WS-BAL
+    ins = next(e for e in iface["events"] if e["verb"] == "INSERT")
+    assert set(ins["fields"]) == {"WS-ID", "WS-NAME", "WS-BAL"}
+
+
+def test_dml_where_clause_variables_are_parameters_not_fields():
+    """A row SELECTOR is not data written, and must not be reported as a field.
+
+    `UPDATE ACCOUNT SET BALANCE = :WS-BAL WHERE ID = :WS-ID` writes one column from one
+    variable; :WS-ID picks the row. Carried among the fields it reached the graph loader
+    as a write with no column mapping - an "unmapped field" - which is where thousands
+    of the v52 warnings came from (docs/issues/unmapped-fields-v52.md, Issue 2). A
+    SELECT has always reported its WHERE variables as `params`; these are the same
+    thing, said the same way.
+    """
+    iface = _iface("sqldml.cbl")
+    upd = next(e for e in iface["events"] if e["verb"] == "UPDATE")
+    assert upd["params"] == ["WS-ID"]
+    assert "WS-ID" not in upd["fields"]
+    # A DELETE writes nothing anywhere: every host variable it has is a filter.
+    dele = next(e for e in iface["events"] if e["verb"] == "DELETE")
+    assert dele["fields"] == []
+    assert dele["params"] == ["WS-ID"]
+    # An INSERT with no WHERE splits into nothing - every VALUES variable is written.
+    ins = next(e for e in iface["events"] if e["verb"] == "INSERT")
+    assert "params" not in ins
 
 
 # --------------------------------------------------------------------------- #
@@ -431,3 +456,181 @@ def test_synonym_map_that_is_not_a_string_map_is_exit_2(tmp_path):
     rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(tmp_path / "o"),
               "--no-fetch", "--synonym-map", str(bad), "-qq"])
     assert rc == 2
+
+
+# --------------------------------------------------------------------------- #
+# sqlqual: qualified host variables
+# (docs/issues/unmapped-fields-v52.md, Issue 3)
+# --------------------------------------------------------------------------- #
+
+def test_qualified_host_vars_resolve_to_the_elementary_field():
+    """`:GFAC . AC-ACC-N` names the field AC-ACC-N, not the group GFAC.
+
+    Reading only the word after the ':' answered the GROUP, so all three VALUES slots
+    came back as the one repeated name "GFAC": it matched no column, and the data
+    dictionary has no such field for the lineage to thread.
+    """
+    iface = _iface("sqlqual.cbl")
+    ins = next(e for e in iface["events"] if e["verb"] == "INSERT")
+    assert ins["fields"] == ["AC-MULTI-CO-N", "AC-ACC-N", "AC-CSDN-C"]
+    assert [(c["column"], c["hostVar"]) for c in ins["columns"]] == [
+        ("MULTI_CO_N", "AC-MULTI-CO-N"),
+        ("ACC_N", "AC-ACC-N"),
+        ("CSDN_C", "AC-CSDN-C"),
+    ]
+
+
+def test_qualified_host_var_maps_in_a_set_clause_and_an_into_clause():
+    # Three separate colon scanners had to agree on the name: the statement-wide one
+    # (fields), the WHERE one (params), and the INTO one (a SELECT's targets).
+    iface = _iface("sqlqual.cbl")
+    upd = next(e for e in iface["events"]
+               if e["verb"] == "UPDATE" and e.get("columns"))
+    assert [(c["column"], c["hostVar"]) for c in upd["columns"]] == [("BAL_A", "AC-BAL-A")]
+    assert upd["params"] == ["AC-ACC-N"]
+    sel = next(e for e in iface["events"] if e["verb"] == "SELECT")
+    assert sel["fields"] == ["AC-BAL-A"]
+    assert sel["params"] == ["AC-ACC-N"]
+
+
+def test_a_qualified_value_with_an_indicator_is_still_refused():
+    """Resolving the NAME does not make the slot 1:1.
+
+    `:GFAC . AC-BAL-A :WS-IND-BAL` hangs a null indicator off the value, so it fills no
+    single column - the same refusal an unqualified `:WS-BAL:IND-BAL` already gets.
+    """
+    iface = _iface("sqlqual.cbl")
+    ind = next(e for e in iface["events"]
+               if e["verb"] == "UPDATE" and not e.get("columns"))
+    assert "AC-BAL-A" in ind["fields"]
+    assert ind["params"] == ["AC-ACC-N"]
+
+
+def test_qualified_lineage_names_fields_the_data_dictionary_holds():
+    """The point of choosing the elementary name: the lineage row is traceable.
+
+    A row for "GFAC" names a GROUP - the reader cannot tell which of its four fields
+    crossed, and no column matches it either.
+    """
+    from cobol_xstate.lineage import build_lineage
+    src = (EXAMPLES / "sqlqual.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="sqlqual.cbl")
+    fields = {r["field"] for r in build_lineage(m)["rows"]}
+    assert "GFAC" not in fields
+    assert {"AC-MULTI-CO-N", "AC-ACC-N", "AC-CSDN-C", "AC-BAL-A"} <= fields
+    assert all(f in m.data for f in fields if f.startswith("AC-"))
+
+
+# --------------------------------------------------------------------------- #
+# sqlderiv: what a DERIVED slot was made of
+# (docs/issues/unmapped-fields-v52.md, Issue 1)
+# --------------------------------------------------------------------------- #
+
+def _derived(iface, host_var):
+    for e in iface["events"]:
+        for c in (e.get("columns") or []):
+            if c["hostVar"] == host_var:
+                return c
+    raise AssertionError(f"no column entry for {host_var}")
+
+
+def test_a_derived_slot_never_gains_a_column_identity():
+    """The refusal is the point, and it survives the recovery.
+
+    `SUM(SPOKE_DOL_A)` aggregates over many rows: the host variable is NOT that column,
+    and mapping it would be an invented identity that two programs would then appear to
+    share. Every derived entry keeps `derived` and gains no `column` key - what it gains
+    is provenance about where the expression READ.
+    """
+    iface = _iface("sqlderiv.cbl")
+    for e in iface["events"]:
+        for c in (e.get("columns") or []):
+            assert not (c.get("derived") and "column" in c)
+
+
+def test_an_aggregates_source_column_is_kept_as_provenance():
+    iface = _iface("sqlderiv.cbl")
+    assert _derived(iface, "W-TOTAL-SPOKE") == {
+        "table": "T_MMJT_JRNL_TXN", "hostVar": "W-TOTAL-SPOKE", "derived": True,
+        "expression": "SUM", "derivedFrom": ["SPOKE_DOL_A"]}
+    # Nested: `VALUE(SUM(COL), 0)` reports the outermost function and recurses through
+    # its arguments, so the innermost NAMED column is the source.
+    nested = _derived(iface, "W-TOTAL-HST")
+    assert nested["expression"] == "VALUE"
+    assert nested["derivedFrom"] == ["TRX_RUN_COLL_BAL_A"]
+
+
+def test_a_slot_with_no_source_column_says_so_with_an_empty_list():
+    """An empty `derivedFrom` is a FACT, not a failure to look.
+
+    `SELECT 'Y'` and `COUNT(*)` genuinely read no column, and saying so is what tells
+    them apart from a SUM whose source was merely lost - which the reader could not do
+    when both were a bare `{"derived": true}`.
+    """
+    iface = _iface("sqlderiv.cbl")
+    assert _derived(iface, "W-EXISTS-SW")["expression"] == "literal"
+    assert _derived(iface, "W-EXISTS-SW")["derivedFrom"] == []
+    assert _derived(iface, "W-ROW-COUNT")["expression"] == "COUNT"
+    assert _derived(iface, "W-ROW-COUNT")["derivedFrom"] == []
+
+
+def test_an_expression_over_columns_reports_all_of_them():
+    assert _derived(_iface("sqlderiv.cbl"), "W-EXTENDED")["derivedFrom"] == ["QTY", "PRICE"]
+
+
+def test_a_case_expression_refuses_to_name_its_sources():
+    """Which branch supplied the value is a RUN-TIME fact.
+
+    Listing both HIGH_C and LOW_C would claim two dependencies where the source proves
+    at most one - flag it as derived, do not guess what it derived from.
+    """
+    case = _derived(_iface("sqlderiv.cbl"), "W-BANDING")
+    assert case["expression"] == "CASE"
+    assert case["derivedFrom"] == []
+
+
+def test_a_fetch_takes_its_derivation_from_the_cursors_declare():
+    """A cursor splits the evidence: the DECLARE has `SUM(ADJ_A)`, the FETCH has the
+    host variable, and neither statement alone says the slot came from ADJ_A."""
+    iface = _iface("sqlderiv.cbl")
+    fetch = next(e for e in iface["events"] if e["verb"] == "FETCH")
+    assert [c.get("column") for c in fetch["columns"]] == [
+        "FBSI_BRCH_C", "FBSI_BASE_C", None]
+    assert fetch["columns"][2] == {
+        "table": "RTOA_ADJUSTMENT", "hostVar": "W-SUM-ADJ", "derived": True,
+        "expression": "SUM", "derivedFrom": ["ADJ_A"]}
+
+
+# --------------------------------------------------------------------------- #
+# why the columns are missing, as a token a consumer can branch on
+# (docs/issues/unmapped-fields-v52.md, Issue 4)
+# --------------------------------------------------------------------------- #
+
+def test_an_unresolvable_event_says_why_in_a_stable_token():
+    """One known unknown, said once - not once per field.
+
+    The v52 trace reported each of a cursor-less FETCH's host variables as its own
+    unmapped field: 7,444 warnings over 259 events. The prose note always said why, but
+    branching on prose means matching wording that was never a contract, so the whole
+    event could not be skipped cleanly.
+    """
+    iface = _iface("sqlgaps.cbl")
+    fetch = next(e for e in iface["events"] if e["endpoint"] == "<cursor C9>")
+    assert fetch["columnsUnresolved"] == "cursor-declare-missing"
+    nocols = next(e for e in iface["events"]
+                  if e["verb"] == "INSERT" and e["endpoint"] == "ACCOUNT"
+                  and not e.get("columns"))
+    assert nocols["columnsUnresolved"] == "insert-no-column-list"
+
+
+def test_a_residual_note_is_not_an_unresolved_event():
+    """A derived slot and a literal-written column are RESOLVED, with a documented gap.
+
+    Both carry a note, and neither is a recovery failure - marking them unresolved would
+    put the working mappings that sit beside them out of reach of a consumer that skips
+    on the token.
+    """
+    iface = _iface("sqlgaps.cbl")
+    for e in iface["events"]:
+        if e.get("columns") and any(c.get("column") for c in e["columns"]):
+            assert "columnsUnresolved" not in e

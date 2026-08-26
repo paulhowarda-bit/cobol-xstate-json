@@ -684,3 +684,99 @@ def test_cursor_table_binds_past_a_from_inside_the_select_list():
     prov = {"a": {"cobol": "EXEC SQL DECLARE C1 CURSOR FOR SELECT 'FROM AUDIT', COL1 "
                             "FROM CUSTMAST END-EXEC"}}
     assert _cursor_tables(prov) == {"C1": "CUSTMAST"}
+
+
+# --------------------------------------------------------------------------- #
+# DML: the row selector is not the data written
+# (docs/issues/unmapped-fields-v52.md, Issue 2)
+# --------------------------------------------------------------------------- #
+
+_DML_DATA = (
+    "       01  WS-BAL          PIC S9(7)V99 COMP-3.\n"
+    "       01  WS-NAME         PIC X(20).\n"
+    "       01  WS-REF          PIC X(8).\n"
+    "       01  WS-ID           PIC 9(9).\n"
+    "       01  IND-BAL         PIC S9(4) COMP.\n"
+)
+
+
+def _sql_event(iface, verb):
+    return next(e for e in iface["events"] if e["verb"] == verb)
+
+
+def test_update_where_variable_is_a_param_not_a_field():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               UPDATE CUSTOMER SET BAL = :WS-BAL\n"
+        "               WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    upd = _sql_event(iface, "UPDATE")
+    assert upd["fields"] == ["WS-BAL"]
+    assert upd["params"] == ["WS-ID"]
+
+
+def test_delete_writes_nothing_so_every_variable_is_a_param():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DELETE FROM CUSTOMER WHERE ID = :WS-ID END-EXEC.\n",
+        _DML_DATA)
+    dele = _sql_event(iface, "DELETE")
+    assert dele["fields"] == []
+    assert dele["params"] == ["WS-ID"]
+
+
+def test_a_subselects_where_does_not_sweep_up_a_sibling_set_variable():
+    """Scoping each WHERE to its own parentheses is what keeps the two apart.
+
+    `:WS-REF` filters the subselect and `:WS-ID` picks the updated row - both are
+    predicates. `:WS-NAME` sits in a SET clause AFTER the subselect closes, so reading
+    from the first WHERE to the end of the statement would sweep the write in with the
+    filters and lose its column mapping.
+    """
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               UPDATE CUSTOMER SET BAL =\n"
+        "                   (SELECT TOT FROM LEDGER WHERE REF = :WS-REF),\n"
+        "                   NAME = :WS-NAME\n"
+        "               WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    upd = _sql_event(iface, "UPDATE")
+    assert upd["fields"] == ["WS-NAME"]
+    assert upd["params"] == ["WS-REF", "WS-ID"]
+
+
+def test_a_variable_on_both_sides_stays_a_field():
+    """`SET LAST_ID = :WS-ID WHERE ID = :WS-ID` writes AND filters with one variable.
+
+    The write is the stronger claim: the source proves which column it fills, and
+    demoting it to a parameter would throw that mapping away.
+    """
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               UPDATE CUSTOMER SET LAST_ID = :WS-ID\n"
+        "               WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    upd = _sql_event(iface, "UPDATE")
+    assert upd["fields"] == ["WS-ID"]
+    assert "params" not in upd
+
+
+def test_an_indicator_variable_does_not_demote_the_write_it_qualifies():
+    """`SET BAL = :WS-BAL:IND-BAL` defeats the SET-pair matcher, so no column mapping
+    is recovered for :WS-BAL - and a fields-minus-columns subtraction would call it a
+    filter on that evidence alone. The split is structural instead: :WS-BAL is not in
+    the WHERE clause, so it stays a write whatever the mapping did
+    (docs/issues/conventions-indicator-variable-bug.md is the same failure class).
+    """
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               UPDATE CUSTOMER SET BAL = :WS-BAL:IND-BAL\n"
+        "               WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    upd = _sql_event(iface, "UPDATE")
+    assert "WS-BAL" in upd["fields"]
+    assert upd["params"] == ["WS-ID"]

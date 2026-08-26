@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 # endpoint kinds
 _FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE = (
@@ -67,7 +67,13 @@ _QUALIFIED = r"(?:[A-Z0-9_$#@-]+\s*\.\s*)?([A-Z0-9_$#@-]+)"
 _SQL_FROM = re.compile(r"\bFROM\s+" + _QUALIFIED, re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+" + _QUALIFIED, re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+" + _QUALIFIED, re.I)
-_SQL_HOSTVAR = re.compile(r":\s*([A-Z0-9-]+)", re.I)
+# `:GFAC . AC-ACC-N` is a QUALIFIED host variable - the field AC-ACC-N inside group
+# GFAC - and the elementary name after the period is the one the data dictionary holds.
+# Capturing only the leading word named the GROUP, so every slot of a VALUES list
+# written that way came back as one repeated group name that matched no column. The
+# tail is optional and must end in a word, which is what keeps the period that
+# terminates a COBOL sentence (`... :WS-ID END-EXEC.`) from being read as a qualifier.
+_SQL_HOSTVAR = re.compile(r":\s*([A-Z0-9-]+)(?:\s*\.\s*([A-Z0-9-]+))?", re.I)
 _SQL_CALL = re.compile(r"\bCALL\s+(?:[A-Z0-9_$#@-]+\s*\.\s*)?([A-Z0-9_$#@-]+)", re.I)
 _DECLARE_CURSOR = re.compile(
     r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
@@ -281,8 +287,8 @@ def _display_fields(cobol: str, data: dict) -> List[str]:
 
 def _sql_host_vars(text: str) -> List[str]:
     out = []
-    for v in _SQL_HOSTVAR.findall(text or ""):
-        u = v.upper()
+    for base, qualified in _SQL_HOSTVAR.findall(text or ""):
+        u = (qualified or base).upper()
         if u not in out:
             out.append(u)
     return out
@@ -295,10 +301,53 @@ def _qualify(columns: Optional[List[dict]], table: str) -> Optional[List[dict]]:
     return [{"table": table, **c} for c in columns]
 
 
-def _note(hit: dict, note: Optional[str]) -> dict:
-    """Attach the why-no-mapping note to a hit, so the EVENT carries it."""
+def _dedup(names: List[str]) -> List[str]:
+    """Order-preserving unique. A variable named twice in one statement is ONE field,
+    not two: `SET LAST_ID = :WS-ID WHERE ID = :WS-ID` mentions it in each clause, and
+    the statement-wide scan keeps both - which reported the field twice and traced its
+    lineage twice with it."""
+    out: List[str] = []
+    for n in names:
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _dml_split(host_vars: List[str], where_vars: Set[str],
+               columns: Optional[List[dict]]) -> Tuple[List[str], List[str]]:
+    """A DML statement's host variables, split into the data it WRITES and the
+    parameters that choose the ROW.
+
+    `UPDATE t SET c = :h WHERE k = :f` sends both to Db2, but only :h reaches a column.
+    Reported among the FIELDS, :f reads as a write whose column mapping went missing -
+    which is precisely what an unmapped-field warning means downstream, and there were
+    thousands of them. As a PARAMETER it is neither dropped nor mistaken for a write:
+    the SELECT half of this module has said it that way all along (`params`, below), and
+    this brings the CREATE half into line with it.
+
+    A variable used on BOTH sides (`SET LAST_ID = :WS-ID WHERE ID = :WS-ID`) stays a
+    field: the write is the stronger claim, and demoting it would throw away a mapping
+    the source proves. With no `whereVars` on the spec nothing is split at all - an
+    unrecovered clause must not become a guess about which half is which.
+    """
+    mapped = {str(c.get("hostVar", "")).upper() for c in (columns or ())}
+    fields = _dedup([h for h in host_vars if h not in where_vars or h in mapped])
+    params = _dedup([h for h in host_vars
+                     if h in where_vars and h not in mapped and h not in fields])
+    return fields, params
+
+
+def _note(hit: dict, note: Optional[str], unresolved: Optional[str] = None) -> dict:
+    """Attach the why-no-mapping note to a hit, so the EVENT carries it.
+
+    ``unresolved`` is the same answer as a stable token (`cursor-declare-missing`,
+    `count-mismatch`, `insert-no-column-list`). A consumer branches on that; the prose
+    is for the person reading the flag, and was never a contract to match on.
+    """
     if note:
         hit["columnNote"] = note
+    if unresolved:
+        hit["columnsUnresolved"] = unresolved
     return hit
 
 
@@ -327,39 +376,59 @@ def _fetch_cursor_name(spec: Optional[dict], up: str) -> Optional[str]:
 
 
 def _fetch_columns(cursor: Optional[str], into_fields: List[str],
-                   cursor_cols: Dict[str, List[str]]) -> Tuple[Optional[List[dict]],
-                                                               Optional[str]]:
+                   cursor_cols: Dict[str, List[str]],
+                   cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None
+                   ) -> Tuple[Optional[List[dict]], Optional[str], Optional[str]]:
     """Correlate a FETCH's host variables against its cursor's select list.
 
     Same count gate as the parser's: the columns come from one statement and the host
     variables from another, so only equal lengths prove the correspondence. Returns
-    ``(columns, note)`` - a note says which half of the join was missing, so a FETCH
-    whose cursor is declared in an absent copybook reads differently from one whose
-    DECLARE is right there but disagrees on arity.
+    ``(columns, note, reason)`` - the note says which half of the join was missing, so a
+    FETCH whose cursor is declared in an absent copybook reads differently from one
+    whose DECLARE is right there but disagrees on arity.
+
+    The REASON says the same thing as a stable token. Prose is for the human reading the
+    flag; a consumer that has to branch on it either matches on wording that was never a
+    contract, or - as the v52 trace did - reports every field of the event separately as
+    an unmapped field, when the whole EVENT is one known unknown.
     """
     if not cursor:
         return None, ("the cursor this FETCH reads could not be identified, so its "
-                      "columns cannot be recovered")
+                      "columns cannot be recovered"), "cursor-unidentified"
     cols = cursor_cols.get(cursor)
     if not cols:
         return None, (f"no DECLARE for cursor {cursor} is visible in this program "
                       f"(declared in a copybook that did not arrive, or prepared "
-                      f"dynamically), so its columns are unknown")
+                      f"dynamically), so its columns are unknown"), "cursor-declare-missing"
     if len(cols) != len(into_fields):
         return None, (f"cursor {cursor} selects {len(cols)} column(s) but this FETCH "
                       f"has {len(into_fields)} host variable(s): not correlatable "
-                      f"(indicator variables, or a host structure) - verify by hand")
+                      f"(indicator variables, or a host structure) - verify by hand"),             "count-mismatch"
     # A derived slot gets an explicit `derived` entry, same rule as parser._correlate:
     # "an aggregate fills this by construction" must stay distinguishable from "the
     # recovery failed here", or a consumer cannot skip one without hiding the other.
-    return [{"column": c, "hostVar": h} if c is not None
-            else {"hostVar": h, "derived": True}
-            for c, h in zip(cols, into_fields)], None
+    # A cursor splits the evidence over two statements, so the DERIVATION lives on the
+    # DECLARE - `DECLARE c CURSOR FOR SELECT SUM(ADJ_A), ...` is where the source
+    # column is written, and the FETCH that fills the slot never sees it.
+    derivs = (cursor_derivations or {}).get(cursor) or []
+    out: List[dict] = []
+    for i, (c, h) in enumerate(zip(cols, into_fields)):
+        if c is not None:
+            out.append({"column": c, "hostVar": h})
+            continue
+        entry = {"hostVar": h, "derived": True}
+        d = derivs[i] if i < len(derivs) else None
+        if d:
+            entry.update(d)
+        out.append(entry)
+    return out, None, None
 
 
 def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                    cursors: Dict[str, str],
-                   cursor_cols: Optional[Dict[str, List[str]]] = None) -> List[dict]:
+                   cursor_cols: Optional[Dict[str, List[str]]] = None,
+                   cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None
+                   ) -> List[dict]:
     """Classify an EXEC SQL / CICS / DLI action -> list of boundary hits."""
     up = cobol.upper()
     verb = (spec or {}).get("verb", "")
@@ -379,6 +448,9 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     mup = mask_literals(up)
     host_vars = [h.lstrip(":").upper()
                  for h in ((spec or {}).get("hostVars") or _sql_host_vars(mup))]
+    # The DML row selector, told apart from the data written (parser._exec_where_vars).
+    where_vars = {h.lstrip(":").upper()
+                  for h in ((spec or {}).get("whereVars") or ())}
 
     is_sql = "EXEC SQL" in up or name.startswith("exec_sql")
     is_cics = "EXEC CICS" in up or name.startswith("exec_cics")
@@ -391,6 +463,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     # from an absent key.
     columns = (spec or {}).get("columns") or None
     note = (spec or {}).get("columnNote")
+    unresolved = (spec or {}).get("columnsUnresolved")
 
     if is_sql:
         if verb in ("SELECT", "FETCH"):
@@ -401,26 +474,36 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                     endpoint = cursors.get(cname) or f"<cursor {cname}>"
                 if columns is None and note is None:
                     # Spec-less overlay (reactive's rewritten config): correlate here.
-                    columns, note = _fetch_columns(cname, into_fields, cursor_cols or {})
+                    columns, note, unresolved = _fetch_columns(
+                        cname, into_fields, cursor_cols or {}, cursor_derivations)
             if endpoint is None:
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
             params = [h for h in host_vars if h not in into_fields]
             return [_note(_hit("get", _DB2, endpoint, verb, into_fields, params,
-                               _qualify(columns, endpoint)), note)]
+                               _qualify(columns, endpoint)), note, unresolved)]
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
             ep = m.group(1) if m else "<table>"
-            return [_note(_hit("create", _DB2, ep, verb, host_vars,
-                               columns=_qualify(columns, ep)), note)]
+            # A plain VALUES insert has no WHERE and splits into nothing; an
+            # `INSERT ... SELECT ... WHERE` filters the rows it copies.
+            fields, params = _dml_split(host_vars, where_vars, columns)
+            return [_note(_hit("create", _DB2, ep, verb, fields, params,
+                               columns=_qualify(columns, ep)), note, unresolved)]
         if verb == "UPDATE":
             m = _SQL_UPDATE.search(up)
             ep = m.group(1) if m else "<table>"
-            return [_note(_hit("create", _DB2, ep, verb, host_vars,
-                               columns=_qualify(columns, ep)), note)]
+            fields, params = _dml_split(host_vars, where_vars, columns)
+            return [_note(_hit("create", _DB2, ep, verb, fields, params,
+                               columns=_qualify(columns, ep)), note, unresolved)]
         if verb == "DELETE":
             m = _SQL_FROM.search(mup)
-            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb, host_vars)]
+            # EVERY host variable in a DELETE is a filter. The statement has no SET and
+            # no VALUES clause, so it writes no field's value anywhere - it only picks
+            # which row goes. That holds structurally, which is why this needs no
+            # `whereVars` to be sure of it: a spec-less overlay splits the same way.
+            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb,
+                         [], params=_dedup(host_vars))]
         if verb in ("PREPARE", "EXECUTE"):
             # Dynamic SQL: the statement text is a run-time value, so the operation and
             # table(s) are not statically knowable. One endpoint, both directions (the
@@ -544,7 +627,9 @@ _OPEN_MODES = re.compile(
 
 def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
               files: Dict[str, dict], cursors: Dict[str, str],
-              cursor_cols: Optional[Dict[str, List[str]]] = None) -> List[dict]:
+              cursor_cols: Optional[Dict[str, List[str]]] = None,
+              cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None
+              ) -> List[dict]:
     """Classify one entry action -> list of boundary hits (empty if internal).
 
     ``cursor_cols`` is optional: only the interface build needs a FETCH correlated to its
@@ -555,7 +640,8 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     verb = up.split()[0] if up else ""
 
     if verb == "EXEC" or name.startswith(("exec_sql", "exec_cics", "exec_dli")):
-        return _classify_exec(name, up, spec, dv, cursors, cursor_cols)
+        return _classify_exec(name, up, spec, dv, cursors, cursor_cols,
+                              cursor_derivations)
 
     io = spec if (spec or {}).get("kind") == "io" else {}
 
@@ -789,6 +875,25 @@ def _cursor_tables(provenance: dict) -> Dict[str, str]:
     return out
 
 
+def _cursor_derivations(semantics: dict) -> Dict[str, List[Optional[dict]]]:
+    """cursor-name -> its select list's DERIVATIONS, the companion to _cursor_columns.
+
+    Its own map for the same reason that one is: three call sites depend on the values
+    of `_cursor_tables` being plain table names, and a FETCH needs the columns whether
+    or not any slot is derived. Keyed off the parser's cursor name only - the text
+    fallback in `_cursor_columns` exists for specs that predate it, and a spec that old
+    carries no derivations to find.
+    """
+    out: Dict[str, List[Optional[dict]]] = {}
+    for spec in ((semantics or {}).get("actions", {}) or {}).values():
+        if not isinstance(spec, dict) or spec.get("verb") != "DECLARE":
+            continue
+        cursor, derivs = spec.get("cursor"), spec.get("selectDerivations")
+        if cursor and derivs:
+            out.setdefault(cursor.upper(), derivs)
+    return out
+
+
 def _cursor_columns(semantics: dict, provenance: dict) -> Dict[str, List[str]]:
     """cursor-name -> its select list, so a FETCH can be correlated to real columns.
 
@@ -851,6 +956,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     dv = _DataView(data)
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
+    cursor_derivs = _cursor_derivations(semantics)
     for decl in (sql_cursors or []):
         cname = str(decl.get("cursor", "")).upper()
         if not cname:
@@ -859,6 +965,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             cursors.setdefault(cname, str(decl["table"]).upper())
         if decl.get("selectList"):
             cursor_cols.setdefault(cname, decl["selectList"])
+        if decl.get("selectDerivations"):
+            cursor_derivs.setdefault(cname, decl["selectDerivations"])
     linkage_all = {n.upper() for n, it in (data or {}).items()
                    if isinstance(it, dict) and it.get("section") == "LINKAGE"}
     # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and
@@ -894,6 +1002,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             entry["columns"] = hit["columns"]
         if hit.get("columnNote"):
             entry["columnNote"] = hit["columnNote"]
+        if hit.get("columnsUnresolved"):
+            entry["columnsUnresolved"] = hit["columnsUnresolved"]
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
         # one came through, `candidates` the literals an ambiguous one may be.
@@ -924,7 +1034,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             cobol = prov.get("cobol", "")
             line = prov.get("line", 0)
             spec = actions.get(aname)
-            hits = _classify(aname, cobol, spec, dv, files, cursors, cursor_cols)
+            hits = _classify(aname, cobol, spec, dv, files, cursors, cursor_cols,
+                             cursor_derivs)
             if internal_programs:
                 # A CALL / LINK / XCTL to a program contained in this source is internal:
                 # tag its program endpoint so downstream views list it as an internal call,

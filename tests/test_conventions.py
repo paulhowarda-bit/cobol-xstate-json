@@ -372,8 +372,12 @@ def test_correlated_select_with_derived_slot_is_not_deferred():
     pinned = _machine(body, conv=None)
     assert _spec(with_conv, "SELECT") == _spec(pinned, "SELECT")
     assert _messages(with_conv) == _messages(pinned)
-    assert _spec(with_conv, "SELECT")["columns"][1] == {"hostVar": "WS-CNT",
-                                                        "derived": True}
+    # COUNT(*) aggregates every row, so it names no source column - and says so with an
+    # EMPTY derivedFrom, which is what tells it apart from a SUM(COL) whose source was
+    # merely lost. No `column` key either way: an aggregate is not its input.
+    assert _spec(with_conv, "SELECT")["columns"][1] == {
+        "hostVar": "WS-CNT", "derived": True,
+        "expression": "COUNT", "derivedFrom": []}
 
 
 def test_select_without_conventions_keeps_original_flag():
@@ -514,3 +518,58 @@ def test_every_view_builds_over_convention_columns():
     assert json.dumps(build_business_view(m))
     assert json.dumps(build_reactive_view(m))
     assert m.to_json()
+
+
+# --------------------------------------------------------------------------- #
+# a column-list-less INSERT is an UNKNOWN column list, so it is recoverable
+# (docs/issues/unmapped-fields-v52.md, Issue 5)
+# --------------------------------------------------------------------------- #
+
+INSERT_NO_COLUMN_LIST = (
+    "           EXEC SQL\n"
+    "               INSERT INTO T_MMAA_ACC_ANAL\n"
+    "               VALUES (:AA-FUND-A, :AA-ACCT-NBR)\n"
+    "           END-EXEC\n")
+
+
+def test_insert_without_a_column_list_reaches_the_conventions():
+    """`INSERT INTO t VALUES (...)` states no columns and no DECLARE TABLE is visible,
+    so the column list is UNKNOWN - the recoverable failure class, the same one a
+    cursor-less FETCH is in. This pass was the only correlation without the fallback.
+    """
+    m = _machine(INSERT_NO_COLUMN_LIST)
+    spec = _spec(m, "INSERT")
+    assert spec["columnsFrom"] == "mfdep naming conventions"
+    assert [c["column"] for c in spec["columns"]] == ["FUND_A", "ACCT_NBR"]
+    assert all(c["viaConventions"] for c in spec["columns"])
+    assert any("EXEC SQL INSERT: column<->host-variable mapping recovered by mfdep "
+               "NAMING CONVENTION" in x for x in _messages(m))
+
+
+def test_insert_without_conventions_is_unchanged():
+    """The determinism pin: a conventions-less build says exactly what it said before,
+    including the machine-readable reason."""
+    m = _machine(INSERT_NO_COLUMN_LIST, conv=None)
+    spec = _spec(m, "INSERT")
+    assert "columns" not in spec
+    assert spec["columnsUnresolved"] == "insert-no-column-list"
+    assert any("EXEC SQL INSERT: column<->host-variable mapping not recovered" in x
+               for x in _messages(m))
+
+
+def test_an_insert_count_mismatch_is_never_convention_resolved():
+    """A DECLARE TABLE that IS visible and disagrees on arity is a COUNT MISMATCH.
+
+    The declared order is known and contradicts the VALUES list (a host structure
+    expanding to several columns), so the 1:1 assumption is already broken and
+    per-field prefix resolution would inject exactly the wrong lineage the refusal
+    exists to prevent (docs/issues/conventions-indicator-variable-bug.md).
+    """
+    body = (
+        "           EXEC SQL\n"
+        "               DECLARE T_MMAA_ACC_ANAL TABLE\n"
+        "                   (FUND_A CHAR(6), ACCT_NBR INTEGER, OPEN_D DATE)\n"
+        "           END-EXEC\n" + INSERT_NO_COLUMN_LIST)
+    spec = _spec(_machine(body), "INSERT")
+    assert "columns" not in spec
+    assert spec["columnsUnresolved"] == "count-mismatch"
