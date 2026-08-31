@@ -275,7 +275,7 @@ Extra extension to try when resolving a copybook. Defaults already tried:
 ### `--copybook-fetcher MODULE:FUNC`
 
 **Overrides** the estate artifact service. It does not enable retrieval — every run
-retrieves through `cast_clients.mf_fetch:fetch_artifact` by default, because only the
+retrieves through `mf_fetch:fetch_artifact` by default, because only the
 estate knows where its members live. Use this only for a differently-named client.
 
 ```bash
@@ -319,7 +319,7 @@ resolvable dynamic `CALL` target into an unresolved one (see the flag table belo
 In Python, pass the callable directly:
 
 ```python
-from cast_clients.mf_fetch import fetch_artifact
+from mf_fetch import fetch_artifact
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.parser import parse_program
 
@@ -1191,7 +1191,7 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) — on **every** Db2 verb, not just `SELECT`: an `UPDATE`'s `WHERE` variable picks the row rather than writing a column, and a `DELETE` writes nothing at all, so all of its host variables are parameters |
 | `columns` | for Db2 events, **which column fills which host variable** — see below |
 | `columnNote` | why `columns` is absent or partial — distinguishes "nothing to map here" (a literal slot, `SELECT *`, a missing DECLARE) from a recovery failure, which an absent key alone cannot |
-| `columnsUnresolved` | the same answer as a **stable token** to branch on, present only on a real recovery failure: `cursor-unidentified`, `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`. A consumer skips the whole event on this instead of reporting each of its fields as separately unmapped — and a *residual* note (a derived slot, a literal-written column) carries no token, because those events did correlate. A cursor DECLAREd **FOR a PREPAREd statement** also carries no token: its select list is assembled at run time, so there is nothing to recover — an inherent unknown rather than a failure. It says so with `endpointType: "dynamic_sql"` and `dynamic: true`, the same shape the `PREPARE` end of the same statement already uses. **Reading a pre-VERSION-5 parse bundle:** it carries no FOR-form evidence at all, so a dynamic cursor in one degrades to `cursor-declare-missing` — absent means UNKNOWN, never "static". Re-parse to classify it; do not infer it |
+| `columnsUnresolved` | the same answer as a **stable token** to branch on, present only on a real recovery failure: `cursor-unidentified`, `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`, `insert-from-fullselect`, `values-unparseable`, `set-expression-unmapped`. An unrecognised token is still a token: a consumer reports it verbatim rather than gating on a known list, so this set can grow without breaking one. A consumer skips the whole event on this instead of reporting each of its fields as separately unmapped — and a *residual* note (a derived slot, a literal-written column) carries no token, because those events did correlate. A cursor DECLAREd **FOR a PREPAREd statement** also carries no token: its select list is assembled at run time, so there is nothing to recover — an inherent unknown rather than a failure. It says so with `endpointType: "dynamic_sql"` and `dynamic: true`, the same shape the `PREPARE` end of the same statement already uses. **Reading a pre-VERSION-5 parse bundle:** it carries no FOR-form evidence at all, so a dynamic cursor in one degrades to `cursor-declare-missing` — absent means UNKNOWN, never "static". Re-parse to classify it; do not infer it |
 | `cursor` / `preparedStatement` | on a FETCH whose cursor was DECLAREd **FOR a PREPAREd statement**: which cursor, and which statement it reads. The endpoint is `<dynamic-sql>`, shared by every dynamic crossing in the program, so the identifying detail lives on the event |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |

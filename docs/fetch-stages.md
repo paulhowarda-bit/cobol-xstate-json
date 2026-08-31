@@ -77,7 +77,7 @@ later run can be pointed at with `-I`.
 
 Where a member lives — which SYSLIB, which concatenation, which share — is knowledge this
 tool does not have and does not model. Both stages ask
-`cast_clients.mf_fetch.fetch_artifact(name, type=, copy=)` and report what came back.
+`mf_fetch.fetch_artifact(name, type=, copy=)` and report what came back.
 `--copybook-fetcher MODULE:FUNC` overrides the client; it does not enable the behavior.
 
 Three fields of the reply are kept that the tool used to discard, each of which it then
