@@ -550,3 +550,21 @@ def test_a_dml_row_selector_emits_no_lineage_row():
     # ("UPDATE", "WS-ID") and ("DELETE", "WS-ID") were both here, and both were the
     # WHERE clause's `ID = :WS-ID`. The DELETE writes nothing at all, so it now
     # contributes no output row whatsoever.
+
+
+def test_a_working_storage_cursor_names_its_real_table_here_too():
+    """`sqlwscsr.cbl` DECLAREs its cursor in WORKING-STORAGE, where production code
+    actually keeps it. The statement parser walks the PROCEDURE DIVISION only, so
+    provenance and semantics cannot see that DECLARE; only the whole-stream scan can.
+
+    The interface overlay was seeded from it and every other view was not, so the
+    bundle event named `T_MMAA_ACC_ANAL` while this row said `<cursor ACCT_CSR>` - and
+    no (event, endpoint) join between the two views was possible for that class, nor
+    any join on `origins[].event`.
+    """
+    d = _lin("sqlwscsr.cbl")
+    endpoints = {r["endpoint"] for r in d["rows"]}
+    assert endpoints == {"T_MMAA_ACC_ANAL"}
+    assert not [e for e in endpoints if str(e).startswith("<cursor")]
+    origins = {o["event"] for r in d["rows"] for o in r.get("origins", [])}
+    assert all("<cursor" not in e for e in origins)

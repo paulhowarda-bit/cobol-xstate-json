@@ -6,7 +6,11 @@ over-fitting to endpoint spellings that are still in flux (see the known-gap tes
 document current behaviour so a later fix is a deliberate change, not a silent one).
 """
 
+import json
+
+from cobol_xstate.business import build_business_view
 from cobol_xstate.parser import parse_program
+from cobol_xstate.reactive import build_reactive_view
 from cobol_xstate.statechart import build_machine
 from pathlib import Path
 
@@ -325,10 +329,17 @@ def test_count_star_is_not_select_star():
 
 
 def test_fetch_without_a_visible_declare_is_flagged():
-    """A cursor DECLAREd in a copybook that did not arrive - or prepared dynamically -
-    leaves its FETCH with host variables and no columns. Whether that is recoverable is
-    the reviewer's call to make from the flag, not ours to make by staying silent."""
-    assert "no DECLARE for cursor C9 is visible" in _flags("sqlgaps.cbl")
+    """A cursor whose DECLARE is not in the expanded source leaves its FETCH with host
+    variables and no columns. Whether that is recoverable is the reviewer's call to
+    make from the flag, not ours to make by staying silent.
+
+    The note names NO cause. This branch holds at least three - an absent copybook, an
+    unresolved EXEC SQL INCLUDE, and ALLOCATE ... CURSOR FOR RESULT SET - and a cursor
+    DECLAREd FOR a PREPAREd statement no longer arrives here at all; it is classified
+    as dynamic_sql before this point, which is what makes the narrower prose true
+    rather than merely vaguer.
+    """
+    assert "no DECLARE for cursor C9 was found" in _flags("sqlgaps.cbl")
 
 
 def test_why_no_mapping_reaches_the_event_itself():
@@ -767,3 +778,81 @@ def test_no_group_name_reaches_the_lineage():
     assert "SBRX-GRP" not in fields
     assert "WS-NULL-IND-01" not in fields
     assert {"TRNF-NBR", "SBRX-OFFC-C", "SBRX-BASE-C", "BRCH-CORR-I"} <= fields
+
+
+# --------------------------------------------------------------------------- #
+# sqldyncsr: a cursor DECLAREd FOR a PREPAREd statement
+#
+# Its select list does not exist until run time, so there is nothing to recover - an
+# INHERENT unknown, not a failed recovery. `_DYNAMIC_SQL` already exists for exactly
+# this at the PREPARE end (interface.py); these pin the FETCH end reaching the same
+# answer, so one statement stops carrying two contradictory ones.
+# --------------------------------------------------------------------------- #
+
+def _machine_of(name):
+    src = (EXAMPLES / name).read_text()
+    return build_machine(parse_program(src), source_name=name)
+
+
+def test_a_dynamic_cursor_fetch_is_dynamic_sql_not_a_phantom_table():
+    """The endpoint was `<cursor DYN_CSR>`, TABLE-typed for something that has no
+    statically knowable table and never will have one."""
+    iface = _iface("sqldyncsr.cbl")
+    fetches = {e.get("cursor"): e for e in iface["events"] if e["verb"] == "FETCH"}
+    dyn = fetches["DYN_CSR"]
+    assert dyn["endpointType"] == "dynamic_sql"
+    assert dyn["endpoint"] == "<dynamic-sql>"
+    assert dyn["dynamic"] is True
+    assert dyn["preparedStatement"] == "DYNSTMT"
+    # no cursor-named phantom is minted anywhere in the overlay
+    assert not [e for e in iface["endpoints"] if e["endpoint"].startswith("<cursor")]
+
+
+def test_a_dynamic_cursor_fetch_carries_no_unresolved_token():
+    """The token is for a FAILED RECOVERY, and a consumer branches on it to report the
+    event as unmapped. A run-time select list is not a failed recovery, so it says so
+    with prose plus endpointType/dynamic instead - the same shape the PREPARE uses."""
+    iface = _iface("sqldyncsr.cbl")
+    dyn = next(e for e in iface["events"]
+               if e["verb"] == "FETCH" and e.get("cursor") == "DYN_CSR")
+    assert "columnsUnresolved" not in dyn
+    assert "assembled at run time" in dyn["columnNote"]
+    assert "did not arrive" not in dyn["columnNote"]     # the old, FALSE diagnosis
+
+
+def test_a_static_cursor_in_the_same_program_still_resolves():
+    """The guard against over-reach: recording the FOR form must not disturb a cursor
+    that has a real select list, in the same program, FETCHed the same way."""
+    iface = _iface("sqldyncsr.cbl")
+    sta = next(e for e in iface["events"]
+               if e["verb"] == "FETCH" and e.get("endpointType") == "db2")
+    assert sta["endpoint"] == "T_MMAA_ACC_ANAL"
+    assert [(c["column"], c["hostVar"]) for c in sta["columns"]] == [
+        ("FUND_A", "WS-FUND"), ("BALANCE_A", "WS-BAL")]
+
+
+def test_both_ends_of_one_dynamic_statement_now_agree():
+    """The PREPARE was flagged honestly as an inherent unknown while the FETCH on the
+    same statement was flagged as a recovery failure naming a copybook. Two answers,
+    one statement. The FETCH flag deliberately mirrors the PREPARE's wording."""
+    flags = [f["message"] for f in _machine_of("sqldyncsr.cbl").flags]
+    prepare = [f for f in flags if "PREPARE" in f and "dynamic SQL" in f]
+    fetch = [f for f in flags if "FETCH on cursor DYN_CSR" in f]
+    assert prepare and fetch
+    assert "not statically knowable" in fetch[0]
+    assert not [f for f in flags if "mapping not recovered" in f and "DYN_CSR" in f]
+
+
+def test_a_dynamic_cursor_reaches_every_view_the_same_way():
+    """All five `_classify` callers must agree. If the interface EVENT became
+    dynamic_sql while the lineage ROW stayed db2, a consumer that indexes db2 events
+    and filters db2 rows separately gets one warning PER FIELD instead of today's
+    single aggregated one - louder, not quieter. Classifying off the spec is what keeps
+    them in step, because every view builds its hit from the same spec."""
+    m = _machine_of("sqldyncsr.cbl")
+    rows = m.lineage().run()["rows"]
+    dyn_rows = [r for r in rows if r["endpointType"] == "dynamic_sql"]
+    assert dyn_rows and all(r["endpoint"] == "<dynamic-sql>" for r in dyn_rows)
+    assert not [r for r in rows if str(r["endpoint"]).startswith("<cursor")]
+    for view in (build_business_view(m), build_reactive_view(m)):
+        assert "<cursor DYN_CSR>" not in json.dumps(view)

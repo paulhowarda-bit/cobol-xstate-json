@@ -555,7 +555,12 @@ def _lower(machine: Machine) -> _Lowered:
     iface = _iface.build_interface(
         config, machine.semantics, machine.provenance,
         data=machine.data, using=machine.using, returning=machine.returning,
-        files=getattr(machine, "files", {}) or {})
+        files=getattr(machine, "files", {}) or {},
+        # The reactive view is deliberately not a caller of Machine.interface() - it
+        # overlays a FLATTENED, rewritten config, a different input. That justifies a
+        # SECOND build_interface call, not a differently-seeded one.
+        internal_programs=set(getattr(machine, "nested_programs", ()) or ()),
+        sql_cursors=getattr(machine, "sql_cursors", None))
     config = _strip_meta(config)          # build_interface re-annotates meta onto nodes
     ev_by_state = _events_by_state(iface)
 

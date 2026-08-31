@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from typing import Deque, Dict, List, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 # endpoint kinds
 _FILE, _DB2, _PROGRAM, _CONSOLE, _TERMINAL, _CALLER, _CONDITION, _IMS, _RESPONSE = (
@@ -360,9 +360,15 @@ def _dml_split(host_vars: List[str], where_vars: Set[str],
 def _note(hit: dict, note: Optional[str], unresolved: Optional[str] = None) -> dict:
     """Attach the why-no-mapping note to a hit, so the EVENT carries it.
 
-    ``unresolved`` is the same answer as a stable token (`cursor-declare-missing`,
-    `count-mismatch`, `insert-no-column-list`). A consumer branches on that; the prose
-    is for the person reading the flag, and was never a contract to match on.
+    ``unresolved`` is the same answer as a stable token (`cursor-unidentified`,
+    `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`). A consumer
+    branches on that; the prose is for the person reading the flag, and was never a
+    contract to match on.
+
+    A cursor DECLAREd FOR a PREPAREd statement deliberately carries NO token: it is not
+    a failed recovery but an inherent unknown, and it says so with prose plus
+    ``endpointType: "dynamic_sql"`` and ``dynamic: true`` - the same shape the
+    PREPARE end of the same statement already uses.
     """
     if note:
         hit["columnNote"] = note
@@ -417,9 +423,14 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
                       "columns cannot be recovered"), "cursor-unidentified"
     cols = cursor_cols.get(cursor)
     if not cols:
-        return None, (f"no DECLARE for cursor {cursor} is visible in this program "
-                      f"(declared in a copybook that did not arrive, or prepared "
-                      f"dynamically), so its columns are unknown"), "cursor-declare-missing"
+        # No cause is asserted, because this branch holds at least three: a copybook
+        # that did not arrive, an `EXEC SQL INCLUDE` member that did not resolve, and
+        # `ALLOCATE c CURSOR FOR RESULT SET` (a called procedure's result set, which
+        # has no DECLARE anywhere by construction). Naming one of them was not merely
+        # vague - for a cursor DECLAREd in the same source it was FALSE, and it sent
+        # the reader after a copybook that had never failed to arrive.
+        return None, (f"no DECLARE for cursor {cursor} was found in the expanded "
+                      f"source, so its columns are unknown"), "cursor-declare-missing"
     if len(cols) != len(into_fields):
         return None, (f"cursor {cursor} selects {len(cols)} column(s) but this FETCH "
                       f"has {len(into_fields)} host variable(s), host structures already "
@@ -491,6 +502,21 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             endpoint = None
             if verb == "FETCH":
                 cname = _fetch_cursor_name(spec, up)
+                if (spec or {}).get("cursorDynamic"):
+                    # One direction only - a FETCH reads - but the same endpoint KIND
+                    # and the same `dynamic` marking the PREPARE/EXECUTE arm below
+                    # uses. The `<cursor X>` db2 endpoint this replaces was
+                    # table-typed for something that has no statically knowable table,
+                    # and never will have one.
+                    hit = _hit("get", _DYNAMIC_SQL, "<dynamic-sql>", verb, into_fields,
+                               _dedup([h for h in host_vars if h not in into_fields]))
+                    hit["dynamic"] = True
+                    if cname:
+                        hit["cursor"] = cname
+                    stmt = (spec or {}).get("preparedStatement")
+                    if stmt:
+                        hit["preparedStatement"] = stmt
+                    return [_note(hit, note)]
                 if cname:
                     endpoint = cursors.get(cname) or f"<cursor {cname}>"
                 if columns is None and note is None:
@@ -895,6 +921,40 @@ def _linkage_records(data: Optional[dict]) -> List[str]:
     return out
 
 
+def seed_cursor_maps(cursors: Dict[str, str],
+                     cursor_cols: Dict[str, List[Optional[str]]],
+                     cursor_derivs: Dict[str, List[Optional[dict]]],
+                     sql_cursors: Optional[Sequence[dict]]) -> None:
+    """Fold the whole-stream cursor-DECLARE scan into the three provenance-built maps.
+
+    `_cursor_tables` / `_cursor_columns` / `_cursor_derivations` read provenance and
+    semantics, which hold PROCEDURE-DIVISION statements only. A cursor DECLAREd in the
+    DATA DIVISION or a copybook - the common case, a DCLGEN-adjacent member - never
+    became an action, so those maps have no entry for it and a FETCH on it mints a
+    phantom `<cursor X>` endpoint instead of naming the real table.
+
+    Every view that classifies a boundary crossing builds these same three maps, and
+    each one that forgets to seed them disagrees with the interface overlay about what
+    a FETCH touches: the bundle event says the table while the lineage row says
+    `<cursor X>`, and no (event, endpoint) join between the two views is possible for
+    that class. This exists so the next view cannot reintroduce that by omission.
+
+    `setdefault`, not assignment: a DECLARE the procedure division CAN see is the more
+    specific evidence and wins. Mutates in place and returns None - the caller owns the
+    maps.
+    """
+    for decl in (sql_cursors or []):
+        cname = str(decl.get("cursor", "")).upper()
+        if not cname:
+            continue
+        if decl.get("table"):
+            cursors.setdefault(cname, str(decl["table"]).upper())
+        if decl.get("selectList"):
+            cursor_cols.setdefault(cname, decl["selectList"])
+        if decl.get("selectDerivations"):
+            cursor_derivs.setdefault(cname, decl["selectDerivations"])
+
+
 def _cursor_tables(provenance: dict) -> Dict[str, str]:
     """cursor-name -> table, from ``DECLARE c CURSOR FOR SELECT ... FROM t`` texts."""
     out: Dict[str, str] = {}
@@ -989,16 +1049,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
     cursor_derivs = _cursor_derivations(semantics)
-    for decl in (sql_cursors or []):
-        cname = str(decl.get("cursor", "")).upper()
-        if not cname:
-            continue
-        if decl.get("table"):
-            cursors.setdefault(cname, str(decl["table"]).upper())
-        if decl.get("selectList"):
-            cursor_cols.setdefault(cname, decl["selectList"])
-        if decl.get("selectDerivations"):
-            cursor_derivs.setdefault(cname, decl["selectDerivations"])
+    seed_cursor_maps(cursors, cursor_cols, cursor_derivs, sql_cursors)
     linkage_all = {n.upper() for n, it in (data or {}).items()
                    if isinstance(it, dict) and it.get("section") == "LINKAGE"}
     # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and
@@ -1037,6 +1088,15 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         if hit.get("columnsUnresolved"):
             entry["columnsUnresolved"] = hit["columnsUnresolved"]
         for k in ("expandedStructures", "indicatorVars"):
+            if hit.get(k):
+                entry[k] = hit[k]
+        # WHICH cursor, and which PREPAREd statement, a dynamic FETCH reads. Only the
+        # dynamic arm sets these; without them the event says the crossing is
+        # dynamic_sql but not what it is dynamic ABOUT, and `<dynamic-sql>` is shared
+        # by every such crossing in the program. Deliberately NOT copied onto the
+        # ENDPOINT below for that reason - one shared endpoint cannot carry one
+        # cursor's name.
+        for k in ("cursor", "preparedStatement"):
             if hit.get(k):
                 entry[k] = hit[k]
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):

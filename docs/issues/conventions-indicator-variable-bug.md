@@ -21,7 +21,12 @@ With conventions active, `_correlate_selects` → `_conventions_recover` fires o
 ## Root Cause
 
 `_conventions_recover` in `statechart.py` does not distinguish WHY the correlation failed. It fires on every failed site equally:
-- "no DECLARE for cursor visible" → conventions fallback is appropriate
+- "no DECLARE for cursor found" → conventions fallback is appropriate — but ONLY when the
+  column list is genuinely unknown. A cursor DECLAREd **FOR a PREPAREd statement** has no
+  select list until run time, so there is nothing for a naming convention to be a fallback
+  FOR; it is now classified as `dynamic_sql` and `continue`s before this point. That path
+  fired: a dynamic FETCH acquired `T_MMAA_ACC_ANAL.FUND_A` / `.ACCT_NBR`, both
+  `viaConventions: true`, for a select list that does not exist at build time.
 - "N columns vs M host variables" → conventions fallback is NOT appropriate (the count mismatch signals indicator variables or host structures that break the 1:1 column↔variable assumption)
 
 ## Fix

@@ -6,6 +6,8 @@ their edges contracted, loop-back + quit semantics preserved), the business-vs-c
 labelling, internal-action stripping, and the honest PERFORM flag.
 """
 
+import json
+
 from cobol_xstate.business import build_business_view, _is_control_guard
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
@@ -428,3 +430,14 @@ def test_successors_follows_a_bare_string_handler_target():
     out = _successors(st)
     targets = {t for _, t in out}
     assert "__H_HANDLER" in targets and "__H_OTHER" in targets
+
+
+def test_a_working_storage_cursor_names_its_real_table_here_too():
+    """The same seeding gap as the lineage view: this constructor rebuilt the three
+    cursor maps from provenance and semantics alone, which cannot see a DATA DIVISION
+    DECLARE, so a FETCH's boundary action carried a phantom `<cursor ACCT_CSR>` table
+    while the bundle event named the real one."""
+    view = _view("sqlwscsr.cbl")
+    blob = json.dumps(view)
+    assert "<cursor ACCT_CSR>" not in blob
+    assert "T_MMAA_ACC_ANAL" in blob

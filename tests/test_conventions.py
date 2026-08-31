@@ -592,3 +592,54 @@ def test_an_insert_count_mismatch_is_never_convention_resolved():
     spec = _spec(_machine(body), "INSERT")
     assert "columns" not in spec
     assert spec["columnsUnresolved"] == "count-mismatch"
+
+
+# ------------------------------------------------- the run-time select list
+
+DYN_CURSOR = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. CONVDYN.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-STMT         PIC X(200).\n"
+    "       01  AA-FUND-A       PIC X(6).\n"
+    "       01  AA-ACCT-NBR     PIC 9(9).\n"
+    "           EXEC SQL DECLARE DYN_CSR CURSOR FOR DYNSTMT END-EXEC.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           EXEC SQL PREPARE DYNSTMT FROM :WS-STMT END-EXEC\n"
+    "           EXEC SQL FETCH DYN_CSR INTO :AA-FUND-A, :AA-ACCT-NBR END-EXEC\n"
+    "           STOP RUN.\n")
+
+
+def test_a_run_time_select_list_never_reaches_the_conventions_fallback():
+    """The fallback is for a column list that is UNKNOWN but EXISTS. A cursor DECLAREd
+    FOR a PREPAREd statement has no select list until run time, so there is nothing for
+    a naming convention to be a fallback FOR - and recovering one would launder an
+    inherent unknown into graph-shaped fact.
+
+    This fired. With mfdep present the FETCH came back carrying
+    `T_MMAA_ACC_ANAL.FUND_A` and `.ACCT_NBR`, both `viaConventions: true`, for a select
+    list that does not exist until run time - a direct breach of "no invented logic;
+    flag, never guess". Reproduced against this fake before the guard existed.
+    """
+    m = build_machine(parse_program(DYN_CURSOR), source_name="convdyn.cbl",
+                      conventions=_conv())
+    spec = _spec(m, "FETCH")
+    assert not spec.get("columns")
+    assert "viaConventions" not in json.dumps(spec)
+    assert "columnsFrom" not in spec              # the mfdep provenance marker
+    assert "assembled at run time" in spec["columnNote"]
+    assert spec["cursorDynamic"] is True and spec["preparedStatement"] == "DYNSTMT"
+
+
+def test_the_dynamic_guard_does_not_disarm_the_fallback_for_a_real_unknown():
+    """The guard is keyed on the DECLARE's recorded FORM, so a cursor whose DECLARE is
+    genuinely absent - the case the fallback exists for - must still reach it. Keying
+    on an empty selectList instead would have disarmed exactly this, because an
+    unreadable DECLARE and a dynamic one both leave the list empty."""
+    m = _machine(FETCH_NODECL)
+    spec = _spec(m, "FETCH")
+    assert spec.get("columns")
+    assert all(c.get("viaConventions") for c in spec["columns"])
+    assert "cursorDynamic" not in spec

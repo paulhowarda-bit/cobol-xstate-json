@@ -847,3 +847,29 @@ def test_unpadded_and_unquoted_cics_operands_still_resolve():
         "           EXEC CICS XCTL PROGRAM(WS-PGM) END-EXEC.\n")
     endpoints = {e["endpoint"] for e in iface["endpoints"]}
     assert "ACTC099" in endpoints and "ACTC150" in endpoints
+
+
+def test_seed_cursor_maps_lets_the_more_specific_evidence_win():
+    """One helper, four view constructors. Each view that rebuilds the three cursor
+    maps and forgets to fold in the whole-stream scan disagrees with the interface
+    overlay about what a FETCH touches - the bundle event names the table while the
+    row says `<cursor X>`. This exists so the next view cannot reintroduce that by
+    omission.
+
+    `setdefault`, not assignment: a DECLARE the procedure division CAN see is the more
+    specific evidence and must not be overwritten by the whole-stream scan's copy.
+    """
+    from cobol_xstate.interface import seed_cursor_maps
+    cursors = {"C1": "SEEN_IN_PROC"}
+    cols = {"C1": ["A"]}
+    derivs = {}
+    seed_cursor_maps(cursors, cols, derivs, [
+        {"cursor": "c1", "table": "scan.copy", "selectList": ["Z"],
+         "selectDerivations": [None]},
+        {"cursor": "C2", "table": "t_two", "selectList": ["B", "C"]},
+        {"cursor": "", "table": "IGNORED"},          # an unnamed row contributes nothing
+        {"table": "ALSO_IGNORED"},
+    ])
+    assert cursors == {"C1": "SEEN_IN_PROC", "C2": "T_TWO"}   # C1 kept, names uppercased
+    assert cols == {"C1": ["A"], "C2": ["B", "C"]}
+    assert derivs == {"C1": [None]}          # no proc-division entry, so the scan wins
