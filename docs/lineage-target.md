@@ -233,6 +233,33 @@ Each is surfaced in `flags`, never guessed:
   the same reason they do elsewhere in the tool.
 - **A table is one field.** `TBL(I)` is not resolved per element.
 
+### `unreached` — statements this view has no row for, and why
+
+The fixpoint walks **forward from the entry points**, so a state no path reaches emits no
+row. That is the correct answer — with no path there are no origins, and naming one would
+be a guess. But `interface` walks the program **structurally** and maps every statement's
+columns whether a path reaches it or not, so the two views can disagree about whether a
+program touches a table at all.
+
+That difference used to be silent. It is now reported: any state that performs an external
+event and that nothing reaches is listed under `unreached.states`, with the event, its
+fields, the `(hostVar, column)` pairs, and a `reason`. The key is **absent entirely** when
+nothing was lost, which is the normal case.
+
+`reason` is the part that matters, because two of its values are defects here and two are
+properties of the program:
+
+| `reason` | Whose problem | What it means |
+|---|---|---|
+| `perform-target-unresolved` | **ours** | A `PERFORM` named a paragraph the parser never recorded, so the call was not followed. Rows really are missing. |
+| `perform-range-inverted` | **ours** | `PERFORM p THRU q` where both endpoints exist but `q` precedes `p`, so the range is empty. Not a missing paragraph — reporting it as one sends a reader hunting for a name that is right there. |
+| `cascade` | **ours**, usually | Every predecessor is itself unreached. This is how one bad `PERFORM` hides an arbitrarily large subgraph. |
+| `no-static-predecessor` | the **program's** | Nothing performs it and nothing falls into it — dead code, for which having no rows is right. |
+
+To census a corpus, sum `unreached.states[].events[].fields` per program and group by
+`reason`; the two `perform-*` values are the ones worth chasing. `examples/linedrop.cbl`
+carries one of each.
+
 ## What it cannot tell you: who calls this program
 
 A `LINKAGE SECTION` says *"someone will pass me this record"*; it never says who. From one

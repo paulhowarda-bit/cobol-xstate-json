@@ -693,6 +693,13 @@ cobol-xstate prog.cbl --no-lineage --outdir out       # -> out/prog.json only
 caller's parameter combined with a console `ACCEPT`; and it happens when the transaction
 is a deposit.*
 
+- **`unreached`** (present only when something was lost) lists states that perform an
+  external event and that no path from an entry point reaches. They contribute no rows —
+  with no path there are no origins — but `interface` maps their columns anyway, so a
+  consumer joining the two views finds a `(field, column)` pair there and none here.
+  `reason` separates a gap in this tool (`perform-target-unresolved`,
+  `perform-range-inverted`, `cascade`) from dead code in the program
+  (`no-static-predecessor`). See [docs/lineage-target.md](docs/lineage-target.md#unreached--statements-this-view-has-no-row-for-and-why).
 - **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
   `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
 - **`changedByProgram`** means the program *assigns* it. An input event's own fill
