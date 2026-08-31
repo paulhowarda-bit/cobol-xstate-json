@@ -399,6 +399,16 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         spec["columnNote"] = st.column_note
     if st.cursor:
         spec["cursor"] = st.cursor               # a FETCH's join back to its DECLARE
+    # Only the DYNAMIC form is stamped. `semantics.actions` is serialized into the
+    # bundle, so stamping `cursorForKind: "select"` on every static DECLARE too would
+    # move five existing examples' goldens to say something no consumer reads - and a
+    # golden that moves for no reason is exactly what hides one that moved for a
+    # reason. The absence of the key already means "not known to be dynamic", which is
+    # the only question `_correlate_fetches` asks it.
+    if st.cursor_for_kind == "statement":
+        spec["cursorForKind"] = st.cursor_for_kind
+        if st.cursor_for_statement:
+            spec["cursorForStatement"] = st.cursor_for_statement
     if st.table:
         spec["table"] = st.table                 # a column-list-less INSERT's target...
     if st.values_list:
@@ -1531,7 +1541,16 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
     derivs_by_cursor: Dict[str, List[Optional[dict]]] = {}
     table_by_cursor: Dict[str, str] = {}
+    # cursor -> the PREPAREd statement name its DECLARE points at (None when the form
+    # was recorded but the name was not). Keyed on the DECLARE's recorded FORM, never
+    # on an empty selectList: an empty list is also exactly what a FAILED parse leaves
+    # behind, so inferring dynamic-ness from it would relabel every unreadable DECLARE
+    # as an inherent unknown - the opposite of what this distinction is for.
+    dynamic_cursors: Dict[str, Optional[str]] = {}
     for spec in ctx.action_sem.values():
+        if (spec.get("verb") == "DECLARE" and spec.get("cursor")
+                and spec.get("cursorForKind") == "statement"):
+            dynamic_cursors.setdefault(spec["cursor"], spec.get("cursorForStatement"))
         if (spec.get("verb") == "DECLARE" and spec.get("cursor")
                 and spec.get("selectList")):
             cols_by_cursor.setdefault(spec["cursor"], spec["selectList"])
@@ -1541,6 +1560,11 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             if m:
                 table_by_cursor.setdefault(spec["cursor"], m.group(1).upper())
     for decl in program.sql_cursors:
+        # `_scan_sql_declarations` walks the WHOLE origin-tagged stream, so this covers
+        # a DATA DIVISION DECLARE and a PROCEDURE DIVISION one alike; the action_sem
+        # loop above is symmetry with its neighbours, not the only route.
+        if decl.get("cursor") and decl.get("forKind") == "statement":
+            dynamic_cursors.setdefault(decl["cursor"], decl.get("forStatement"))
         if decl.get("cursor") and decl.get("selectList"):
             cols_by_cursor.setdefault(decl["cursor"], decl["selectList"])
             if decl.get("selectDerivations"):
@@ -1554,6 +1578,41 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             continue
         into = _data_targets(spec)
         if not into:
+            continue
+        cname = spec.get("cursor")
+        if cname and cname in dynamic_cursors:
+            # DECLARE c CURSOR FOR <prepared statement>: the select list is assembled at
+            # run time, so there is no column mapping to recover. This is the same
+            # inherent unknown `_DYNAMIC_SQL` exists for (interface.py), reached from
+            # the FETCH end instead of the PREPARE end.
+            #
+            # Stamped on the SPEC rather than resolved here, because every view builder
+            # reads the spec and only the interface build can be handed extra cursor
+            # context: interface, lineage, business and reactive must not disagree about
+            # whether this crossing is db2. If the EVENT became dynamic_sql while the
+            # lineage ROW stayed db2, a consumer that indexes db2 events and filters db2
+            # rows separately gets ONE WARNING PER FIELD instead of today's single
+            # aggregated one - louder, not quieter.
+            #
+            # No `columnsUnresolved` token: this is not a failed recovery. And no
+            # conventions fallback - a run-time select list is not something a naming
+            # convention can be a fallback FOR, and guessing here would launder an
+            # inherent unknown into graph-shaped fact.
+            stmt = dynamic_cursors[cname]
+            spec["cursorDynamic"] = True
+            if stmt:
+                spec["preparedStatement"] = stmt
+            spec["columnNote"] = (
+                f"cursor {cname} reads the PREPAREd statement "
+                f"{stmt or f'named by {cname} (not recovered)'}; its select list is "
+                f"assembled at run time, so no column mapping can exist")
+            # Deliberately mirrors the PREPARE flag's wording rather than the "mapping
+            # not recovered" wording, so the two ends of one statement stop
+            # contradicting each other.
+            ctx.flag(para, line,
+                     f"dynamic SQL: EXEC SQL FETCH on cursor {cname}, DECLAREd FOR a "
+                     f"PREPAREd statement - the select list is assembled at run time; "
+                     f"its columns and tables are not statically knowable")
             continue
         columns, note, unresolved = _fetch_columns(
             spec.get("cursor"), into, cols_by_cursor, derivs_by_cursor)

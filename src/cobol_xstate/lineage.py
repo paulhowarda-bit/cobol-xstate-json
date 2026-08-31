@@ -196,6 +196,11 @@ class _Lineage:
         # say a value comes from `TABLE.COLUMN`, lost that entirely for cursor programs.
         self.cursor_cols = _iface._cursor_columns(machine.semantics, self.provenance)
         self.cursor_derivs = _iface._cursor_derivations(machine.semantics)
+        # ...and the DECLAREs that never became actions at all (data division /
+        # copybook), which provenance and semantics cannot see. Without this the row's
+        # endpoint is a phantom `<cursor X>` while the bundle event names the table.
+        _iface.seed_cursor_maps(self.cursors, self.cursor_cols, self.cursor_derivs,
+                                getattr(machine, "sql_cursors", None))
         self.flags: List[str] = []
         # Primitive provenance facts, recorded during the final (row-emitting) pass so a
         # backward query can answer "where did THIS item's value come from" for an item
