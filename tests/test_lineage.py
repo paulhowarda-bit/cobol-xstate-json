@@ -568,3 +568,62 @@ def test_a_working_storage_cursor_names_its_real_table_here_too():
     assert not [e for e in endpoints if str(e).startswith("<cursor")]
     origins = {o["event"] for r in d["rows"] for o in r.get("origins", [])}
     assert all("<cursor" not in e for e in origins)
+
+
+# --------------------------------------------------------------------------- #
+# baseState: the un-split state, so a row can be joined back to its event
+# --------------------------------------------------------------------------- #
+
+def test_a_split_state_row_can_be_joined_back_to_its_interface_event():
+    """`_split` rewrites a state whose folded entry run contains a `perform_` into
+    `p__L1` / `p__L2` / `p__Lend`. `build_interface` performs no such split, so the two
+    views describe the SAME statement with different `state` values and a consumer
+    joining on `state` silently loses those rows.
+
+    `line` does not rescue the join: action names are content-derived and globally
+    deduplicated, so two textually identical statements in different states share one
+    provenance line.
+    """
+    src = (EXAMPLES / "lineage.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="lineage.cbl")
+    d = build_lineage(m)
+    split = [r for r in d["rows"] if r["state"] != r["baseState"]]
+    assert split, "expected at least one _split segment row"
+    assert all(r["state"].startswith(r["baseState"] + "__L") for r in split)
+    # the segment id names no state anywhere; the base state does
+    states = set(m.config["states"])
+    assert all(r["state"] not in states for r in split)
+    assert all(r["baseState"] in states for r in split)
+    # ...and it is the state the interface event for the same statement carries
+    events = {(e["state"], e["line"]) for e in m.interface()["events"]}
+    assert all((r["baseState"], r["line"]) in events for r in split)
+
+
+def test_an_unsplit_state_reports_itself_as_its_own_base():
+    """Emitted unconditionally, so a consumer joins on one key without having to
+    recognise the `__L` shape - which is what a workaround has to do, and what makes
+    the workaround wrong the moment the shape changes."""
+    d = _lin("sqldml.cbl")
+    assert d["rows"]
+    assert all(r["baseState"] == r["state"] for r in d["rows"])
+
+
+def test_split_segments_of_one_paragraph_share_one_base_state():
+    src = (EXAMPLES / "lineage.cbl").read_text()
+    d = build_lineage(build_machine(parse_program(src), source_name="lineage.cbl"))
+    bases = {r["state"]: r["baseState"] for r in d["rows"]}
+    for state, base in bases.items():
+        if "__L" in state:
+            assert base == state.split("__L")[0]
+    assert len({b for s, b in bases.items() if "__L" in s}) == 1
+
+
+def test_every_lineage_row_names_a_real_state_through_its_base():
+    """The property the key exists for, across the whole corpus rather than one
+    fixture: no row's baseState is a synthetic id."""
+    for name in ("altswitch.cbl", "lineage.cbl", "sqlwscsr.cbl", "sqldyncsr.cbl"):
+        src = (EXAMPLES / name).read_text()
+        m = build_machine(parse_program(src), source_name=name)
+        states = set(m.config["states"])
+        for r in build_lineage(m)["rows"]:
+            assert r["baseState"] in states, (name, r["state"], r["baseState"])

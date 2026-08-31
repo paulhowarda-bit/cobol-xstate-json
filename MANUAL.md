@@ -708,6 +708,16 @@ is a deposit.*
   rules. Negation is first-class: a `WHEN OTHER` reports `NOT (WS-KIND = 'P')` and
   `NOT (WS-KIND = 'Q')`, which is the actual rule. The same list appears per write in
   `changedBy`.
+- **`state` vs `baseState`**: `state` is where the row was emitted, and it can be a
+  *synthetic* id — a paragraph whose folded run contains a `PERFORM` is split into
+  `p__L1` / `p__L2` / `p__Lend` for this analysis, and **no other view splits that way**.
+  `baseState` is the real state the segment came from, so it is the key that joins a row
+  to the interface event or the machine state for the same statement; `line` alone cannot,
+  because action names are content-derived and globally deduplicated, so two identical
+  statements in different states share one provenance line. `baseState` is always present
+  and equals `state` when no split happened, so a consumer joins on one key rather than
+  learning to recognise the `__L` shape. `--target dynamic-calls` carries the same pair for
+  the same reason.
 - **What it won't claim**: a paragraph performed from two guarded sites runs under
   `A OR B`, which a conjunction cannot state — rather than report half of it, the row
   reports none and sets `conditionsPartial`. An `ALTER`/`GO TO DEPENDING ON` guard whose

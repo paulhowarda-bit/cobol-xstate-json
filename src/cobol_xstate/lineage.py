@@ -690,7 +690,15 @@ class _Lineage:
                         self.dynamic_sites.append({
                             "item": str(h["endpoint"]).upper(),
                             "endpointType": h["etype"], "verb": h["verb"],
-                            "state": name, "line": line, "cobol": cobol,
+                            "state": name,
+                            # Same synthetic-id problem as a lineage row: `name` is a
+                            # `_split` segment whenever the paragraph had a mid-run
+                            # PERFORM, and no other view splits. Deliberately NOT added
+                            # to the sibling `fills` record, whose dicts `dynamic_calls`
+                            # returns wholesale from `_chain` - a key there would move
+                            # output that has nothing to do with this join.
+                            "baseState": self.origin_state.get(name, name),
+                            "line": line, "cobol": cobol,
                             "candidates": list(h.get("candidates") or []),
                             "origins": self._origins_of(str(h["endpoint"]), cur),
                         })
@@ -739,6 +747,17 @@ class _Lineage:
             "endpointType": hit["etype"],
             "verb": hit["verb"],
             "state": state,
+            # The REAL state this segment came from. `state` is a SYNTHETIC id whenever
+            # `_split` fired - a paragraph with a mid-run PERFORM before an EXEC SQL
+            # becomes `p__L1` / `p__L2` / `p__Lend` - and `build_interface` performs no
+            # such split, so `state` alone cannot be joined to the interface event for
+            # the SAME statement. `line` does not rescue it either: action names are
+            # content-derived and globally deduplicated, so two textually identical
+            # statements in different states share one provenance line.
+            #
+            # Always emitted, equal to `state` when `_split` did not fire, so a consumer
+            # joins on one key unconditionally instead of special-casing the shape.
+            "baseState": self.origin_state.get(state, state),
             "line": line,
             "field": fu,
             "pic": typ.get("pic") or typ.get("category"),
