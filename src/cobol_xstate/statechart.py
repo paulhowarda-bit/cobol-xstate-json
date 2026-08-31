@@ -1546,6 +1546,13 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
     # on an empty selectList: an empty list is also exactly what a FAILED parse leaves
     # behind, so inferring dynamic-ness from it would relabel every unreadable DECLARE
     # as an inherent unknown - the opposite of what this distinction is for.
+    #
+    # A pre-VERSION-5 parse bundle carries NO FOR-form evidence at all - the field did
+    # not exist - so this set stays empty for one and every dynamic cursor in it degrades
+    # to the old behaviour: a cursor-declare-missing note rather than a dynamic_sql
+    # endpoint. That is deliberate and matches the indicator-variable backstop above:
+    # absent means UNKNOWN, and a reader must never treat a missing field as evidence
+    # that the cursor is static. Re-parse to get the classification; do not infer it.
     dynamic_cursors: Dict[str, Optional[str]] = {}
     for spec in ctx.action_sem.values():
         if (spec.get("verb") == "DECLARE" and spec.get("cursor")

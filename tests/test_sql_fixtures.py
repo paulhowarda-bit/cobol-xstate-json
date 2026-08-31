@@ -856,3 +856,45 @@ def test_a_dynamic_cursor_reaches_every_view_the_same_way():
     assert not [r for r in rows if str(r["endpoint"]).startswith("<cursor")]
     for view in (build_business_view(m), build_reactive_view(m)):
         assert "<cursor DYN_CSR>" not in json.dumps(view)
+
+
+def test_a_pre_version_5_parse_bundle_degrades_rather_than_guessing():
+    """A parse bundle written before `cursor_for_kind` existed carries no FOR-form
+    evidence, and such bundles stay readable (a v<=4 bundle opens; only a NEWER one is
+    refused). So the dynamic classification simply does not fire for one, and the FETCH
+    falls back to `cursor-declare-missing`.
+
+    That is the correct degradation, and it is worth a test rather than a comment: the
+    tempting alternative - inferring dynamic-ness from an empty `selectList` - would
+    relabel every UNREADABLE declare in every old bundle as an inherent unknown, which
+    is the exact collapse the recorded form exists to prevent. Absent means UNKNOWN,
+    never "static" and never "dynamic".
+
+    Same backstop shape as the pre-VERSION-4 indicator-variable strip in `statechart`.
+    """
+    src = (EXAMPLES / "sqldyncsr.cbl").read_text()
+    prog = parse_program(src)
+    # Simulate a v<=4 parse: the fields did not exist, so nothing carries them.
+    for para in prog.paragraphs:
+        for st in para.statements:
+            if hasattr(st, "cursor_for_kind"):
+                st.cursor_for_kind = None
+                st.cursor_for_statement = None
+    for decl in prog.sql_cursors:
+        decl.pop("forKind", None)
+        decl.pop("forStatement", None)
+
+    m = build_machine(prog, source_name="sqldyncsr.cbl")
+    dyn = next(s for s in m.semantics["actions"].values()
+               if isinstance(s, dict) and s.get("cursor") == "DYN_CSR"
+               and s.get("verb") == "FETCH")
+    assert "cursorDynamic" not in dyn
+    assert dyn.get("columnsUnresolved") == "cursor-declare-missing"
+    assert "was found in the expanded source" in dyn["columnNote"]
+
+    # ...and the static cursor in the same program is unaffected either way.
+    sta = next(s for s in m.semantics["actions"].values()
+               if isinstance(s, dict) and s.get("cursor") == "ACCT_CSR"
+               and s.get("verb") == "FETCH")
+    assert [(c["column"], c["hostVar"]) for c in sta["columns"]] == [
+        ("FUND_A", "WS-FUND"), ("BALANCE_A", "WS-BAL")]
