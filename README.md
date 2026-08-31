@@ -427,7 +427,7 @@ parsed carelessly.
 ## Development
 
 ```bash
-python -m pytest -q     # ~645 tests in tests (mainframe-artifacts/cobol-parser suites live in the
+python -m pytest -q     # ~740 tests in tests (mainframe-artifacts/cobol-parser suites live in the
                         # mainframe-common repository, the JCL suite in jcl-dependencies;
                         # the tests here find sibling ../mainframe-common and
                         # ../jcl-dependencies checkouts automatically)

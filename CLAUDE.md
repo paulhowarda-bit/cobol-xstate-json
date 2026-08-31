@@ -39,7 +39,7 @@ pip command.
 
 ```bash
 # Run from a checkout, no install needed (root pyproject + conftest sibling discovery)
-python -m pytest -q                                        # this repo's suite (~645 tests)
+python -m pytest -q                                        # this repo's suite (~740 tests)
 PYTHONPATH="../mainframe-common/mainframe-artifacts/src;../mainframe-common/cobol-parser/src;src" python -m cobol_xstate examples/custrpt.cbl
 
 # Or install for real (editable), which is what gives you the console scripts
