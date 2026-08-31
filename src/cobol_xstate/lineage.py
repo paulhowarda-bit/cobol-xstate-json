@@ -250,6 +250,10 @@ class _Lineage:
         # it stands in for.
         self.fold_src: Dict[str, List[str]] = {}
         self.fold_dst: Dict[str, List[str]] = {}
+        # PERFORM target -> why it did not resolve, filled by _successors. An unresolved
+        # call is already flagged there; this keeps WHICH target failed and HOW, so a
+        # state left unreachable behind it can be given a cause instead of a shrug.
+        self._unresolved: Dict[str, str] = {}
         self.succs = self._successors()
         self.guards = machine.semantics.get("guards", {}) or {}
         self.guard_kinds = machine.semantics.get("guardKinds", {}) or {}
@@ -570,7 +574,19 @@ class _Lineage:
             owner, init = _target_owner(target, self.ordered, self.sections)
             cont = next(iter(self._edges(st)), None)
             if owner is None or init not in self.states:
-                self._flag(f"PERFORM {target}: target unresolved; the call is not "
+                # WHY it failed matters to whoever reads the flag. A THRU range whose
+                # endpoints both exist but run backwards is not a missing paragraph, and
+                # reporting it as one sends a reader hunting for a name that is right
+                # there in the source.
+                kind, why = "perform-target-unresolved", "target unresolved"
+                if "__THRU__" in target:
+                    head, tail = target.split("__THRU__", 1)
+                    if head in self.ordered and tail in self.ordered:
+                        kind = "perform-range-inverted"
+                        why = (f"range runs backwards - {head} appears after {tail} in "
+                               f"the source, so the range is empty")
+                self._unresolved[target] = kind
+                self._flag(f"PERFORM {target}: {why}; the call is not "
                            f"followed - origins produced inside it are not traced")
                 succ[name] = [t for t in self._edges(st) if t in self.states]
                 continue
@@ -920,6 +936,79 @@ class _Lineage:
             e["conditionsPartial"] = True
         return e
 
+    # -- states no path reaches ---------------------------------------------
+    #
+    # The fixpoint walks forward from the entry points, so a state nothing reaches is
+    # never visited and emits no row. That is correct - with no path there are no
+    # origins, and naming one would be the guess this tool refuses to make. What was
+    # wrong is that it happened in SILENCE, while `build_interface` walks the config
+    # structurally and maps every statement's columns whether a path reaches it or not.
+    # The two views then disagreed about whether a program touched a table at all, with
+    # nothing in either file to say why.
+
+    def _events_of(self, st: dict) -> List[dict]:
+        """The external events a state's entry run performs, without running the
+        transfer over an origin map.
+
+        Deliberately NOT `_apply`. That one appends to `fills` / `flow` /
+        `dynamic_sites` whenever it is emitting, and those are the primitive facts the
+        dynamic-call view reads back. Feeding it states no path reaches would put
+        unreachable events into a downstream answer - the opposite of the fix.
+        """
+        out: List[dict] = []
+        for aname in st.get("entry", []) or []:
+            prov = self.provenance.get(aname, {})
+            spec = self.actions.get(aname)
+            hits = self._classify_memo.get(aname)
+            if hits is None:
+                hits = _iface._classify(aname, prov.get("cobol", ""), spec, self.dv,
+                                        self.files, self.cursors, self.cursor_cols,
+                                        self.cursor_derivs)
+                self._classify_memo[aname] = hits
+            # Same fallback `_apply` makes: a write into a LINKAGE item is a
+            # caller-visible output the event classifier does not recognize on its own.
+            if not hits and spec:
+                hits = [h for h in _iface._classify_dataflow(spec, self.linkage)
+                        if h["direction"] == "create"]
+            for h in hits:
+                fields = sorted({f.upper() for f in h["fields"]})
+                if not fields:
+                    continue
+                out.append({
+                    "event": _iface._event(h["direction"], h["etype"], h["endpoint"]),
+                    "direction": "input" if h["direction"] == "get" else "output",
+                    "endpoint": h["endpoint"],
+                    "endpointType": h["etype"],
+                    "verb": h["verb"],
+                    "fields": fields,
+                    # host variable -> COLUMN, the key a consumer joins the interface
+                    # overlay on. Reporting it is the whole point of this block: it is
+                    # exactly the pair that appears there and is missing from `rows`.
+                    "columns": h.get("columns") or {},
+                    "line": prov.get("line", 0),
+                })
+        return out
+
+    def _unreached_reason(self, state: str, preds: Dict[str, List[str]],
+                          reached: Set[str]) -> str:
+        """Why a state was never entered. Two of these are gaps in THIS tool and two
+        are properties of the program, and a consumer triaging a corpus needs to sort
+        them apart before deciding whether anything is wrong."""
+        base = self.origin_state.get(state, state)
+        for target, kind in self._unresolved.items():
+            head = target.split("__THRU__", 1)[0]
+            if base == target or base == head or base.startswith(head + "__"):
+                return kind
+        ps = [p for p in preds.get(state, []) if p != state]
+        if not ps:
+            return "no-static-predecessor"
+        if any(p in reached for p in ps):
+            # Should not arise: preds is built from succs, so a reached predecessor
+            # would have queued this state. Named rather than asserted, because being
+            # wrong about that here must not silently look like dead code.
+            return "reached-predecessor-not-propagated"
+        return "cascade"
+
     def run(self) -> dict:
         # Solved once per instance. The dynamic-call view wants the primitive facts this
         # pass records (`fills`/`flow`/`dynamic_sites`) and the lineage table wants the
@@ -981,10 +1070,29 @@ class _Lineage:
                         queued.add(t)
 
         rows: List[dict] = []
+        unreached: List[dict] = []
+        reached = {s for s in self.states if IN[s] is not None}
         for s in self.states:
             if IN[s] is None:                 # unreachable from any entry
+                lost = self._events_of(self.states[s])
+                if lost:
+                    unreached.append({
+                        "state": s,
+                        # `_split` renames a segment; the interface overlay performs no
+                        # such split, so the base name is what a consumer can join on.
+                        "baseState": self.origin_state.get(s, s),
+                        "reason": self._unreached_reason(s, preds, reached),
+                        "events": lost,
+                    })
                 continue
             self._apply(s, self.states[s], IN[s], rows)
+
+        for u in unreached:
+            n = sum(len(e["fields"]) for e in u["events"])
+            self._flag(f"{u['state']}: no path from an entry point reaches it "
+                       f"({u['reason']}); the {len(u['events'])} external event(s) it "
+                       f"performs and their {n} field(s) are absent from 'rows', while "
+                       f"the interface overlay still lists them")
 
         self._view = {
             "format": "cobol-xstate-lineage",
@@ -1011,6 +1119,28 @@ class _Lineage:
             "rows": rows,
             "flags": self.flags,
         }
+        # Present ONLY when something was actually lost. A program whose every
+        # event-carrying state is reachable says nothing here rather than saying
+        # nothing at length - which is also what keeps every existing golden
+        # byte-identical across this change.
+        if unreached:
+            self._view["unreached"] = {
+                "note": (
+                    "States that perform an external event and that no path from an "
+                    "entry point reaches. They contribute NO rows above: with no path "
+                    "there are no origins, and naming one would be a guess. They are "
+                    "listed because 'interface' walks the program structurally and "
+                    "DOES map these statements' columns, so a consumer joining the two "
+                    "views finds a (field, column) pair there and no row here - a "
+                    "difference that used to be silent. 'reason' sorts the causes: "
+                    "'perform-target-unresolved' and 'perform-range-inverted' are gaps "
+                    "in THIS tool's control-flow recovery and mean rows are genuinely "
+                    "missing; 'no-static-predecessor' and 'cascade' usually mean the "
+                    "program itself never runs the code, in which case having no rows "
+                    "is the correct answer."
+                ),
+                "states": unreached,
+            }
         return self._view
 
 

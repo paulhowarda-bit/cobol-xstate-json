@@ -743,3 +743,79 @@ def test_write_site_dedup_keeps_first_occurrence_order():
         entries = r.get("changedBy") or []
         keys = [_entry_key(e) for e in entries]
         assert len(keys) == len(set(keys)), r["field"]
+
+
+# --------------------------------------------------------------------------- #
+# states no path reaches (examples/linedrop.cbl)
+#
+# `interface` maps a statement's columns structurally; `lineage` only walks
+# forward from the entry points. Where they differ the difference has to be
+# stated, or a consumer joining the two views cannot tell a gap in our
+# control-flow recovery from dead code in the program.
+# --------------------------------------------------------------------------- #
+
+def _unreached(d: dict) -> dict:
+    return {u["state"]: u for u in d["unreached"]["states"]}
+
+
+def test_unreached_absent_when_nothing_is_lost():
+    # The common case, and the reason every pre-existing golden is unchanged:
+    # a program whose event-carrying states are all reachable says nothing.
+    assert "unreached" not in _lin("lineage.cbl")
+    assert "unreached" not in _lin("sqlhost.cbl")
+
+
+def test_only_the_reachable_select_produces_a_row():
+    d = _lin("linedrop.cbl")
+    assert [(r["event"], r["field"]) for r in d["rows"]] == [
+        ("GET.DB2.T_RULE", "WS-RULE-DS")]
+
+
+def test_every_unreached_event_carrying_state_is_named():
+    d = _lin("linedrop.cbl")
+    assert set(_unreached(d)) == {"8000-ORPHAN", "5000-TAIL", "9000-CASCADE"}
+
+
+def test_the_reason_separates_our_gap_from_the_program_s_dead_code():
+    u = _unreached(_lin("linedrop.cbl"))
+    # a backwards THRU range is OUR gap: both endpoints exist, so the row is
+    # genuinely missing and the flag must not read as a missing paragraph.
+    assert u["5000-TAIL"]["reason"] == "perform-range-inverted"
+    # one bad range strands whatever falls out of it, too
+    assert u["9000-CASCADE"]["reason"] == "cascade"
+    # nothing performs it and nothing falls into it: the program's own dead code
+    assert u["8000-ORPHAN"]["reason"] == "no-static-predecessor"
+
+
+def test_an_inverted_range_is_not_reported_as_a_missing_paragraph():
+    flags = " ".join(_lin("linedrop.cbl")["flags"])
+    assert "range runs backwards" in flags
+    assert "5000-TAIL__THRU__1000-REACHED: target unresolved" not in flags
+
+
+def test_an_unreached_state_carries_the_column_pair_the_interface_maps():
+    # The whole point: this is the (hostVar, column) pair a consumer finds in the
+    # interface overlay and cannot find in `rows`.
+    ev = _unreached(_lin("linedrop.cbl"))["5000-TAIL"]["events"]
+    assert len(ev) == 1
+    assert ev[0]["event"] == "GET.DB2.T_JNL"
+    assert ev[0]["fields"] == ["WS-JNL-DS"]
+    assert {(c["hostVar"], c["column"]) for c in ev[0]["columns"]} == {
+        ("WS-JNL-DS", "JNL_DS")}
+
+
+def test_each_unreached_state_also_gets_a_flag():
+    d = _lin("linedrop.cbl")
+    for state in _unreached(d):
+        assert any(f.startswith(f"{state}: no path from an entry point reaches it")
+                   for f in d["flags"]), f"no flag for {state}"
+
+
+def test_unreached_states_do_not_leak_into_the_dynamic_call_primitives():
+    # `_events_of` deliberately avoids `_apply`, which appends to fills/flow/
+    # dynamic_sites while emitting. An unreachable event must not become a fact
+    # the dynamic-call view reads back as real.
+    src = (EXAMPLES / "linedrop.cbl").read_text()
+    lin = build_machine(parse_program(src), source_name="linedrop.cbl").lineage()
+    lin.run()
+    assert {f["field"] for f in lin.fills} == {"WS-RULE-DS"}
