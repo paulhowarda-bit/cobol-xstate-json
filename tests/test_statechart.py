@@ -685,3 +685,42 @@ def test_goto_unknown_target_is_flagged_and_rerouted():
             yield from targets(st.get("states", {}))
     known = set(machine.config["states"])
     assert all(t in known for t in targets(machine.config["states"]))
+
+
+def test_padded_quoted_cics_resource_operand_is_recorded_as_a_literal():
+    """`_CICS_RES_OPT` is the THIRD copy of the padded-operand bug, and the causal one:
+    when it fails to match, `spec["resources"]` is empty and `interface._resource()` is
+    forced onto its own fallback. It is not the reported symptom - patching interface.py
+    alone recovers the endpoint name - but leaving it broken degrades the
+    via/reason/dynamic provenance for every padded operand.
+    """
+    m = _machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC CICS XCTL PROGRAM('ACTC000 ') END-EXEC.\n")
+    spec = m.semantics["actions"]["exec_cics_xctl"]
+    # A quoted literal is a known name: no `dynamic`, no candidates, no flag asking
+    # the estate to resolve it.
+    assert spec["resources"]["PROGRAM"] == {"name": "ACTC000"}
+    assert not [f for f in m.flags if "dynamic CICS" in f["message"]]
+
+
+def test_unpadded_and_data_name_cics_operands_still_classify_correctly():
+    """The regression guard: the quoted form stays a literal, and the unquoted form
+    stays a resolution candidate rather than being mistaken for a literal."""
+    m = _machine(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-PGM   PIC X(8) VALUE 'ACTC150'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC CICS LINK PROGRAM('ACTC099') END-EXEC\n"
+        "           EXEC CICS XCTL PROGRAM(WS-PGM) END-EXEC.\n")
+    acts = m.semantics["actions"]
+    assert acts["link_ACTC099"]["resources"]["PROGRAM"] == {"name": "ACTC099"}
+    xctl = acts["exec_cics_xctl"]["resources"]["PROGRAM"]
+    assert xctl["name"] == "ACTC150" and xctl["via"] == "WS-PGM"

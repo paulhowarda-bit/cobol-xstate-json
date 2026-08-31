@@ -780,3 +780,70 @@ def test_an_indicator_variable_does_not_demote_the_write_it_qualifies():
     upd = _sql_event(iface, "UPDATE")
     assert "WS-BAL" in upd["fields"]
     assert upd["params"] == ["WS-ID"]
+
+
+# -- CICS operands are blank-padded to their 8-byte field inside the quotes ----------
+# `PROGRAM('ACTC000 ')` used to match nothing at all: the optional closing quote sat
+# BEFORE the `\s*`, so it could only match a quote adjacent to the captured name. The
+# failure then surfaced as a name-shaped sentinel (`<program>`), not as an error - and
+# two padded targets in one program deduped into ONE `<program>` endpoint, dropping the
+# second callee from the dependency graph entirely.
+_PADDED_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. PADDED.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-FLAG   PIC X VALUE 'N'.\n"
+    "       01  WS-REC    PIC X(80).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           IF WS-FLAG = 'Y'\n"
+    "               EXEC CICS XCTL PROGRAM('ACTC000 ') END-EXEC\n"
+    "           ELSE\n"
+    "               EXEC CICS XCTL PROGRAM ('ACTC099 ') END-EXEC\n"
+    "           END-IF\n"
+    "           EXEC CICS READ FILE('CUSTFIL ') INTO(WS-REC) END-EXEC\n"
+    "           EXEC CICS SEND MAP('MP1     ') MAPSET('MSET1   ') END-EXEC\n"
+    "           EXEC CICS READQ TS QUEUE('QN1     ') INTO(WS-REC) END-EXEC\n"
+    "           EXEC CICS START TRANSID('CQ03 ') END-EXEC\n"
+    "           EXEC CICS ABEND ABCODE('NOCA ') END-EXEC.\n"
+)
+
+
+def test_quoted_blank_padded_program_operands_do_not_collapse_to_a_sentinel():
+    iface = _iface_of(_PADDED_SRC)
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    # BOTH callees survive - they used to dedupe into a single `<program>` row.
+    assert endpoints["ACTC000"]["type"] == "program"
+    assert endpoints["ACTC099"]["type"] == "program"
+    assert "<program>" not in endpoints
+
+
+def test_padded_variants_for_every_resource_keyword():
+    """FILE/MAP/MAPSET/QUEUE each degraded to their own sentinel, and TRANSID/ABCODE
+    reach this through _CICS_OPT rather than _CICS_RESOURCE, so they need their own
+    cases - fixing one pattern would not have fixed the other."""
+    iface = _iface_of(_PADDED_SRC)
+    endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert endpoints["CUSTFIL"]["type"] == "file"
+    assert endpoints["MP1"]["type"] == "terminal"
+    assert endpoints["QN1"]["type"] == "queue"
+    assert endpoints["CQ03"]["type"] == "transaction"
+    # ...and no name-shaped sentinel is left anywhere in the overlay.
+    assert not [n for n in endpoints if n.startswith("<")]
+
+
+def test_unpadded_and_unquoted_cics_operands_still_resolve():
+    """The regression guard for the fix itself: the two forms that already worked."""
+    iface = _iface_of(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-PGM   PIC X(8) VALUE 'ACTC150'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC CICS LINK PROGRAM('ACTC099') END-EXEC\n"
+        "           EXEC CICS XCTL PROGRAM(WS-PGM) END-EXEC.\n")
+    endpoints = {e["endpoint"] for e in iface["endpoints"]}
+    assert "ACTC099" in endpoints and "ACTC150" in endpoints

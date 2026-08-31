@@ -49,10 +49,10 @@ _DYNAMIC_SQL = "dynamic_sql"
 
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|TSQUEUE|TDQUEUE)\s*\(\s*'?"
-    r"([A-Z0-9_.$#@-]+)'?\s*\)", re.I)
+    r"([A-Z0-9_.$#@-]+)\s*'?\s*\)", re.I)
 _CICS_COMMAREA = re.compile(r"\bCOMMAREA\s*\(\s*([A-Z0-9_.$#@-]+)\s*\)", re.I)
 _CICS_OPT = re.compile(r"\b(INTO|FROM|RIDFLD|TRANSID|QUEUE|ABCODE|SET)\s*\(\s*'?"
-                       r"([A-Z0-9_.$#@-]+)'?\s*\)", re.I)
+                       r"([A-Z0-9_.$#@-]+)\s*'?\s*\)", re.I)
 # Data items that carry an external subsystem's response/return status - branching on
 # them is the program reacting to a response event (DB2 SQLCODE, VSAM/CICS file status).
 _RESPONSE_ITEMS = {"SQLCODE", "SQLSTATE", "SQLERRD", "EIBRESP", "EIBRESP2"}

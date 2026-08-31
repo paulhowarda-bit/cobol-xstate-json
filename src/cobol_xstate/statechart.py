@@ -347,7 +347,7 @@ class _BuildCtx:
 # not a resolution candidate.
 _CICS_RES_OPT = re.compile(
     r"\b(PROGRAM|TRANSID|QUEUE|FILE|DATASET|MAP|MAPSET)\s*\(\s*(['\"]?)"
-    r"([A-Z0-9$#@._-]+)['\"]?\s*\)", re.I)
+    r"([A-Z0-9$#@._-]+)\s*['\"]?\s*\)", re.I)
 
 
 def _call_args_suffix(st: CallStmt) -> str:

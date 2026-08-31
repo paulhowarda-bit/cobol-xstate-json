@@ -365,3 +365,27 @@ def test_manifest_shape_and_stable_ordering():
     kinds = [a["kind"] for a in man["artifacts"]]
     assert kinds.index("db2-table") < kinds.index("program")
     assert kinds.index("program") < kinds.index("caller")
+
+
+def test_no_name_shaped_sentinel_reaches_the_manifest_for_a_padded_operand():
+    """`endpoint or "<program>"` is a name-shaped sentinel, and a manifest row is a
+    FETCHABLE row: `<program>` reached this repo's fetch path and was reported as a
+    missing application program - a fabricated dependency. The sentinel is retained
+    deliberately for operands that genuinely cannot be parsed; this pins that a merely
+    blank-padded one is not one of them, and that two padded targets stay two rows.
+    """
+    manifest = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           IF WS-FLAG = 'Y'\n"
+        "               EXEC CICS XCTL PROGRAM('ACTC000 ') END-EXEC\n"
+        "           ELSE\n"
+        "               EXEC CICS XCTL PROGRAM ('ACTC099 ') END-EXEC\n"
+        "           END-IF\n"
+        "           EXEC CICS READ FILE('CUSTFIL ') INTO(WS-REC) END-EXEC.\n",
+        "       01  WS-FLAG   PIC X VALUE 'N'.\n"
+        "       01  WS-REC    PIC X(80).\n")
+    names = _by_name(manifest)
+    assert not [n for n in names if n.startswith("<")]
+    assert names["ACTC000"]["kind"] == "program"
+    assert names["ACTC099"]["kind"] == "program"
+    assert names["CUSTFIL"]["kind"] == "file"
