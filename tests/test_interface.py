@@ -873,3 +873,84 @@ def test_seed_cursor_maps_lets_the_more_specific_evidence_win():
     assert cursors == {"C1": "SEEN_IN_PROC", "C2": "T_TWO"}   # C1 kept, names uppercased
     assert cols == {"C1": ["A"], "C2": ["B", "C"]}
     assert derivs == {"C1": [None]}          # no proc-division entry, so the scan wins
+
+
+# --------------------------------------------------------------------------- #
+# Column-mapping refusals carry a machine-readable TOKEN, not only prose.
+# (Upstream ledger batch 2, item 10.)
+#
+# `columnsUnresolved` means the recovery FAILED - see interface._note. A statement
+# that mapped SOME of its columns has not failed, and deliberately carries no token
+# (test_sql_fixtures.test_a_residual_note_is_not_an_unresolved_event pins that).
+# --------------------------------------------------------------------------- #
+
+def test_an_insert_arity_event_carries_columns_unresolved():
+    """The parser-side INSERT refusal now publishes the same token the FETCH path has
+    published all along, so a consumer branches on the reason instead of matching on
+    wording that was never a contract."""
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               INSERT INTO CUSTOMER (BAL, NAME)\n"
+        "               VALUES (:WS-BAL, :WS-NAME, :WS-REF)\n"
+        "           END-EXEC.\n", _DML_DATA)
+    ins = _sql_event(iface, "INSERT")
+    assert ins["columnsUnresolved"] == "count-mismatch"
+    assert ins["columnNote"]
+
+
+def test_a_select_arity_event_carries_the_same_token():
+    """Same failure, other parser path, same token - which is the whole point."""
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               SELECT BAL, NAME INTO :WS-BAL, :WS-NAME, :WS-REF\n"
+        "               FROM CUSTOMER WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    sel = _sql_event(iface, "SELECT")
+    assert sel["columnsUnresolved"] == "count-mismatch"
+
+
+def test_an_insert_from_a_fullselect_carries_its_own_token():
+    """A different reason gets a different token: the values come from a query, which
+    is not an arity failure and must not be reported as one."""
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               INSERT INTO CUSTOMER (BAL, NAME)\n"
+        "               SELECT TOT, NM FROM LEDGER\n"
+        "           END-EXEC.\n", _DML_DATA)
+    ins = _sql_event(iface, "INSERT")
+    assert ins["columnsUnresolved"] == "insert-from-fullselect"
+
+
+def test_a_correlating_statement_carries_no_token_at_all():
+    """The negative case. A token on a statement that mapped cleanly would make every
+    consumer's skip-on-token filter throw away good mappings."""
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               SELECT BAL, NAME INTO :WS-BAL, :WS-NAME\n"
+        "               FROM CUSTOMER WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    sel = _sql_event(iface, "SELECT")
+    assert "columnsUnresolved" not in sel
+    assert "columnNote" not in sel
+
+
+def test_a_subselect_set_maps_its_value_variable_but_not_its_row_selector():
+    """`SET BAL = (SELECT TOT FROM LEDGER WHERE REF = :WS-REF)` writes BAL from TOT.
+    :WS-REF only picks the row, so it stays a param - while a variable that really
+    does feed the value becomes a derived entry rather than vanishing."""
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "               UPDATE CUSTOMER SET BAL = (:WS-BAL + 1)\n"
+        "               WHERE ID = :WS-ID\n"
+        "           END-EXEC.\n", _DML_DATA)
+    upd = _sql_event(iface, "UPDATE")
+    assert upd["fields"] == ["WS-BAL"]
+    entry = next(c for c in upd["columns"] if c.get("hostVar") == "WS-BAL")
+    assert entry.get("derived") is True
+    assert entry.get("derivedFrom") == ["BAL"]
+    assert "column" not in entry or entry["column"] is None

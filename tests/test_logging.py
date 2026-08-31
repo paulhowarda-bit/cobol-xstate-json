@@ -179,14 +179,26 @@ def test_default_run_still_prints_progress(pkg_logger, tmp_path, capsys):
 
 
 def test_quiet_hides_progress_but_keeps_warnings(pkg_logger, tmp_path, capsys):
-    assert run([_src(tmp_path), "--outdir", str(tmp_path / "o"), "-q"]) == 0
+    """`-q` is a LEVEL, not a mute button. The warning it must keep is forced into
+    existence here rather than inherited from whatever estate client the machine has:
+    asserting `"WARNING" in err` against an ambient condition passes only on a box with
+    no estate access, and this needs SOME warning to be guaranteed."""
+    from fakes.estate import NO_ESTATE_CLIENT
+    assert run([_src(tmp_path), "--outdir", str(tmp_path / "o"), "-q",
+                "--fetcher", NO_ESTATE_CLIENT]) == 0
     err = capsys.readouterr().err
     assert "wrote" not in err                 # INFO progress suppressed
     assert "WARNING" in err                    # the estate-unavailable warning still shows
 
 
 def test_double_quiet_silences_everything_but_errors(pkg_logger, tmp_path, capsys):
-    assert run([_src(tmp_path), "--outdir", str(tmp_path / "o"), "-qq"]) == 0
+    """Forced for the same reason, and here it is what gives the test its meaning: the
+    warning whose absence is asserted is one the run WOULD have emitted, so this now
+    tells `-qq` silenced it apart from nothing having been logged at all. Against an
+    ambient estate it passed vacuously."""
+    from fakes.estate import NO_ESTATE_CLIENT
+    assert run([_src(tmp_path), "--outdir", str(tmp_path / "o"), "-qq",
+                "--fetcher", NO_ESTATE_CLIENT]) == 0
     assert capsys.readouterr().err.strip() == ""
 
 

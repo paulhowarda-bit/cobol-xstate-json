@@ -1,6 +1,6 @@
 """A deterministic stand-in for the estate's artifact service.
 
-The real default client is ``cast_clients.mf_fetch:fetch_artifact`` - an external,
+The real default client is ``mf_fetch:fetch_artifact`` - an external,
 out-of-tree library that talks to a mainframe share. Nothing in this repository can
 reach it, so without a stand-in the two retrieval reports (``.prefetch.json`` /
 ``.fetch.json``) are untestable and un-hashable, and the byte-stability ratchet can
@@ -32,6 +32,15 @@ rather than from wherever a gather box happened to put it.
 """
 
 from __future__ import annotations
+
+#: A client that cannot exist, whatever happens to be installed. The default
+#: (``mf_fetch``) is a real out-of-tree library, so "there is no estate client here" is
+#: a fact about the MACHINE, not about the code - a test that asserts it without asking
+#: for it passes on a box with no estate access and fails on every box that has some,
+#: which is exactly backwards. Any test that needs the unavailable branch forces it with
+#: this spec, so the condition is the test's own and cannot be inherited or go stale
+#: when the real default is renamed (it has been, twice).
+NO_ESTATE_CLIENT = "estate_client_not_installed_here:fetch_artifact"
 
 # Every answer is a plain string of member text. Kept small but syntactically real, so a
 # parse that consumes one does not fall over for reasons unrelated to what is under test.

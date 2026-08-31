@@ -39,7 +39,7 @@ pip command.
 
 ```bash
 # Run from a checkout, no install needed (root pyproject + conftest sibling discovery)
-python -m pytest -q                                        # this repo's suite (~740 tests)
+python -m pytest -q                                        # this repo's suite (~750 tests)
 PYTHONPATH="../mainframe-common/mainframe-artifacts/src;../mainframe-common/cobol-parser/src;src" python -m cobol_xstate examples/custrpt.cbl
 
 # Or install for real (editable), which is what gives you the console scripts
@@ -127,7 +127,7 @@ Every state/guard/action expression is a faithful translation of the COBOL its `
 
 ### Two-stage dependency retrieval, and the JCL axis
 
-Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `fetch.py`, via `artifact_service.py`; `cast_clients.mf_fetch` is the default estate client). Order matters: a copybook that doesn't arrive drops its `VALUE` clauses, which turns a resolvable dynamic `CALL` into an unresolved name — so it never becomes a fetchable row. The COBOL says *what* a program does, not *what dataset* it does it to — that binding lives in JCL: the `jcl-dependencies` repository parses jobs/PROCs, and `--bind-jcl` joins a program's file ddnames to real datasets through its `bind_cobol_artifacts`.
+Every run retrieves dependencies with no flag to disable it (`prefetch.py` → `fetch.py`, via `artifact_service.py`; `mf_fetch` is the default estate client). Order matters: a copybook that doesn't arrive drops its `VALUE` clauses, which turns a resolvable dynamic `CALL` into an unresolved name — so it never becomes a fetchable row. The COBOL says *what* a program does, not *what dataset* it does it to — that binding lives in JCL: the `jcl-dependencies` repository parses jobs/PROCs, and `--bind-jcl` joins a program's file ddnames to real datasets through its `bind_cobol_artifacts`.
 
 ### The decimal runtime ships but is never executed by the converter
 

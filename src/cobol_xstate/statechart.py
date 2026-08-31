@@ -397,6 +397,12 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         spec["selectList"] = st.select_list      # a cursor DECLARE's columns, for its FETCH
     if st.column_note:
         spec["columnNote"] = st.column_note
+    if st.column_unresolved:
+        # The same fact as the note, as a token. `interface` copies both onto the
+        # event, so a consumer can branch on the REASON without matching on wording
+        # that was never a contract - which is what the FETCH path already offered
+        # and the two parser-side refusals did not.
+        spec["columnsUnresolved"] = st.column_unresolved
     if st.cursor:
         spec["cursor"] = st.cursor               # a FETCH's join back to its DECLARE
     # Only the DYNAMIC form is stamped. `semantics.actions` is serialized into the
@@ -1796,7 +1802,10 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
         spec["columns"] = cols
         spec["columnsFrom"] = (f"DECLARE TABLE {entry['table']}"
                                + (f" via synonym {table}" if base else ""))
+        # The parse-time refusal has been resolved here, so its note AND its token both
+        # go: leaving either behind would report a failure that this pass just fixed.
         spec.pop("columnNote", None)
+        spec.pop("columnsUnresolved", None)
         if unsourced:
             spec["columnNote"] = (
                 f"{len(unsourced)} column(s) written from a literal or expression "

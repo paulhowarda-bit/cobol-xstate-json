@@ -180,11 +180,27 @@ def test_every_run_writes_both_retrieval_reports(tmp_path):
     fetched = json.loads((d / "banktran.fetch.json").read_text(encoding="utf-8"))
     assert pre["format"] == "cobol-xstate-prefetch"
     assert fetched["format"] == "cobol-xstate-fetch"
-    # No estate client on a test machine: that must be stated, never left to look like
-    # an estate that was asked and had nothing - and the message must NAME the client it
-    # could not load (cast_clients.mf_fetch, the estate's own module).
+
+
+def test_an_unreachable_estate_client_is_stated_not_implied(tmp_path):
+    """Unavailability must be a STATED fact, never left to look like an estate that was
+    asked and had nothing: an empty result and an unreachable service are different
+    things, and the report has to distinguish them. The message must also NAME the
+    client it could not load.
+
+    The condition is FORCED rather than inherited. This used to assert against whatever
+    was installed, which made it a test about the machine - green here, red on every box
+    with estate access - and it hardcoded a client name that had since been renamed. Both
+    faults have the same cause and the same fix: ask for the condition."""
+    import json
+    from fakes.estate import NO_ESTATE_CLIENT
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    assert run([str(src), "--outdir", str(tmp_path),
+                "--fetcher", NO_ESTATE_CLIENT]) == 0
+    pre = json.loads((_run_dir(tmp_path) / "banktran.prefetch.json")
+                     .read_text(encoding="utf-8"))
     assert pre["serviceAvailable"] is False
-    assert "cast_clients" in pre["serviceUnavailable"]
+    assert "estate_client_not_installed_here" in pre["serviceUnavailable"]
 
 
 def test_there_is_no_second_way_to_place_output(tmp_path):
