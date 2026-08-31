@@ -627,3 +627,119 @@ def test_every_lineage_row_names_a_real_state_through_its_base():
         states = set(m.config["states"])
         for r in build_lineage(m)["rows"]:
             assert r["baseState"] in states, (name, r["state"], r["baseState"])
+
+
+# --------------------------------------------------------------------------- #
+# memoisation: byte-identical by construction, and scoped so it stays correct
+# --------------------------------------------------------------------------- #
+
+def test_classify_is_called_once_per_action_not_once_per_visit():
+    """The fixpoint calls `_apply` once per state PER VISIT, and once more in the final
+    rows pass. Every argument `_apply` hands `_classify` other than the action name is
+    fixed for the instance's lifetime, so the answer is invariant across visits - but
+    `_classify` does `mask_literals`, several regex scans and a `_DataView.leaves` walk
+    on each one."""
+    from cobol_xstate import interface as _iface
+    src = (EXAMPLES / "lineage.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="lineage.cbl")
+    lin = m.lineage()
+    calls = []
+    real = _iface._classify
+
+    def counting(*a, **k):
+        calls.append(a[0])
+        return real(*a, **k)
+
+    _iface._classify = counting
+    try:
+        lin.run()
+    finally:
+        _iface._classify = real
+    assert calls, "expected the fixpoint to classify something"
+    assert len(calls) == len(set(calls)), \
+        "an action was classified more than once: %r" % (
+            sorted({c for c in calls if calls.count(c) > 1}),)
+
+
+def test_the_classify_memo_is_scoped_to_the_lineage_instance():
+    """BLOCKING property. `_classify` is a module-level function, and the obvious
+    reading - memoise it with `lru_cache` - is WRONG: it is invariant per `_Lineage`
+    instance, not across CALLERS. Its answer depends on the cursor maps handed to it,
+    and reactive builds two provenance-only maps deliberately left unseeded because
+    they consume only `h["direction"]`.
+
+    `examples/sqlwscsr.cbl` is the counterexample the repo already ships: its cursor is
+    DECLAREd in WORKING-STORAGE, so `exec_sql_fetch` classifies as `T_MMAA_ACC_ANAL`
+    from a seeded caller and as `<cursor ACCT_CSR>` from an unseeded one. A
+    module-level cache would return whichever ran first and silently corrupt the other,
+    with NO test failure - which is why this test exists rather than a comment.
+    """
+    from cobol_xstate import interface as _iface
+    from cobol_xstate.reactive import build_reactive_view
+    src = (EXAMPLES / "sqlwscsr.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="sqlwscsr.cbl")
+
+    seen = {}
+    real = _iface._classify
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        for h in out or []:
+            seen.setdefault(a[0], set()).add((h.get("etype"), h.get("endpoint")))
+        return out
+
+    _iface._classify = spy
+    try:
+        m.lineage().run()
+        build_reactive_view(m)
+    finally:
+        _iface._classify = real
+
+    # The divergence is real and must stay visible: two different answers for ONE
+    # action name across callers. If this ever collapses to one, the memo could safely
+    # widen - but until then, widening it is a silent wrong answer.
+    assert len(seen["exec_sql_fetch"]) > 1, (
+        "expected exec_sql_fetch to classify differently across callers; "
+        "got %r" % (seen["exec_sql_fetch"],))
+    assert ("db2", "T_MMAA_ACC_ANAL") in seen["exec_sql_fetch"]
+    assert ("db2", "<cursor ACCT_CSR>") in seen["exec_sql_fetch"]
+
+    # ...and the lineage view, which is the memo's owner, reports only the seeded one.
+    assert {r["endpoint"] for r in build_lineage(m)["rows"]} == {"T_MMAA_ACC_ANAL"}
+
+
+def test_data_view_leaves_is_memoised_and_answers_the_same():
+    from cobol_xstate.interface import _DataView
+    data = {
+        "REC": {"parent": None},
+        "GRP": {"parent": "REC"},
+        "A": {"parent": "GRP"}, "B": {"parent": "GRP"},
+        "C": {"parent": "REC"},
+    }
+    dv = _DataView(data)
+    first = dv.leaves("REC")
+    assert first == ["A", "B", "C"]
+    assert dv.leaves("REC") == first
+    assert dv.leaves("REC") is first          # the same object, not a rebuilt copy
+    assert dv.record_fields("REC") == ["REC", "A", "B", "C"]
+    assert dv.record_fields("REC") is dv.record_fields("REC")
+    # a second view over different data must not see the first one's answers
+    other = _DataView({"REC": {"parent": None}})
+    assert other.leaves("REC") == ["REC"]
+
+
+def test_write_site_dedup_keeps_first_occurrence_order():
+    """The `seen` set replaced an `x not in list` scan. It must dedup the same entries
+    and keep the same order - the entries have no `state` key, so the key is the
+    canonical form of the whole entry, conditions included."""
+    from cobol_xstate.lineage import _entry_key
+    a = {"action": "MOVE_A", "line": 1, "conditions": [{"guard": "g", "negated": False}]}
+    b = {"line": 1, "action": "MOVE_A", "conditions": [{"negated": False, "guard": "g"}]}
+    c = {"action": "MOVE_A", "line": 1, "conditions": [{"guard": "g", "negated": True}]}
+    assert _entry_key(a) == _entry_key(b)     # key order must not matter
+    assert _entry_key(a) != _entry_key(c)     # a differing condition must not collapse
+    d = _lin("lineage.cbl")
+    for r in d["rows"]:
+        entries = r.get("changedBy") or []
+        keys = [_entry_key(e) for e in entries]
+        assert len(keys) == len(set(keys)), r["field"]

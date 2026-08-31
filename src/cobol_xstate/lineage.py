@@ -40,6 +40,7 @@ Honest limits, all surfaced in ``flags`` rather than guessed:
 
 from __future__ import annotations
 
+import json
 import re
 from collections import deque
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
@@ -170,6 +171,18 @@ def _cond_text(name: str, tree: Optional[dict], negated: bool) -> Optional[str]:
 # the analysis
 # --------------------------------------------------------------------------- #
 
+def _entry_key(entry: dict) -> str:
+    """A canonical, hashable form of a write-site entry, for order-preserving dedup.
+
+    The entry is `{"action", "line"}` plus `_write_entry`'s condition keys, one of which
+    (`conditions`) is a LIST OF DICTS - so it is neither hashable nor cheap to compare.
+    `json.dumps(..., sort_keys=True)` is stable for these (str/int/bool/None leaves
+    only), which is what lets a `seen` set replace an `x not in list` scan without
+    changing which entry survives or the order they come out in.
+    """
+    return json.dumps(entry, sort_keys=True, default=str)
+
+
 class _Lineage:
     def __init__(self, machine: Machine):
         self.m = machine
@@ -201,6 +214,22 @@ class _Lineage:
         # endpoint is a phantom `<cursor X>` while the bundle event names the table.
         _iface.seed_cursor_maps(self.cursors, self.cursor_cols, self.cursor_derivs,
                                 getattr(machine, "sql_cursors", None))
+        # action name -> its classification. Every argument `_apply` passes to
+        # `_classify` other than the name is fixed for this instance's lifetime, so the
+        # result is invariant across visits - but the worklist calls `_apply` once per
+        # state PER VISIT, and once more in the final rows pass, and `_classify` does
+        # `mask_literals`, several regex scans and a `_DataView.leaves` walk each time.
+        #
+        # SCOPED TO THE INSTANCE, and that is not a stylistic choice. `_classify` is a
+        # module-level function, but it is NOT invariant across CALLERS: its answer
+        # depends on the cursor maps handed to it, and reactive builds two
+        # provenance-only maps deliberately left unseeded (they consume booleans only).
+        # `examples/sqlwscsr.cbl` proves it - action `exec_sql_fetch` classifies as
+        # `T_MMAA_ACC_ANAL` here and as `<cursor ACCT_CSR>` there. A module-level
+        # `lru_cache` on `_classify` would return whichever answer was computed first
+        # and silently corrupt the other view, with no test failure, because those two
+        # sites read only `h["direction"]`.
+        self._classify_memo: Dict[str, List[dict]] = {}
         self.flags: List[str] = []
         # Primitive provenance facts, recorded during the final (row-emitting) pass so a
         # backward query can answer "where did THIS item's value come from" for an item
@@ -591,9 +620,12 @@ class _Lineage:
             cobol = prov.get("cobol", "")
             line = prov.get("line", 0)
             spec = self.actions.get(aname)
-            hits = _iface._classify(aname, cobol, spec, self.dv, self.files,
-                                    self.cursors, self.cursor_cols,
-                                    self.cursor_derivs)
+            hits = self._classify_memo.get(aname)
+            if hits is None:
+                hits = _iface._classify(aname, cobol, spec, self.dv, self.files,
+                                        self.cursors, self.cursor_cols,
+                                        self.cursor_derivs)
+                self._classify_memo[aname] = hits
             got = [h for h in hits if h["direction"] == "get"]
             made = [h for h in hits if h["direction"] == "create"]
             # A MOVE / COMPUTE / SET into a LINKAGE (COMMAREA) field or RETURN-CODE is the
@@ -723,10 +755,17 @@ class _Lineage:
         fu = field.upper()
         out = list(self.changers.get(fu, []))
         if not out:
+            # Same dedup as the `changers` build, and the same reason for a `seen` set
+            # rather than `if e not in out`: a wide group merges every child's writes,
+            # each comparison walking a nested `conditions` list.
+            seen: Set[str] = set()
             for l in self.dv.leaves(fu):
                 for e in self.changers.get(l, []):
-                    if e not in out:
-                        out.append(e)
+                    k = _entry_key(e)
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    out.append(e)
         return out
 
     def _row(self, state: str, hit: dict, direction: str, field: str,
@@ -827,6 +866,23 @@ class _Lineage:
         transaction is a deposit" - the difference between a dependency and a rule.
         """
         out: Dict[str, List[dict]] = {}
+        # `if e not in out[t]` was a linear scan of NESTED-dict comparisons - an entry
+        # carries the site's whole `conditions` list - repeated per assignment per
+        # state, against a list that accumulates across every state writing that target.
+        # A `seen` set beside the list keeps the ORDER (first occurrence wins, which is
+        # what the output contract is) while making the membership test O(1).
+        # The document's proposed `(state, line, action)` key cannot be built: these
+        # entries have no `state`, only `action` / `line` / the condition keys - so the
+        # key is the canonical form of the whole entry.
+        seen: Dict[str, Set[str]] = {}
+
+        def _record(target: str, entry_dict: dict) -> None:
+            k = _entry_key(entry_dict)
+            if k in seen.setdefault(target, set()):
+                return
+            seen[target].add(k)
+            out.setdefault(target, []).append(entry_dict)
+
         for name, st in self.states.items():
             entry = self._write_entry(name)
             for aname in st.get("entry", []) or []:
@@ -839,17 +895,15 @@ class _Lineage:
                         t = (a.get("target") or "").upper().split("(")[0]
                         if not t:
                             continue
-                        e = {"action": aname, "line": prov.get("line", 0), **entry}
-                        if e not in out.setdefault(t, []):
-                            out[t].append(e)
+                        _record(t, {"action": aname,
+                                    "line": prov.get("line", 0), **entry})
                 if spec and spec.get("kind") == "effect":
                     verb = (spec.get("verb") or "").upper()
                     if verb in _DEP_ONLY:
                         recv, _ = _dep_only_flow(verb, prov.get("cobol", ""), self.known)
                         for t in recv:
-                            e = {"action": aname, "line": prov.get("line", 0), **entry}
-                            if e not in out.setdefault(t, []):
-                                out[t].append(e)
+                            _record(t, {"action": aname,
+                                        "line": prov.get("line", 0), **entry})
         return out
 
     def _write_entry(self, state: str) -> dict:

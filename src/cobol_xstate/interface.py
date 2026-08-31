@@ -214,6 +214,14 @@ class _DataView:
                 self.children.setdefault(parent.upper(), []).append(name)
             elif it.get("file") and it.get("kind") != "condition-name":
                 self.records.setdefault(it["file"], []).append(name)
+        # `leaves` is a pure function of the data dictionary, which is fixed for this
+        # object's lifetime - but it is called once per classification, and the lineage
+        # fixpoint classifies every state once per VISIT. The deque made each walk
+        # linear; what costs is the call COUNT, so a wide COMMAREA or FD record was
+        # re-expanded on every visit. Per-INSTANCE, never module-level: two _DataViews
+        # over different programs must not share.
+        self._leaves_memo: Dict[str, List[str]] = {}
+        self._record_fields_memo: Dict[str, List[str]] = {}
 
     def file_of(self, name: str) -> Optional[str]:
         it = self.data.get((name or "").upper())
@@ -237,6 +245,13 @@ class _DataView:
         # A deque: the previous list `pop(0)` was O(n) per step and `kids + stack`
         # reallocated the whole frontier on every expansion - quadratic on a wide
         # COMMAREA/FD record with hundreds of subordinate fields.
+        cached = self._leaves_memo.get(root)
+        if cached is not None:
+            # The SAME list object, not a copy: every caller here treats it as read-only
+            # (comprehensions and set unions), and copying per call would give back the
+            # allocation this exists to remove. Byte-stability is what proves it - see
+            # tools/gate.py.
+            return cached
         stack: Deque[str] = deque([root])
         seen: set = set()
         while stack:
@@ -254,14 +269,21 @@ class _DataView:
                     out.append(cur)
             else:
                 stack.extendleft(reversed(kids))
+        self._leaves_memo[root] = out
         return out
 
     def record_fields(self, record: str) -> List[str]:
         """`record` plus its elementary fields (the data crossing with the record)."""
+        cached = self._record_fields_memo.get(record)
+        if cached is not None:
+            return cached
         leaves = self.leaves(record)
         if not leaves or leaves == [record]:
-            return [record] if record in self.data or record else []
-        return [record] + leaves
+            out = [record] if record in self.data or record else []
+        else:
+            out = [record] + leaves
+        self._record_fields_memo[record] = out
+        return out
 
 
 # --------------------------------------------------------------------------- #
