@@ -444,3 +444,19 @@ def test_the_report_is_self_describing_and_serializable():
     assert view["counts"]["withAnArtifactSource"] == 1
     assert "would be a fiction" in view["note"]
     json.dumps(view)
+
+
+def test_a_dynamic_call_row_carries_the_unsplit_state_too():
+    """The same leak as the lineage rows, one view over: `altswitch.cbl` already
+    shipped `"state": "2000-CYCLE__L1"` - a `_split` segment id that no interface event
+    and no machine state ever carries. The row itself was correct and unjoinable."""
+    from pathlib import Path
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    src = (examples / "altswitch.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="altswitch.cbl")
+    view = build_dynamic_calls(m, build_artifacts(m))
+    row = next(r for r in view["dynamicCalls"] if r["item"] == "WS-PGM")
+    assert row["state"] == "2000-CYCLE__L1"        # unchanged: still the real site id
+    assert row["baseState"] == "2000-CYCLE"
+    assert row["baseState"] in m.config["states"]
+    assert row["state"] not in m.config["states"]

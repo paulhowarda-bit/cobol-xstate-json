@@ -371,6 +371,11 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
             "line": site["line"],
             "statement": site["cobol"],
             "state": site["state"],
+            # The same leak the lineage rows had: `state` is a `_split` segment
+            # id (`2000-CYCLE__L1`) that no interface event and no machine state
+            # ever carries, so a consumer joining on `state` alone loses the row.
+            # Equal to `state` when `_split` did not fire.
+            "baseState": site.get("baseState", site["state"]),
         }
 
         if item == "<DYNAMIC-SQL>":
