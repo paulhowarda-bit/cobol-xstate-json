@@ -34,11 +34,8 @@ table alone; `--no-lineage` skips it.
   "section": "FILE",
   "changedByProgram": true,          // this program assigns it (not just passes it)
   "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44,
-                  "conditions": [ /* ...what governs THIS write */ ] }],
-  "conditions": [                    // what must hold for the event to happen at all
-    { "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
-      "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 }
-  ],
+                  "conditionSetId": 7 }],   // ...what governs THIS write
+  "conditionSetId": 4,               // what must hold for the event to happen at all
   "origins": [                       // the external events whose data reaches it HERE
     { "event": "GET.CALLER.CALLER" },
     { "event": "GET.CONSOLE.SYSIN" }
@@ -46,11 +43,41 @@ table alone; `--no-lineage` skips it.
 }
 ```
 
+`conditionSetId` indexes the document's two interned pools, which sit beside `rows`:
+
+```jsonc
+"conditions": {                      // the program's whole condition vocabulary
+  "0": { "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
+         "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 },
+  "1": { "guard": "UNTIL_WS-EOF_eq_Y", "negated": true,
+         "expr": "NOT (WS-EOF = 'Y')", "kind": "control", "line": 19 }
+},
+"conditionSets": { "4": [1, 0], "7": [1] }   // ids into `conditions`
+```
+
+So the row above fires under `NOT (WS-EOF = 'Y') AND WS-TRAN-TYPE = 'D'`, and its write
+site under the loop test alone.
+
 Reading it: *the WRITE to OUT-FILE emits `OUT-FEE`; this program computed it at line 44;
 its value comes from the caller's parameter combined with a console `ACCEPT`; and it
 happens when the transaction is a deposit.*
 
-### `conditions` — the other half of the rule
+### Why the conditions are interned
+
+A point's conditions are a **set drawn from a small vocabulary**, and the same set recurs
+at a row and at every one of the write sites under it. Written inline at each, that
+encoding cost one estate program **2.04 GB to carry 296 distinct predicates** — 8,118,868
+guard objects, 27,429 copies apiece, against a condition vocabulary of roughly 18 KB. The
+document was correct; the encoding was pathological. Hoisting both levels into pools
+takes that program to ~35 MB with nothing dropped.
+
+The key is **absent, never empty**, when nothing governs a point. So the v1 test
+`bool(row.get("conditions"))` becomes `"conditionSetId" in row`, exactly — that is the
+whole migration for a reader that only wants the *conditional?* bit. Documents carry
+`"formatVersion": 2`; a v1 reader that skips the check sees every row as unconditional,
+which is why the version is stated rather than left to be inferred from a missing key.
+
+### The conditions — the other half of the rule
 
 Origins say **where a value came from**. That is only half a business rule; the other
 half is **under what condition**. For requirements work the difference is everything:
@@ -62,7 +89,7 @@ is a dependency. This is a rule:
 > DAILYPOST changes the collected balance **when the transaction is a deposit and the
 > account is active**
 
-`conditions` is the guards that hold on **every** path to the event — a conjunction, so
+A condition set is the guards that hold on **every** path to the event — a conjunction, so
 every entry is true whenever the event fires. Each carries its `expr` and source `line`,
 and a `kind`:
 
@@ -72,8 +99,8 @@ and a `kind`:
 | `control` | plumbing — a loop's `UNTIL` test, a file's end-of-stream check |
 
 Filter to `business` and you have the program's rules; the `control` ones are how COBOL
-happened to iterate. The same list appears on each entry of `changedBy`, scoped to that
-particular write, so *"this program writes the balance"* becomes *"this program writes
+happened to iterate. Each entry of `changedBy` carries its own `conditionSetId`, scoped to
+that particular write, so *"this program writes the balance"* becomes *"this program writes
 the balance **here**, under **this**"*.
 
 **Negation is first-class.** An `ELSE`, a `WHEN OTHER` and a loop body carry no guard of
@@ -111,8 +138,8 @@ than hidden:
   Tagging it with any single link's condition would look like the answer without being
   it.
 - **An unreachable write site** is marked `unreachable` on its `changedBy` entry rather
-  than given an empty condition list — it has no path condition *because it has no path*,
-  and `conditions: []` there would read as "this always happens".
+  than given an empty condition set — it has no path condition *because it has no path*,
+  and an empty set there would read as "this always happens".
 
 ### The cross-program identity keys
 
@@ -154,7 +181,7 @@ rate, `CALL`s `SUBFEE` by reference, `STRING`s two fields, writes a file:
 | output | `OUT-REC` | true | union of its children |
 | output | `WS-REF` | false | `CREATE.PROGRAM.SUBFEE` *(maybe → SUBFEE)* |
 
-Every row here is unconditional — `LINEAGE` is straight-line, so `conditions` is absent
+Every row here is unconditional — `LINEAGE` is straight-line, so `conditionSetId` is absent
 throughout. See `examples/condlin.cbl` for the conditional shapes: a guarded write, an
 `IF`/`ELSE` that rejoins (and is therefore *not* conditional), a `WHEN OTHER`, and a
 disjunction that gets refused.
@@ -179,7 +206,7 @@ the runnable emitter (`_target_owner`), so a section's whole extent is analyzed.
 are **split at PERFORM boundaries** first — a folded run like
 `[ACCEPT, MOVE, perform_X, WRITE]` would otherwise run the `WRITE` with pre-call origins.
 
-### How `conditions` is recovered
+### How the conditions are recovered
 
 Two more passes over the same graph, both exact where they can be and silent where they
 cannot:
@@ -216,7 +243,7 @@ Each is surfaced in `flags`, never guessed:
   *merged* incoming state, so an origin from call site A can appear at an event reached
   only via B. This **over-approximates** — it may name an extra origin, never miss a real
   one. That is the safe direction for provenance, and it is flagged when it occurs. The
-  same merge is what makes `conditions` correctly *drop* to the guards both call sites
+  same merge is what makes a condition set correctly *drop* to the guards both call sites
   agree on, rather than claiming either one.
 - **`conditionsPartial` can miss a disjunction inside a loop.** The check relies on a
   guard appearing in one polarity only, and loop history puts most in-loop guards in both.

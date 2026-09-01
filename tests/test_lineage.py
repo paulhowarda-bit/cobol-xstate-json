@@ -260,13 +260,25 @@ def _cond_row(d: dict, state: str) -> dict:
     return rows[0]
 
 
-def _exprs(row: dict):
-    return {c["expr"] for c in row.get("conditions", [])}
+def _conds(d: dict, node: dict) -> list:
+    """The conditions governing a row or a write site, resolved through the document's
+    interned pools. `conditionSetId` is absent exactly when the set is empty, so an
+    absent key and an empty list say the same thing - which is what the inline
+    `conditions` list meant before the pools existed."""
+    sid = node.get("conditionSetId")
+    if sid is None:
+        return []
+    return [d["conditions"][str(c)] for c in d["conditionSets"][str(sid)]]
+
+
+def _exprs(d: dict, row: dict):
+    return {c["expr"] for c in _conds(d, row)}
 
 
 def test_a_guarded_write_reports_the_guard():
-    row = _cond_row(_lin("condlin.cbl"), "1000-GUARDED__seq2")
-    assert _exprs(row) == {"CUST-ACTIVE"}
+    d = _lin("condlin.cbl")
+    row = _cond_row(d, "1000-GUARDED__seq2")
+    assert _exprs(d, row) == {"CUST-ACTIVE"}
     assert not row.get("conditionsPartial")
 
 
@@ -285,16 +297,17 @@ def test_an_if_else_that_rejoins_is_not_conditional():
     rather than pile up - and it must not be flagged partial either, or every join in
     every program would carry a warning that means nothing."""
     row = _cond_row(_lin("condlin.cbl"), "2000-REJOIN__seq3")
-    assert "conditions" not in row
+    assert "conditionSetId" not in row
     assert not row.get("conditionsPartial")
 
 
 def test_when_other_reports_the_negation_of_the_branches_before_it():
     """WHEN OTHER carries no guard of its own. Its condition is exactly the negation of
     every WHEN above it - which is the business rule ("none of the known kinds")."""
-    row = _cond_row(_lin("condlin.cbl"), "3000-OTHER__seq8")
-    assert _exprs(row) == {"NOT (WS-KIND = 'P')", "NOT (WS-KIND = 'Q')"}
-    assert all(c["negated"] for c in row["conditions"])
+    d = _lin("condlin.cbl")
+    row = _cond_row(d, "3000-OTHER__seq8")
+    assert _exprs(d, row) == {"NOT (WS-KIND = 'P')", "NOT (WS-KIND = 'Q')"}
+    assert all(c["negated"] for c in _conds(d, row))
 
 
 def test_a_disjunction_is_refused_rather_than_half_reported():
@@ -303,7 +316,7 @@ def test_a_disjunction_is_refused_rather_than_half_reported():
     plain lie (it would say the write needs A when B alone also does it), and reporting
     nothing silently would read as unconditional. It must report neither and say so."""
     row = _cond_row(_lin("condlin.cbl"), "4900-EMIT")
-    assert "conditions" not in row
+    assert "conditionSetId" not in row
     assert row["conditionsPartial"] is True
     assert "disjunction" in row["conditionsNote"]
 
@@ -311,9 +324,9 @@ def test_a_disjunction_is_refused_rather_than_half_reported():
 def test_conditions_are_sound_on_the_real_evaluate_program():
     """banktran dispatches on WS-TRAN-TYPE inside a read loop, so the CALL to POSTLOG is
     governed by both the loop test and the branch - and by nothing else."""
-    row = next(r for r in _lin("banktran.cbl")["rows"]
-               if r["event"] == "CREATE.PROGRAM.POSTLOG")
-    assert _exprs(row) == {"NOT (WS-EOF = 'Y')", "WS-TRAN-TYPE = 'D'"}
+    d = _lin("banktran.cbl")
+    row = next(r for r in d["rows"] if r["event"] == "CREATE.PROGRAM.POSTLOG")
+    assert _exprs(d, row) == {"NOT (WS-EOF = 'Y')", "WS-TRAN-TYPE = 'D'"}
     assert not row.get("conditionsPartial")
 
 
@@ -322,26 +335,71 @@ def test_loop_history_does_not_fake_a_partial():
     branch on pass 2 means pass 1 went somewhere else, so `NOT (TRAN-TYPE = D)` is in MAY
     even though the deposit branch plainly requires it to be true. Both polarities of a
     guard must cancel, or every event inside every loop gets a bogus warning."""
-    row = next(r for r in _lin("banktran.cbl")["rows"]
-               if r["event"] == "CREATE.PROGRAM.POSTLOG")
-    assert "WS-TRAN-TYPE = 'D'" in _exprs(row)
+    d = _lin("banktran.cbl")
+    row = next(r for r in d["rows"] if r["event"] == "CREATE.PROGRAM.POSTLOG")
+    assert "WS-TRAN-TYPE = 'D'" in _exprs(d, row)
     assert not row.get("conditionsPartial")
 
 
 def test_control_and_business_guards_are_told_apart():
     """A loop's UNTIL test and an EOF check are plumbing; the EVALUATE branch is the
     rule. A reader gathering requirements needs to filter one from the other."""
-    row = next(r for r in _lin("banktran.cbl")["rows"]
-               if r["event"] == "CREATE.PROGRAM.POSTLOG")
-    kinds = {c["expr"]: c["kind"] for c in row["conditions"]}
+    d = _lin("banktran.cbl")
+    row = next(r for r in d["rows"] if r["event"] == "CREATE.PROGRAM.POSTLOG")
+    kinds = {c["expr"]: c["kind"] for c in _conds(d, row)}
     assert kinds["NOT (WS-EOF = 'Y')"] == "control"
     assert kinds["WS-TRAN-TYPE = 'D'"] == "business"
 
 
 def test_each_condition_carries_its_source_line():
-    row = _cond_row(_lin("condlin.cbl"), "3000-OTHER__seq8")
+    d = _lin("condlin.cbl")
+    row = _cond_row(d, "3000-OTHER__seq8")
     assert all(isinstance(c.get("line"), int) and c["line"] > 0
-               for c in row["conditions"])
+               for c in _conds(d, row))
+
+
+def test_a_predicate_is_stored_once_however_many_sites_repeat_it():
+    """THE point of the interned pools. The old encoding wrote a predicate's five keys
+    out again at every row and again at every write site under it, and there are
+    hundreds of write sites per row: on one estate program that was 8,118,868 guard
+    objects to carry 296 distinct predicates, 2.04 GB to say 18 KB. What is stored must
+    scale with the program's condition VOCABULARY, never with how often sites mention
+    it - any encoding that keeps a copy per mention fails here."""
+    d = _lin("condlin.cbl")
+    stored = [(c["guard"], c["negated"]) for c in d["conditions"].values()]
+    assert len(stored) == len(set(stored)), "a predicate is in the pool twice"
+
+    mentions, distinct = 0, set()
+    for r in d["rows"]:
+        for node in [r, *r.get("changedBy", [])]:
+            for c in _conds(d, node):
+                mentions += 1
+                distinct.add((c["guard"], c["negated"]))
+    assert distinct <= set(stored), "a row cites a predicate the pool does not define"
+    assert len(stored) < mentions, "fixture too small to distinguish the two encodings"
+
+
+def test_every_condition_reference_resolves():
+    """Interning trades inline data for indirection, and a dangling id is a silent
+    lie where an inline list could not be one. Every id must land."""
+    for name in ("condlin.cbl", "banktran.cbl", "custrpt.cbl", "lineage.cbl"):
+        d = _lin(name)
+        ids = set(d["conditions"])
+        for sid, members in d["conditionSets"].items():
+            assert members, f"{name}: set {sid} is empty - it should have been omitted"
+            assert all(str(m) in ids for m in members), f"{name}: set {sid} dangles"
+        for r in d["rows"]:
+            for node in [r, *r.get("changedBy", [])]:
+                sid = node.get("conditionSetId")
+                assert sid is None or str(sid) in d["conditionSets"], \
+                    f"{name}: conditionSetId {sid} does not resolve"
+
+
+def test_the_document_declares_its_format_version():
+    """A v1 reader doing `bool(row.get("conditions"))` against a v2 document sees every
+    row as unconditional - a wrong answer, silently. The version is what lets it fail
+    loudly instead."""
+    assert _lin("banktran.cbl")["formatVersion"] == 2
 
 
 def test_a_write_site_carries_the_condition_it_happens_under():
@@ -350,8 +408,8 @@ def test_a_write_site_carries_the_condition_it_happens_under():
     d = _lin("custrpt.cbl")
     row = next(r for r in d["rows"] if r.get("changedBy"))
     entry = row["changedBy"][0]
-    assert entry["conditions"], "a write inside a read loop is not unconditional"
-    assert entry["conditions"][0]["expr"] == "NOT (WS-EOF = 'Y')"
+    assert _conds(d, entry), "a write inside a read loop is not unconditional"
+    assert _conds(d, entry)[0]["expr"] == "NOT (WS-EOF = 'Y')"
 
 
 def test_origins_deliberately_carry_no_conditions():
@@ -362,7 +420,7 @@ def test_origins_deliberately_carry_no_conditions():
     d = _lin("lineage.cbl")
     for r in d["rows"]:
         for o in r["origins"]:
-            assert "conditions" not in o
+            assert "conditions" not in o and "conditionSetId" not in o
     assert "NOT attached to 'origins'" in d["note"]
 
 
@@ -389,11 +447,12 @@ def test_end_of_stream_guards_are_rendered_not_called_unrecoverable():
     assert _cond_text("IN-FILE_atEnd", None, True) == "NOT (IN-FILE AT END)"
     assert _cond_text("IN-FILE_notAtEnd", None, False) == "IN-FILE NOT AT END"
     for name in ("sqlload.cbl", "custrpt.cbl", "banktran.cbl"):
-        for r in _lin(name)["rows"]:
-            for c in r.get("conditions", []):
-                assert ("expr" in c) ^ bool(c.get("unrecoverable"))
-                assert not (c["guard"].lower().endswith("atend")
-                            and c.get("unrecoverable"))
+        d = _lin(name)
+        assert d["conditions"], f"{name}: no conditions to check"
+        for c in d["conditions"].values():
+            assert ("expr" in c) ^ bool(c.get("unrecoverable"))
+            assert not (c["guard"].lower().endswith("atend")
+                        and c.get("unrecoverable"))
 
 
 def test_the_not_at_end_arm_is_control_not_a_business_decision():
@@ -405,10 +464,10 @@ def test_the_not_at_end_arm_is_control_not_a_business_decision():
     assert _is_control_guard("IN-FILE_notAtEnd", None)
     assert _is_control_guard("UNTIL_WS-EOF_eq_Y", {"op": "rel"})
     assert not _is_control_guard("WS-TRAN-TYPE_eq_D", {"op": "rel"})
-    for r in _lin("sqlload.cbl")["rows"]:
-        for c in r.get("conditions", []):
-            if c["guard"].lower().endswith("atend"):
-                assert c["kind"] == "control"
+    seen = [c for c in _lin("sqlload.cbl")["conditions"].values()
+            if c["guard"].lower().endswith("atend")]
+    assert seen, "sqlload has an AT END guard; if it stops, this test stops testing"
+    assert all(c["kind"] == "control" for c in seen)
 
 
 # --------------------------------------------------------------------------- #
@@ -733,9 +792,9 @@ def test_write_site_dedup_keeps_first_occurrence_order():
     and keep the same order - the entries have no `state` key, so the key is the
     canonical form of the whole entry, conditions included."""
     from cobol_xstate.lineage import _entry_key
-    a = {"action": "MOVE_A", "line": 1, "conditions": [{"guard": "g", "negated": False}]}
-    b = {"line": 1, "action": "MOVE_A", "conditions": [{"negated": False, "guard": "g"}]}
-    c = {"action": "MOVE_A", "line": 1, "conditions": [{"guard": "g", "negated": True}]}
+    a = {"action": "MOVE_A", "line": 1, "conditionSetId": 3}
+    b = {"line": 1, "conditionSetId": 3, "action": "MOVE_A"}
+    c = {"action": "MOVE_A", "line": 1, "conditionSetId": 4}
     assert _entry_key(a) == _entry_key(b)     # key order must not matter
     assert _entry_key(a) != _entry_key(c)     # a differing condition must not collapse
     d = _lin("lineage.cbl")

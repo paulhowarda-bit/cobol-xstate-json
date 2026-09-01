@@ -9,7 +9,8 @@ them. The result is one row per ``(external event, field)``:
     WRITE  output     OUT-FEE   true              COMPUTE @line 25  [GET.CALLER.CALLER,
                                                                     GET.CONSOLE.SYSIN]
 
-Each row also carries the ``conditions`` under which its event happens at all. Origins are
+Each row also carries a ``conditionSetId`` - the conditions under which its event happens
+at all, interned into document-level pools rather than written out inline. Origins are
 only half a business rule - "DAILYPOST changes the balance" is a dependency, "DAILYPOST
 changes the balance WHEN the transaction is a deposit" is the rule - and the when-clause
 is the half a requirements reader actually needs.
@@ -174,11 +175,12 @@ def _cond_text(name: str, tree: Optional[dict], negated: bool) -> Optional[str]:
 def _entry_key(entry: dict) -> str:
     """A canonical, hashable form of a write-site entry, for order-preserving dedup.
 
-    The entry is `{"action", "line"}` plus `_write_entry`'s condition keys, one of which
-    (`conditions`) is a LIST OF DICTS - so it is neither hashable nor cheap to compare.
+    The entry is `{"action", "line"}` plus `_write_entry`'s condition keys, which since
+    the conditions were interned are all SCALARS - the set is one `conditionSetId`.
     `json.dumps(..., sort_keys=True)` is stable for these (str/int/bool/None leaves
     only), which is what lets a `seen` set replace an `x not in list` scan without
-    changing which entry survives or the order they come out in.
+    changing which entry survives or the order they come out in. It used to have to
+    walk a nested condition list per comparison; it no longer does.
     """
     return json.dumps(entry, sort_keys=True, default=str)
 
@@ -267,6 +269,21 @@ class _Lineage:
         # honest - see `_conditions_of`.
         self.must = self._cond_flow(lambda a, b: a & b)
         self.may = self._cond_flow(lambda a, b: a | b)
+        # The OUTPUT's condition pools. Not to be confused with `_intern_conditions`
+        # above, which packs the same vocabulary into BITMASKS for the fixpoint's own
+        # meet/join; these two carry those predicates out to the document.
+        #
+        # A program point's conditions are a SET drawn from a small vocabulary - one
+        # program had 296 distinct predicates - but the set is re-derived per row AND
+        # per write site, and there are hundreds of write sites per row. Written inline
+        # at each, that cost 2.04 GB to encode those 296 predicates: 27,429 copies
+        # apiece, against a vocabulary of ~18 KB. Both levels are interned here instead.
+        # Ids are assigned in first-encounter order, which is deterministic: every walk
+        # that fills them iterates `self.states`, and `_cond_set_id` sorts.
+        self._cond_ids: Dict[Tuple[str, bool], int] = {}
+        self._cond_defs: List[dict] = []
+        self._set_ids: Dict[Tuple[int, ...], int] = {}
+        self._set_defs: List[List[int]] = []
 
     # -- split states at PERFORM boundaries ---------------------------------
     #
@@ -487,8 +504,12 @@ class _Lineage:
     def _reached(self, state: str) -> bool:
         return self.must.get(state) is not None
 
-    def _conditions_of(self, state: str) -> Tuple[List[dict], bool]:
-        """``(conditions, partial)`` for a program point.
+    def _conditions_of(self, state: str) -> Tuple[Optional[int], bool]:
+        """``(conditionSetId, partial)`` for a program point.
+
+        The id indexes ``conditionSets`` in the emitted document; ``None`` means the
+        MUST set is empty, and the caller then omits the key entirely - so
+        ``"conditionSetId" in row`` is exactly the old ``bool(row.get("conditions"))``.
 
         The conditions are the MUST set, which is always sound: every one of them holds
         whenever this point is reached. ``partial`` warns that they are not the WHOLE
@@ -518,27 +539,48 @@ class _Lineage:
         may = self._conds(self.may.get(state))
         partial = any(not ((g, True) in may and (g, False) in may)
                       for g, _ in (may - must))
-        return self._conds_json(must), partial
+        return self._cond_set_id(must), partial
 
-    def _conds_json(self, conds: CondSet) -> List[dict]:
-        out = []
-        for name, negated in sorted(conds):
-            tree = self.guards.get(name)
-            d: dict = {"guard": name, "negated": negated}
-            text = _cond_text(name, tree, negated)
-            if text is None:
-                # ALTER switches, GO TO DEPENDING ON and friends: the branch is real and
-                # its existence is a fact, but no expression was recovered for it. Name
-                # it and say so - never invent the test.
-                d["unrecoverable"] = True
-            else:
-                d["expr"] = text
-                d["kind"] = ("control" if _is_control_guard(name, tree, self.guard_kinds)
-                             else "business")
-            if name in self.guard_line:
-                d["line"] = self.guard_line[name]
-            out.append(d)
-        return out
+    def _cond_id(self, name: str, negated: bool) -> int:
+        """Intern one ``(guard, negated)`` predicate. Everything else about it - the
+        rendered expression, its kind, its line - is derived from those two, so they
+        are the whole identity."""
+        key = (name, negated)
+        got = self._cond_ids.get(key)
+        if got is not None:
+            return got
+        tree = self.guards.get(name)
+        d: dict = {"guard": name, "negated": negated}
+        text = _cond_text(name, tree, negated)
+        if text is None:
+            # ALTER switches, GO TO DEPENDING ON and friends: the branch is real and
+            # its existence is a fact, but no expression was recovered for it. Name
+            # it and say so - never invent the test.
+            d["unrecoverable"] = True
+        else:
+            d["expr"] = text
+            d["kind"] = ("control" if _is_control_guard(name, tree, self.guard_kinds)
+                         else "business")
+        if name in self.guard_line:
+            d["line"] = self.guard_line[name]
+        cid = len(self._cond_defs)
+        self._cond_ids[key] = cid
+        self._cond_defs.append(d)
+        return cid
+
+    def _cond_set_id(self, conds: CondSet) -> Optional[int]:
+        """Intern a whole condition set. ``None`` for the empty set: an absent key and
+        an empty list say the same thing, and the absent one costs nothing."""
+        if not conds:
+            return None
+        members = tuple(self._cond_id(name, negated) for name, negated in sorted(conds))
+        got = self._set_ids.get(members)
+        if got is not None:
+            return got
+        sid = len(self._set_defs)
+        self._set_ids[members] = sid
+        self._set_defs.append(list(members))
+        return sid
 
     # -- control-flow graph (PERFORM followed as call + return) --------------
     def _perform_of(self, st: dict) -> Optional[str]:
@@ -835,9 +877,9 @@ class _Lineage:
         # Under what condition does this event happen at all? For an output row that is
         # "when is this field written out", for an input row "when is it read" - and
         # that when-clause is the business rule the row is otherwise missing.
-        conds, partial = self._conditions_of(state)
-        if conds:
-            row["conditions"] = conds
+        sid, partial = self._conditions_of(state)
+        if sid is not None:
+            row["conditionSetId"] = sid
         if partial:
             row["conditionsPartial"] = True
             row["conditionsNote"] = (
@@ -925,13 +967,13 @@ class _Lineage:
     def _write_entry(self, state: str) -> dict:
         """The condition keys for a write site. A site that no path reaches is marked
         rather than annotated: it has no path condition BECAUSE it has no path, and an
-        empty `conditions` there would read as "this always happens"."""
+        absent `conditionSetId` there would read as "this always happens"."""
         if not self._reached(state):
             return {"unreachable": True}
-        conds, partial = self._conditions_of(state)
+        sid, partial = self._conditions_of(state)
         e: dict = {}
-        if conds:
-            e["conditions"] = conds
+        if sid is not None:
+            e["conditionSetId"] = sid
         if partial:
             e["conditionsPartial"] = True
         return e
@@ -1096,6 +1138,12 @@ class _Lineage:
 
         self._view = {
             "format": "cobol-xstate-lineage",
+            # Bumped when `conditions` moved out of the rows into the interned pools
+            # below. Version 1 carried the full condition list inline at every row and
+            # every write site; a reader that does not check this would silently see
+            # every row as unconditional, so it is stated rather than left to be
+            # inferred from a missing key.
+            "formatVersion": 2,
             "program": self.m.program_id,
             "source": self.m.source_name,
             "note": (
@@ -1105,17 +1153,26 @@ class _Lineage:
                 "'origins' are the external events whose data reaches it here "
                 "(flow-sensitive). A linkage-sourced value shows GET.CALLER.CALLER as "
                 "an origin. 'maybe' origins name the program that would resolve them. "
-                "'conditions' are the guards that hold on EVERY path to this event - a "
+                "'conditionSetId' indexes 'conditionSets' (a list of ids into "
+                "'conditions'): the guards that hold on EVERY path to this event - a "
                 "conjunction, always true when it fires; each also appears on the write "
-                "sites in 'changedBy'. They are necessary, not necessarily sufficient: "
+                "sites in 'changedBy'. The key is ABSENT, never empty, when nothing "
+                "governs the point, so 'conditionSetId' in row is exactly the v1 test "
+                "bool(row.get('conditions')). They are necessary, not necessarily "
+                "sufficient: "
                 "'conditionsPartial' marks a point known to be governed by more than the "
                 "conjunction listed, but its absence is best-effort, not a guarantee "
-                "(a disjunction inside a loop body can evade it). 'conditions' "
+                "(a disjunction inside a loop body can evade it). Conditions "
                 "are NOT attached to 'origins': an origin can reach a field through a "
                 "chain of assignments, so its real condition is the conjunction along "
                 "that whole chain, and reporting any one link's condition would look "
                 "like the answer while not being it. Nothing is invented - see 'flags'."
             ),
+            # The condition vocabulary, hoisted out of the rows. A point's conditions
+            # are a set drawn from it, and the same set recurs at a row and at every
+            # write site under it; stored once here, referenced by id there.
+            "conditions": {str(i): d for i, d in enumerate(self._cond_defs)},
+            "conditionSets": {str(i): s for i, s in enumerate(self._set_defs)},
             "rows": rows,
             "flags": self.flags,
         }
