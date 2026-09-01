@@ -643,3 +643,63 @@ def test_the_dynamic_guard_does_not_disarm_the_fallback_for_a_real_unknown():
     assert spec.get("columns")
     assert all(c.get("viaConventions") for c in spec["columns"])
     assert "cursorDynamic" not in spec
+
+
+# ------------------------------------------------ the catalog resolver comes first
+
+class RecordingMfdep(FakeMfdep):
+    def __init__(self):
+        self.asked = []
+
+    def resolve_field_variants(self, field, table=""):
+        self.asked.append(field)
+        return super().resolve_field_variants(field, table)
+
+
+SYNONYM_INSERT = (
+    "           EXEC SQL\n"
+    "               INSERT INTO V_ACC_ANAL VALUES (:AA-FUND-A, :AA-ACCT-NBR)\n"
+    "           END-EXEC\n")
+
+DECLARE_BASE = (
+    "           EXEC SQL DECLARE T_MMAA_ACC_ANAL TABLE\n"
+    "               (FUND_A CHAR(6), ACCT_NBR DECIMAL(9))\n"
+    "           END-EXEC.\n")
+
+
+def test_a_resolved_synonym_is_never_offered_to_the_conventions():
+    """The catalog's answer is a fact; the naming convention is a heuristic. A synonym
+    the resolver resolves is correlated from the base table's DECLARE and never
+    reaches mfdep - and a resolver that says "not a synonym" leaves the site to the
+    conventions exactly as before."""
+    fake = RecordingMfdep()
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. CONVTEST.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  AA-FUND-A       PIC X(6).\n"
+        "       01  AA-ACCT-NBR     PIC 9(9).\n"
+        + DECLARE_BASE +
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        + SYNONYM_INSERT +
+        "           STOP RUN.\n")
+    m = build_machine(parse_program(src), source_name="convtest.cbl",
+                      conventions=Conventions(fake),
+                      synonym_resolver=lambda n: {"V_ACC_ANAL": "T_MMAA_ACC_ANAL"}.get(n))
+    spec = _spec(m, "INSERT")
+    assert spec["columnsFrom"] == ("DECLARE TABLE T_MMAA_ACC_ANAL via synonym "
+                                   "V_ACC_ANAL (catalog resolver)")
+    assert [c["column"] for c in spec["columns"]] == ["FUND_A", "ACCT_NBR"]
+    assert fake.asked == []
+
+    # "Not a synonym" hands the site on to the conventions exactly as before - which
+    # ask, and decline: the prefix's table contradicts the statement's (the WS- rule).
+    fake = RecordingMfdep()
+    m = build_machine(parse_program(src), source_name="convtest.cbl",
+                      conventions=Conventions(fake), synonym_resolver=lambda n: None)
+    spec = _spec(m, "INSERT")
+    assert "columns" not in spec
+    assert spec["columnsUnresolved"] == "insert-no-column-list"
+    assert fake.asked == ["AA-FUND-A", "AA-ACCT-NBR"]

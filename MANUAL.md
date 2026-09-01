@@ -147,7 +147,7 @@ cobol-xstate [-h] [--outdir DIR]
              [--format {fixed,free}] [-I DIR] [--copybook-ext EXT]
              [--copybook-fetcher MODULE:FUNC]
              [--gather-only DIR] [--from-bundle DIR] [--from-parse FILE] [--no-fetch]
-             [--synonym-map FILE]
+             [--synonym-map FILE] [--synonym-resolver MODULE:FUNC]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
              [--no-dynamic-calls] [--bind-jcl FILE]
              [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
@@ -1242,12 +1242,25 @@ correlates its `FETCH`es and names their real table endpoint exactly as a
 procedure-division `DECLARE` does. On one measured estate, 77% of all unmapped lineage
 fields were `FETCH`es on exactly such cursors.
 
-**Synonyms need a map** (`--synonym-map file.json`): a column-list-less INSERT written
-under a Db2 SYNONYM/ALIAS finds only the *base* table's `DECLARE TABLE`, and the
-synonym→base join lives in the catalog, not the source. Supply it as input
-(`{"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}`) and the mapping resolves — with each entry's
-`table` stamped as the **base** name, the one the DDL declares and cross-program
-identity joins on. Without the map, the site flags and names this remedy.
+**Synonyms need a map or a resolver**: a column-list-less INSERT written under a Db2
+SYNONYM/ALIAS finds only the *base* table's `DECLARE TABLE`, and the synonym→base join
+lives in the catalog, not the source. That knowledge arrives by one of two doors, both
+the host's to supply and neither ever guessed. `--synonym-map file.json` is a flat
+`{"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}` object (the shape `mfdep catalog
+export-synonym-map` emits) — the operator's explicit answer, and the only door for a
+hand run. `--synonym-resolver MODULE:FUNC` names a callable `FUNC(name) -> base | None`
+that is asked **at the point of need** — only for a column-list-less INSERT with no
+visible `DECLARE TABLE`, never for a SELECT or FETCH, and never for a name the map
+already holds — so a host that runs this tool once per program never hands each run its
+own copy of catalog state. The map wins when both are given, and that precedence is
+pinned by test. With either door, the mapping resolves with each entry's `table`
+stamped as the **base** name, the one the DDL declares and cross-program identity joins
+on; `columnsFrom` says `via synonym X`, plus `(catalog resolver)` when the resolver
+answered. A resolver returning `None` is exactly an absent map entry; a resolver that
+**raises** is a failed lookup — the site stays unresolved with today's note and the run
+carries a `synonym resolver failed mid-run` flag — and is never read as "not a
+synonym". The same two doors are `analyze(synonyms=, synonym_resolver=)` in Python.
+Without either, the site flags and names the remedy.
 
 A **qualified** host variable (`:GFAC . AC-ACC-N` — COBOL for "field `AC-ACC-N` inside
 group `GFAC`") resolves to the **elementary field name**, which is what the data
@@ -1267,6 +1280,23 @@ elementary items in declaration order, `FILLER` and `REDEFINES` (with their
 subordinates) excluded, nested groups recursed into, an `OCCURS` item once. The group
 names expanded are reported on the event as `expandedStructures`, so a reader can tell a
 field the program named from one the expansion supplied.
+
+A **VARCHAR host structure** is the one group that is *not* expanded: a Db2 VARCHAR
+column is held as a group of two elementary items — a level-49 length and the text
+(`BE-CMT-X` over `BE-CMT-X-LEN` / `BE-CMT-X-TEXT`) — and Db2 treats that group as ONE
+host variable filling ONE column. The recovered mapping therefore anchors on the
+**parent**: `SELECT CMT INTO :BE-CMT-X` names `BE-CMT-X` and neither child, a record
+that *contains* a VARCHAR expands to its scalars and the VARCHAR parent (never the outer
+record, never the pair), and the lineage row is keyed on the parent with `pic: "group"`.
+An edge from a length counter to a text column would assert something untrue and double
+the edge count for every VARCHAR column in the estate. The parent is always in hand: the
+expansion walks the flat item list with the group item itself, and the level-49 gate
+fires at the group before any child is emitted, so the arity check never sees a
+VARCHAR's children. A `MOVE` out of the text child still carries the SELECT's origin
+(the parent's fill seeds its children), so the intra-program chain survives. One shape
+is a stated gap, not a guess: a group whose text child *outranks* its length (`10 GRP` /
+`49 LEN` / `05 TEXT`) is not recognised and expands to the length item alone; it is
+pinned as a known gap in the parser's tests.
 
 A **null indicator** is part of the value it qualifies, not a value of its own:
 `INTO :A, :B:IND` (and `INTO :A INDICATOR :IND`) names TWO targets. It is reported apart
@@ -1436,9 +1466,10 @@ unrecovered spot is visible.
 | `dynamic CALL … ` | the target could not be proven constant. The reason spells out WHY: assigned from variables (genuinely runtime), several candidate literals, 88-level `VALUE`s present but no `SET … TO TRUE` visible (candidates listed), declared-but-never-assigned, or **not declared in the visible source** — the latter names the missing copybook that likely holds the `VALUE`; supply it and the target resolves. Constant propagation covers `VALUE` clauses, `MOVE 'lit'`, and `SET <88-condition> TO TRUE` |
 | `dynamic CICS <verb> <OPT>(…)` | a `PROGRAM`/`TRANSID`/`QUEUE`/`FILE`/`MAP`/`MAPSET` operand is a data name — resolved via `VALUE`/`MOVE` literals where provable, flagged otherwise (an `EIB*` operand is CICS-supplied, always runtime) |
 | `dynamic SQL: EXEC SQL PREPARE/EXECUTE` | the statement text is assembled at run time — operation and tables not statically knowable |
-| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree even after host-structure expansion and indicator attachment — a group whose data division entry did not arrive, or a slot that is not one host variable (verify by hand); `SELECT *` (the list is in the **Db2 catalog**, not the source); an `INSERT` with no column list whose table has **no visible `DECLARE TABLE`** — include its DCLGEN, or pass `--synonym-map` if it is written under a synonym, and the mapping resolves; a select-list item or VALUES slot that names no column (a literal or expression — the receiver carries an explicit `derived` entry so consumers can skip it knowingly); or, for a `FETCH`, that no `DECLARE` for its cursor is visible **anywhere in the expanded source** (data division and copybooks are scanned) — usually a copybook that did not arrive, so supply it, or a cursor PREPAREd dynamically |
+| `column<->host-variable mapping not recovered` | the crossing is drawn and its `fields` are right, but **which column** fills them is unproven, so this program's state cannot be tied to any other program's. The reason says which case: counts disagree even after host-structure expansion and indicator attachment — a group whose data division entry did not arrive, or a slot that is not one host variable (verify by hand); `SELECT *` (the list is in the **Db2 catalog**, not the source); an `INSERT` with no column list whose table has **no visible `DECLARE TABLE`** — include its DCLGEN, or pass `--synonym-map` / `--synonym-resolver` if it is written under a synonym, and the mapping resolves; a select-list item or VALUES slot that names no column (a literal or expression — the receiver carries an explicit `derived` entry so consumers can skip it knowingly); or, for a `FETCH`, that no `DECLARE` for its cursor is visible **anywhere in the expanded source** (data division and copybooks are scanned) — usually a copybook that did not arrive, so supply it, or a cursor PREPAREd dynamically |
 | `mapping recovered by mfdep NAMING CONVENTION` | the columns were recovered from the estate's DCLGEN naming conventions, **not** from the statement or a DECLARE — a heuristic, marked `viaConventions` per entry. The flag says how many of the host variables resolved and why the real correlation failed; verify against the table's DCLGEN |
 | `mfdep conventions lookup failed mid-run` | mfdep errored (reason quoted); resolution stopped and the output is the conventions-less model — fix mfdep and re-run |
+| `synonym resolver failed mid-run` | the `--synonym-resolver` callable raised, or returned something that is neither a table name nor `None` (reason quoted); it was not asked again, and every synonym it did not reach stays an unresolved INSERT — a *failed* lookup, deliberately not read as "not a synonym". Fix the resolver and re-run; `--synonym-map` entries still answered |
 | `EXEC SQL/CICS … registers implicit handler(s)` | a later transfer is invisible at this site; model as a handler region |
 | `NEXT SENTENCE` | differs from CONTINUE; verify the intended skip |
 | `arithmetic writes non-numeric X` | **S0C7 risk** — verify the type |
@@ -1652,7 +1683,8 @@ most are pinned by a test.
 | `sqlhost.cbl` | **host structures** — a group in `INTO` and in `VALUES` (with and without a column list), a nested group, `FILLER`/`REDEFINES` excluded, a null indicator beside a group, and the group whose copybook never arrived that is still refused |
 | `sqlderiv.cbl` | **what a derived slot was made of** — `SUM(COL)`, nested `VALUE(SUM(COL),0)`, a literal, `COUNT(*)`, an expression over two columns, the `CASE` that refuses, and a `FETCH` taking its derivation from the cursor's `DECLARE` |
 | `sqlwscsr.cbl` | **cursor DECLAREd in WORKING-STORAGE** — the whole-stream scan correlating its FETCH and naming the real table endpoint |
-| `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` |
+| `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` or `--synonym-resolver` |
+| `sqlvarchar.cbl` | **VARCHAR host structures anchor on the parent** — `SELECT INTO` the level-49 pair's group, a `FETCH INTO` a record containing one, a column-list-less INSERT of such a record, and `MOVE`s out of the text child that keep the SELECT's origin |
 | `sqlproc.cbl` | **`EXEC SQL CALL` as a `db2_proc` endpoint** — parameters, not columns |
 | `custrec.cpy` | a copybook (COPY expansion + `member` provenance) |
 

@@ -74,6 +74,10 @@ cobol-xstate prog.cbl --no-fetch                   # never contact the estate (r
 
 cobol-parser prog.cbl -o prog.parse.json            # parse upfront (serialized Program, sha256-pinned)
 cobol-xstate prog.cbl --from-parse prog.parse.json # model from it - the parse is skipped
+
+# Db2 SYNONYM/ALIAS -> base table, as catalog knowledge supplied by the host (never
+# guessed): a map file, or a callable asked at the point of need, or both (map wins)
+cobol-xstate prog.cbl --synonym-map synonyms.json --synonym-resolver mycatalog:resolve
 ```
 
 **Every run retrieves its dependencies — by default and by design.** Before parsing, the

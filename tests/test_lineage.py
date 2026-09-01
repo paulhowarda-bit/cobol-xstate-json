@@ -878,3 +878,43 @@ def test_unreached_states_do_not_leak_into_the_dynamic_call_primitives():
     lin = build_machine(parse_program(src), source_name="linedrop.cbl").lineage()
     lin.run()
     assert {f["field"] for f in lin.fills} == {"WS-RULE-DS"}
+
+
+# --------------------------------------------------------------------------- #
+# sqlvarchar: rows are keyed on the VARCHAR parent (ledger batch 5, item 22)
+# --------------------------------------------------------------------------- #
+
+def test_a_varchar_input_row_is_keyed_on_the_parent_with_pic_group():
+    d = _lin("sqlvarchar.cbl")
+    row = _row(d, "BE-CMT-X", "input")
+    assert row["event"] == "GET.DB2.T_BE_COMMENT"
+    assert row["pic"] == "group"
+    assert _origins(row) == {"GET.DB2.T_BE_COMMENT"}
+
+
+def test_a_move_out_of_the_varchar_text_carries_the_select_origin_to_the_insert():
+    """SELECT fills the PARENT; the program MOVEs the TEXT child out and the length
+    child in. Seeding only the parent lost the chain here: BE-O-CMT read as
+    "internally set" with no external origin, a false negative."""
+    d = _lin("sqlvarchar.cbl")
+    row = _row(d, "BE-O-CMT", "output")
+    assert row["event"] == "CREATE.DB2.T_BE_COMMENT"
+    assert _origins(row) == {"GET.DB2.T_BE_COMMENT"}
+    assert row["changedByProgram"] is True
+    assert {c["action"] for c in row["changedBy"]} == {
+        "MOVE_WS-NOTE_TO_BE-O-CMT-TEXT", "MOVE_WS-LEN_TO_BE-O-CMT-LEN"}
+
+
+def test_varchar_rows_are_keyed_on_the_parent_not_the_outer_record_or_a_child():
+    fields = {r["field"] for r in _lin("sqlvarchar.cbl")["rows"]}
+    assert {"BE-CMT-X", "BE-R-ACC", "BE-R-CMT", "BE-O-ACC", "BE-O-CMT"} == fields
+    assert not fields & {"BE-REC", "BE-OUT", "BE-CMT-X-LEN", "BE-CMT-X-TEXT",
+                         "BE-R-CMT-LEN", "BE-R-CMT-TEXT", "BE-O-CMT-LEN",
+                         "BE-O-CMT-TEXT"}
+
+
+def test_a_varchar_fetched_inside_a_record_keys_its_row_on_the_varchar_parent():
+    d = _lin("sqlvarchar.cbl")
+    row = _row(d, "BE-R-CMT", "input")
+    assert row["pic"] == "group" and _origins(row) == {"GET.DB2.T_BE_COMMENT"}
+    assert _row(d, "BE-R-ACC", "input")["pic"] == "X(9)"

@@ -364,9 +364,10 @@ def test_why_no_mapping_reaches_the_event_itself():
 # sqlwscsr: the cursor DECLARE lives in WORKING-STORAGE (whole-stream scan)
 # --------------------------------------------------------------------------- #
 
-def _machine(name, synonyms=None):
+def _machine(name, synonyms=None, synonym_resolver=None):
     src = (EXAMPLES / name).read_text()
-    return build_machine(parse_program(src), source_name=name, synonyms=synonyms)
+    return build_machine(parse_program(src), source_name=name, synonyms=synonyms,
+                         synonym_resolver=synonym_resolver)
 
 
 def test_working_storage_cursor_declare_still_correlates_its_fetch():
@@ -497,6 +498,212 @@ def test_synonym_map_that_is_not_a_string_map_is_exit_2(tmp_path):
     rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(tmp_path / "o"),
               "--no-fetch", "--synonym-map", str(bad), "-qq"])
     assert rc == 2
+
+
+# --------------------------------------------------------------------------- #
+# sqldclgen again: the catalog RESOLVER door (ledger batch 5, item 21)
+# --------------------------------------------------------------------------- #
+
+class _Resolver:
+    """A catalog stand-in that remembers what it was asked."""
+
+    def __init__(self, answers=None, raises=None, returns=None):
+        self.answers = answers or {}
+        self.raises = raises
+        self.returns = returns
+        self.calls = []
+
+    def __call__(self, name):
+        self.calls.append(name)
+        if self.raises is not None:
+            raise self.raises
+        if self.returns is not None:
+            return self.returns
+        return self.answers.get(name)
+
+
+def _everything(m):
+    """Every view of a machine, as JSON text: the whole of what a run would write."""
+    import json
+    from cobol_xstate.lineage import build_lineage
+    return json.dumps({"config": m.config, "semantics": m.semantics,
+                       "flags": m.flags, "interface": m.interface(),
+                       "lineage": build_lineage(m)}, sort_keys=True, default=str)
+
+
+def _rtac_insert(m):
+    return next(s for s in m.semantics["actions"].values()
+                if s.get("verb") == "INSERT" and s.get("table") == "RTAC_ACCOUNT")
+
+
+def test_synonym_resolver_returning_none_is_byte_identical_to_no_map():
+    """Their test (a): None means "the catalog was asked and this is not a synonym" -
+    exactly an absent map entry, down to the note that names the remedy."""
+    r = _Resolver()
+    m = _machine("sqldclgen.cbl", synonym_resolver=r)
+    assert _everything(m) == _everything(_machine("sqldclgen.cbl"))
+    assert "supply a synonym map" in _rtac_insert(m)["columnNote"]
+    assert r.calls == ["RTAC_ACCOUNT"]
+
+
+def test_synonym_resolver_resolves_the_insert_and_says_which_door():
+    m = _machine("sqldclgen.cbl",
+                 synonym_resolver=_Resolver({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}))
+    ins = next(e for e in m.interface()["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
+    assert [(c["table"], c["column"], c["hostVar"]) for c in ins["columns"]] == [
+        ("T_RTAC_ACCOUNT", "ACCT_ID", "WS-ACCT-ID"),
+        ("T_RTAC_ACCOUNT", "ACCT_NAME", "WS-ACCT-NAME")]
+    assert not any("RTAC_ACCOUNT" in f["message"] for f in m.flags)
+    assert _rtac_insert(m)["columnsFrom"] == (
+        "DECLARE TABLE T_RTAC_ACCOUNT via synonym RTAC_ACCOUNT (catalog resolver)")
+
+
+def test_synonym_map_wins_over_the_resolver_and_the_resolver_is_not_asked():
+    """Their test (b), with the precedence pinned: the map is the operator's explicit
+    answer, so a name it holds is never a question for the catalog."""
+    r = _Resolver({"RTAC_ACCOUNT": "T_SOMETHING_ELSE"})
+    both = _machine("sqldclgen.cbl", synonyms={"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"},
+                    synonym_resolver=r)
+    map_only = _machine("sqldclgen.cbl", synonyms={"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"})
+    assert _everything(both) == _everything(map_only)
+    assert r.calls == []
+
+
+def test_synonym_resolver_fills_what_the_map_does_not_hold():
+    r = _Resolver({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"})
+    m = _machine("sqldclgen.cbl", synonyms={"UNRELATED": "T_UNRELATED"},
+                 synonym_resolver=r)
+    assert r.calls == ["RTAC_ACCOUNT"]
+    assert _rtac_insert(m)["columnsFrom"].endswith("(catalog resolver)")
+
+
+def test_synonym_resolver_is_asked_only_at_the_point_of_need():
+    """A table with a visible DECLARE is never a question; nor is a SELECT or FETCH.
+    sqldclgen asks once (its synonym INSERT); sqlhost, whose INSERTs all have their
+    DECLARE, never asks at all."""
+    r = _Resolver()
+    _machine("sqldclgen.cbl", synonym_resolver=r)
+    assert r.calls == ["RTAC_ACCOUNT"]
+    r = _Resolver()
+    _machine("sqlhost.cbl", synonym_resolver=r)
+    assert r.calls == []
+
+
+def test_synonym_resolver_that_raises_flags_once_and_leaves_the_site_unresolved():
+    """Raising is a FAILED lookup, never "not a synonym": the site keeps its unresolved
+    token and note, and the run says the catalog was unreachable."""
+    r = _Resolver(raises=RuntimeError("catalog down"))
+    m = _machine("sqldclgen.cbl", synonym_resolver=r)
+    spec = _rtac_insert(m)
+    assert spec["columnsUnresolved"] == "insert-no-column-list"
+    assert "columns" not in spec
+    catalog = [f for f in m.flags if f["paragraph"] == "CATALOG"]
+    assert len(catalog) == 1
+    assert "resolver raised RuntimeError: catalog down" in catalog[0]["message"]
+    assert "fix the resolver and re-run" in catalog[0]["message"]
+    assert r.calls == ["RTAC_ACCOUNT"]
+
+
+def test_synonym_resolver_returning_a_non_string_is_a_failed_lookup_not_a_synonym():
+    m = _machine("sqldclgen.cbl",
+                 synonym_resolver=_Resolver(returns={"real_table": "T_RTAC_ACCOUNT"}))
+    assert "columns" not in _rtac_insert(m)
+    (flag,) = [f for f in m.flags if f["paragraph"] == "CATALOG"]
+    assert "returned dict" in flag["message"]
+
+
+def test_synonym_resolver_may_return_a_schema_qualified_base():
+    m = _machine("sqldclgen.cbl",
+                 synonym_resolver=_Resolver({"RTAC_ACCOUNT": "MMD1DBO.T_RTAC_ACCOUNT"}))
+    spec = _rtac_insert(m)
+    assert [c["table"] for c in spec["columns"]] == ["MMD1DBO.T_RTAC_ACCOUNT"] * 2
+    assert spec["columnsFrom"] == ("DECLARE TABLE T_RTAC_ACCOUNT via synonym "
+                                   "RTAC_ACCOUNT (catalog resolver)")
+
+
+def test_synonym_resolver_flag_loads_module_func_and_reaches_the_run(tmp_path,
+                                                                    monkeypatch):
+    """--synonym-resolver MODULE:FUNC is the CLI door the tracer's argv can name."""
+    import json
+    from cobol_xstate.cli import run
+    (tmp_path / "synres_ok.py").write_text(
+        "def resolve(name):\n"
+        "    return {'RTAC_ACCOUNT': 'T_RTAC_ACCOUNT'}.get(name)\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    out = tmp_path / "o"
+    rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(out), "--no-fetch",
+              "--synonym-resolver", "synres_ok:resolve", "-qq"])
+    assert rc == 0
+    doc = json.loads((out / "sqldclgen.json").read_text(encoding="utf-8"))
+    ins = next(e for e in doc["interface"]["events"]
+               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
+    assert [c["table"] for c in ins["columns"]] == ["T_RTAC_ACCOUNT"] * 2
+    assert not any("RTAC_ACCOUNT" in f["message"] for f in doc["flags"])
+
+
+def test_synonym_resolver_bad_spec_is_exit_2(tmp_path):
+    from cobol_xstate.cli import run
+    for spec in ("no_such_module_xyz:fn", "notaspec", "json:no_such_attr"):
+        rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(tmp_path / "o"),
+                  "--no-fetch", "--synonym-resolver", spec, "-qq"])
+        assert rc == 2, spec
+
+
+# --------------------------------------------------------------------------- #
+# sqlvarchar: a VARCHAR host structure anchors on its PARENT (ledger batch 5,
+# item 22 - the decision items 4-7 left open)
+# --------------------------------------------------------------------------- #
+
+VARCHAR_CHILDREN = ("BE-CMT-X-LEN", "BE-CMT-X-TEXT", "BE-R-CMT-LEN", "BE-R-CMT-TEXT",
+                    "BE-O-CMT-LEN", "BE-O-CMT-TEXT")
+
+
+def _db2_event(iface, verb):
+    return next(e for e in iface["events"]
+                if e["endpointType"] == "db2" and e["verb"] == verb)
+
+
+def test_a_varchar_select_into_names_the_parent_and_neither_child():
+    """`SELECT CMT INTO :BE-CMT-X` names ONE host variable and fills ONE column: the
+    group is the host variable, its length/text pair a storage representation."""
+    m = _machine("sqlvarchar.cbl")
+    sel = _db2_event(m.interface(), "SELECT")
+    assert sel["fields"] == ["BE-CMT-X"]
+    assert [(c["column"], c["hostVar"]) for c in sel["columns"]] == [("CMT", "BE-CMT-X")]
+    assert "columnsUnresolved" not in sel and "expandedStructures" not in sel
+    assert not any("SELECT" in f["message"] for f in m.flags)
+
+
+def test_a_varchar_inside_a_fetched_record_anchors_on_the_varchar_parent_not_the_record():
+    """The nested case: the record expands to its scalar and the VARCHAR PARENT - not
+    the outer record (too coarse), not the pair (untrue)."""
+    m = _machine("sqlvarchar.cbl")
+    fetch = _db2_event(m.interface(), "FETCH")
+    assert fetch["fields"] == ["BE-R-ACC", "BE-R-CMT"]
+    assert [(c["column"], c["hostVar"]) for c in fetch["columns"]] == [
+        ("ACC_N", "BE-R-ACC"), ("CMT", "BE-R-CMT")]
+    assert fetch["expandedStructures"] == ["BE-REC"]
+    assert not any("FETCH" in f["message"] for f in m.flags)
+
+
+def test_a_varchar_inside_an_inserted_record_maps_the_parent_to_its_column():
+    m = _machine("sqlvarchar.cbl")
+    ins = _db2_event(m.interface(), "INSERT")
+    assert [(c["column"], c["hostVar"]) for c in ins["columns"]] == [
+        ("ACC_N", "BE-O-ACC"), ("CMT", "BE-O-CMT")]
+    spec = next(s for s in m.semantics["actions"].values()
+                if s.get("verb") == "INSERT")
+    assert spec["columnsFrom"] == "DECLARE TABLE T_BE_COMMENT"
+    assert not any("INSERT" in f["message"] for f in m.flags)
+
+
+def test_no_varchar_child_is_a_field_param_or_host_variable_of_any_event():
+    iface = _iface("sqlvarchar.cbl")
+    for e in iface["events"]:
+        named = set(e.get("fields") or []) | set(e.get("params") or []) | {
+            c.get("hostVar") for c in e.get("columns") or []}
+        assert not named & set(VARCHAR_CHILDREN), (e["state"], sorted(named))
 
 
 # --------------------------------------------------------------------------- #

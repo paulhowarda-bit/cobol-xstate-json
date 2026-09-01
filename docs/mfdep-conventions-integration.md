@@ -219,6 +219,35 @@ if len(candidates) > 1:
         table = matches[0]
 ```
 
+### 5. Synonyms for a column-list-less INSERT — NOT wired to mfdep by default
+
+`resolve_table_synonym` (above) is **not** consulted automatically. A synonym's base
+table is *catalog* knowledge, and mfdep's answer is convention-derived
+(`"source": "convention_W_strip"`) — a heuristic, however confident — so wiring it into
+the input seam would let a guess arrive through the door reserved for facts. The seam is
+`mainframe_artifacts.synonyms.SynonymLookup`, fed by `--synonym-map FILE` (the shape
+`mfdep catalog export-synonym-map` emits; the operator's explicit answer, wins when both
+are given) and `--synonym-resolver MODULE:FUNC` (a `(name) -> base | None` callable
+asked at the point of need: only a column-list-less INSERT whose table has no visible
+DECLARE, and only for a name the map does not hold). A host that wants mfdep's answer
+passes it explicitly, owning the choice:
+
+```python
+from mfdep.conventions import resolve_table_synonym
+
+def resolve(name):
+    hit = resolve_table_synonym(name)
+    return hit["real_table"] if hit else None      # None = not a synonym; raise = failed
+```
+
+`cobol-xstate prog.cbl --synonym-resolver mymodule:resolve`, or in Python
+`analyze(src, synonym_resolver=resolve)`. The resolver is asked BEFORE the conventions
+fallback (§1–§4): a synonym it resolves is correlated from the base table's DECLARE and
+never reaches `resolve_field_variants`; a name it declines goes on to the conventions
+exactly as before. A resolver that raises disables itself for the run and adds one
+`synonym resolver failed mid-run` flag — every synonym it did not reach stays an
+unresolved INSERT, never "not a synonym".
+
 ## Discovery and Export (CLI)
 
 The conventions system also supports discovery of patterns not yet codified:

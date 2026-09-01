@@ -165,6 +165,24 @@ Two rules the report did not list, both found while verifying:
    a bare `level > group.level` walk reads a standalone `77` following a group as one of
    its members and hands the statement a host variable the source never put there.
 
+One rule added by ledger item 4 and pinned end-to-end by item 22 (2026-09-01):
+
+9. **A VARCHAR pair is ONE host variable, and it is the PARENT.** A group whose only
+   subordinates are two elementary items with one of them at level 49 (`BE-CMT-X` over
+   `49 BE-CMT-X-LEN` / `49 BE-CMT-X-TEXT`) is not expanded: `SELECT CMT INTO :BE-CMT-X`
+   fills one column and the mapping anchors on `BE-CMT-X`, never on either child. A
+   VARCHAR *member* of a bigger record contributes its own group name for one column and
+   its pair for none, so `INTO :BE-REC` yields the scalars and the VARCHAR parents - not
+   the outer record. The gate is the level number, not the PIC: estate members write the
+   length with no USAGE. The parent is always in hand (the walk is positional, with the
+   group item itself), so the arity check never sees a VARCHAR's children and nothing has
+   to approximate the parent with one of them. **Stated gap:** a text child that
+   *outranks* the length (`10 GRP` / `49 LEN` / `05 TEXT`) is not recognised and expands
+   to the length item alone; pinned as a known gap in `cobol-parser`'s
+   `test_host_structures.py`, not papered over. On the lineage side the parent's fill
+   seeds its children too, so a `MOVE` out of the text child keeps the SELECT's origin;
+   the parent's row carries `pic: "group"`. Fixture: `examples/sqlvarchar.cbl`.
+
 The walk is positional over the flat item list — not `data_by_name` (first-wins on
 duplicate names: a DCLGEN copied twice would expand to the wrong copy) and not the
 `parent` chain, which carries a **pre-existing bug** found while verifying: `parse_data_
