@@ -32,7 +32,9 @@ import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
+
+from mainframe_artifacts.synonyms import FROM_RESOLVER, SynonymLookup
 
 from .analysis import CallAnalysis, analyze_calls
 from .conventions import base_table as _base_table
@@ -1710,7 +1712,7 @@ def _correlate_selects(ctx: "_BuildCtx",
 
 
 def _correlate_inserts(ctx: "_BuildCtx", program: Program,
-                       synonyms: Optional[Dict[str, str]] = None,
+                       lookup: Optional[SynonymLookup] = None,
                        program_tables: FrozenSet[str] = frozenset()) -> None:
     """Zip every column-list-less INSERT's VALUES slots against its table's declared
     column order, once the whole program is compiled.
@@ -1719,10 +1721,12 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
     table's declared order, which the source DOES carry whenever the table's DCLGEN is
     included: its `DECLARE t TABLE (c1 ..., c2 ...)` is exactly that order
     (``program.declared_tables``, from the whole-stream scan). A table written under a
-    SYNONYM resolves through ``synonyms`` (an external map - the catalog's knowledge,
-    supplied as input, never guessed), and its column entries are then stamped with
-    the BASE table so cross-program identity lands on the name the DDL declares.
-    Whatever stays unresolved keeps its note and is flagged, exactly as before.
+    SYNONYM resolves through ``lookup`` (the catalog's knowledge, supplied as input -
+    a map, a host-injected resolver, or both - never guessed), asked only here, at the
+    point of need: a table with a visible DECLARE is never a question. Its column
+    entries are then stamped with the BASE table so cross-program identity lands on
+    the name the DDL declares. Whatever stays unresolved keeps its note and is
+    flagged, exactly as before.
     """
     if not ctx.insert_sites:
         return
@@ -1734,8 +1738,6 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
         declared.setdefault(name, entry)
         # `OWNER.T` declares T too: DML most often writes the unqualified name.
         declared.setdefault(name.rsplit(".", 1)[-1], entry)
-    synonyms = {str(k).upper(): str(v).upper()
-                for k, v in (synonyms or {}).items()}
     for name, para, line in ctx.insert_sites:
         spec = ctx.action_sem.get(name)
         if not spec or spec.get("columns"):
@@ -1744,13 +1746,15 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
         values: List[Optional[str]] = spec.get("valuesList") or []
         entry = declared.get(table)
         base: Optional[str] = None
-        if entry is None and table in synonyms:
-            base = synonyms[table]
+        door: Optional[str] = None
+        hit = lookup(table) if (entry is None and lookup is not None) else None
+        if hit is not None:
+            base, door = hit
             entry = declared.get(base) or declared.get(base.rsplit(".", 1)[-1])
         note: Optional[str] = None
         if entry is None:
-            hint = (f" (synonym of {synonyms[table]}, whose DECLARE TABLE is also "
-                    f"absent)" if table in synonyms else "")
+            hint = (f" (synonym of {base}, whose DECLARE TABLE is also absent)"
+                    if base else "")
             note = (f"INSERT without an explicit column list, and no DECLARE TABLE "
                     f"for {table or '?'} is visible in this program{hint} - the "
                     f"columns are the table's declared order; include its DCLGEN, or "
@@ -1800,8 +1804,12 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
                 mapping["table"] = base
             cols.append(mapping)
         spec["columns"] = cols
+        # Which door answered is provenance: a map entry is the operator's reviewed
+        # word, a resolver's answer is whatever the catalog said at the time of the run.
         spec["columnsFrom"] = (f"DECLARE TABLE {entry['table']}"
-                               + (f" via synonym {table}" if base else ""))
+                               + (f" via synonym {table}" if base else "")
+                               + (" (catalog resolver)" if door == FROM_RESOLVER
+                                  else ""))
         # The parse-time refusal has been resolved here, so its note AND its token both
         # go: leaving either behind would report a failure that this pass just fixed.
         spec.pop("columnNote", None)
@@ -1831,9 +1839,19 @@ def _conventions_of(ctx: "_BuildCtx"):
 
 def build_machine(program: Program, source_name: str = "<source>",
                   synonyms: Optional[Dict[str, str]] = None,
-                  conventions: object = _AUTO_CONVENTIONS) -> Machine:
+                  conventions: object = _AUTO_CONVENTIONS,
+                  synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
+                  ) -> Machine:
+    """``synonyms`` (a ``{"SYNONYM": "BASE"}`` map) and ``synonym_resolver`` (a
+    ``(name) -> base | None`` callable the host supplies, see
+    ``mainframe_artifacts.protocol.SynonymResolver``) are the two doors Db2 catalog
+    knowledge arrives by. The map answers first; the resolver answers what the map
+    does not hold, and is asked only at the point of need. Neither is ever a default:
+    with both absent a synonym stays a flagged, unresolved INSERT, never a guess."""
     ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
                     data=program.data_by_name, conventions=conventions)
+    lookup = (SynonymLookup(synonyms, synonym_resolver)
+              if (synonyms or synonym_resolver is not None) else None)
     _compute_alter_targets(program, ctx)
 
     # Seed the machine memory (context) with each elementary item's start-of-run value
@@ -1950,7 +1968,14 @@ def build_machine(program: Program, source_name: str = "<source>",
               else frozenset())
     _correlate_fetches(ctx, program, tables)
     _correlate_selects(ctx, tables)
-    _correlate_inserts(ctx, program, synonyms, tables)
+    _correlate_inserts(ctx, program, lookup, tables)
+    # A catalog resolver that ERRORED is not the same as one that answered "not a
+    # synonym": whatever it did not reach stays unresolved for a fixable reason.
+    if lookup is not None and lookup.disabled_reason:
+        ctx.flag("CATALOG", 0,
+                 f"synonym resolver failed mid-run ({lookup.disabled_reason}); "
+                 f"synonyms it did not reach stay unresolved - fix the resolver and "
+                 f"re-run")
     # A conventions source that ERRORED is not the same as one that had no answer:
     # whatever it did not reach stays unresolved for a fixable reason, so say so.
     reason = getattr(ctx.conventions, "disabled_reason", None)

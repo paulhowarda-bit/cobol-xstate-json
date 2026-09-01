@@ -30,7 +30,7 @@ table alone; `--no-lineage` skips it.
   "state": "0000-MAIN__L2",          // the state performing the I/O
   "line": 38,
   "field": "OUT-FEE",
-  "pic": "9(5)V99",
+  "pic": "9(5)V99",                  // "group" for a VARCHAR host structure's parent
   "section": "FILE",
   "changedByProgram": true,          // this program assigns it (not just passes it)
   "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44,

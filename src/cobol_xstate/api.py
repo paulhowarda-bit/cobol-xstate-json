@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from cobol_parser.parse_bundle import ParseBundle, ParseBundleError
 from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
@@ -145,6 +145,7 @@ def analyze(source: str, *, source_name: str = "<source>",
             jobs: int = 1,
             jcl: Sequence[Tuple[str, Any]] = (),
             synonyms: Optional[Dict[str, str]] = None,
+            synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
             timer: Optional[StageTimer] = None) -> Analysis:
     """Retrieve, parse and model one COBOL program.
 
@@ -168,6 +169,10 @@ def analyze(source: str, *, source_name: str = "<source>",
     ``synonyms`` maps Db2 SYNONYM/ALIAS table names to their base tables - catalog
     knowledge supplied as input, never guessed. It lets a column-list-less INSERT
     written under a synonym find the base table's DECLARE TABLE / DCLGEN column order.
+    ``synonym_resolver`` is the same knowledge as a callable the host supplies
+    (``(name) -> base | None``, see ``mainframe_artifacts.protocol.SynonymResolver``),
+    asked at the point of need for whatever the map does not hold; a resolver that
+    raises is a flagged failed lookup, never "not a synonym".
     """
     timer = timer or StageTimer(_log, False, source_name)
     if parse is not None:
@@ -221,7 +226,8 @@ def analyze(source: str, *, source_name: str = "<source>",
             program = parse_program(source, fmt, resolver=resolver)
         copybook_errors = tuple(getattr(resolver, "fetch_errors", ()))
     with timer.stage("build_machine"):
-        machine = build_machine(program, source_name=source_name, synonyms=synonyms)
+        machine = build_machine(program, source_name=source_name, synonyms=synonyms,
+                                synonym_resolver=synonym_resolver)
 
     # When timings are collected, force the two memoized analyses now so each is
     # attributed to its own line instead of to whichever companion touches it first. Both

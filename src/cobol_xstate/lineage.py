@@ -699,11 +699,18 @@ class _Lineage:
                 made = [h for h in _iface._classify_dataflow(spec, self.linkage)
                         if h["direction"] == "create"]
 
-            # 1. an INPUT event fills its fields: they originate HERE.
+            # 1. an INPUT event fills its fields: they originate HERE. A GROUP field
+            # (a VARCHAR host structure, whose one host variable is the parent of a
+            # length/text pair) fills its elementary children too: a MOVE out of the
+            # text child must find the event, not "internally set".
             for h in got:
                 ev = _iface._event("get", h["etype"], h["endpoint"])
                 for f in h["fields"]:
-                    cur[f.upper()] = frozenset({(ev, False, None)})
+                    fu = f.upper()
+                    cur[fu] = frozenset({(ev, False, None)})
+                    for leaf in self.dv.leaves(fu):
+                        if leaf != fu:
+                            cur[leaf] = cur[fu]
                 if rows is not None:
                     for f in h["fields"]:
                         rows.append(self._row(name, h, "input", f, cur, aname, line))
