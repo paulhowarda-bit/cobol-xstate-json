@@ -519,6 +519,330 @@ def test_chain_flattens_a_cons_list_oldest_first():
     assert _chain(("c", ("b", ("a", None)))) == ["a", "b", "c"]
 
 
+# --------------------------------------------------------------------------- #
+# lineage's call-graph construction and its `partial` test
+#
+# Upstream ledger item 23. On the estate the lineage stage was 99% of all modelling time,
+# and one program family took nineteen minutes to emit 400 KB while programs of the same
+# size took seconds. The reaching-origins worklist above was NOT it (about two visits per
+# state). Two other things were quadratic in the program: `_successors` rescanned every
+# state for every PERFORM node to find the performed extent's exits (sites x states -
+# 8.4 million extent tests on an 8,400-state program), and `_conditions_of` decoded the
+# MAY bitmask - a union that holds most of the guard vocabulary at every state deep in
+# the program - into a frozenset once per state and again per row, only to compute the
+# boolean `partial`. The shape that triggers both is the IBM-shop house style: a PERFORM
+# per paragraph, `PERFORM p THRU p-EXIT`, an EVALUATE per paragraph, one utility
+# paragraph performed from many sites. Measured on that shape at 800 paragraphs: 38.7s
+# before, 1.0s after, byte-identical output.
+# --------------------------------------------------------------------------- #
+
+_A36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _perform_thru_machine(paras: int, whens: int = 4):
+    """A program in the house style that made this quadratic: MAIN performs every
+    paragraph as `PERFORM nnnn-PARA THRU nnnn-EXIT`; each paragraph is an EVALUATE with
+    `whens` distinct WHENs (each a distinct guard) plus an IF; every fourth one also
+    performs a shared utility. PERFORM sites and states both grow with `paras`, so a
+    sites x states scan is quadratic while the call graph it builds is linear."""
+    NF = 20
+    src = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. PERFTHRU.",
+        "       DATA DIVISION.",
+        "       WORKING-STORAGE SECTION.",
+        "       01 WS-CODE PIC X(2) VALUE '00'.",
+        "       01 WS-NAME PIC X(30).",
+        "       01 WS-ACC  PIC 9(5) VALUE 0.",
+        "       01 X000    PIC X(10).",
+    ]
+    src += [f"       01 F{i:03d} PIC 9(5) VALUE 0." for i in range(NF)]
+    src += [
+        "       LINKAGE SECTION.",
+        "       01 DFHCOMMAREA.",
+        "          05 CA-ID  PIC X(8).",
+        "          05 CA-AMT PIC 9(7).",
+        "       PROCEDURE DIVISION.",
+        "       0000-MAIN.",
+    ]
+    src += [f"           PERFORM {i:04d}-PARA THRU {i:04d}-EXIT" for i in range(1, paras + 1)]
+    src += [f"           DISPLAY F{k:03d}" for k in range(8)]
+    src += ["           DISPLAY WS-NAME", "           STOP RUN."]
+    for i in range(1, paras + 1):
+        k = (i - 1) % NF
+        src += [f"       {i:04d}-PARA.", "           EVALUATE WS-CODE"]
+        for w in range(whens):
+            t = ((i - 1) * whens + w) % 1296
+            src.append(f"               WHEN '{_A36[t // 36]}{_A36[t % 36]}'")
+            src.append(f"                   {'MOVE' if w % 2 == 0 else 'ADD'} CA-AMT "
+                       f"TO F{(k + w) % NF:03d}")
+            if w == 0 and i % 4 == 0:
+                src.append("                   PERFORM 9000-COMMON THRU 9000-EXIT")
+        src += [
+            "               WHEN OTHER",
+            f"                   MOVE 1 TO F{k:03d}",
+            "           END-EVALUATE",
+            f"           IF F{k:03d} > {i}",
+            "               MOVE CA-ID TO WS-NAME",
+            "           END-IF.",
+            f"       {i:04d}-EXIT.",
+            "           EXIT.",
+        ]
+    src += [
+        "       9000-COMMON.",
+        "           MOVE CA-ID TO X000",
+        "           ADD CA-AMT TO WS-ACC",
+        "           DISPLAY X000.",
+        "       9000-EXIT.",
+        "           EXIT.",
+    ]
+    return build_machine(parse_program("\n".join(src) + "\n"))
+
+
+def _perform_sites(lin) -> int:
+    return sum(1 for st in lin.states.values() if lin._perform_of(st))
+
+
+def test_perform_thru_fixture_has_the_shape_it_claims():
+    """The guards below count operations against this shape; a fixture whose PERFORMs
+    silently failed to resolve would make every one of them vacuous."""
+    lin = _Lineage(_perform_thru_machine(20))
+    view = lin.run()
+    assert not [f for f in lin.flags if "unresolved" in f or "inverted" in f]
+    assert view["rows"], "the boundary DISPLAYs must produce rows"
+    assert _perform_sites(lin) > 20          # one per paragraph plus the shared utility
+    assert any("PERFORMed from" in f for f in lin.flags), "the shared utility must merge"
+
+
+def test_return_wiring_does_not_scan_every_state_per_perform_site(monkeypatch):
+    """The exits of a performed extent are found once per distinct target, from an
+    index of paragraph -> states. The paragraph lookup used to run once per (PERFORM
+    site, state, edge) - sites x states - and it is what this counts."""
+    calls = []
+    real = lineage_mod._para_of
+
+    def counting(key):
+        calls.append(1)
+        return real(key)
+
+    monkeypatch.setattr(lineage_mod, "_para_of", counting)
+    lin = _Lineage(_perform_thru_machine(40))
+    assert calls, "the paragraph lookup is no longer routed through _para_of - guard blind"
+    assert len(calls) < 3 * len(lin.states), (
+        f"{len(calls)} paragraph lookups for {len(lin.states)} states and "
+        f"{_perform_sites(lin)} PERFORM sites - the extent scan is back")
+
+
+def test_perform_targets_are_resolved_once_per_distinct_target(monkeypatch):
+    """`_target_owner` walks `ordered` (an `index` per THRU endpoint), so resolving a
+    target per site - twice, through `perform_target` and again in `_successors` - was a
+    second sites x paragraphs term. Now: once per PERFORM node's action name, and once
+    per distinct target for the extent."""
+    import cobol_xstate.emitter as emitter_mod
+    calls = []
+    real = emitter_mod._target_owner
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(emitter_mod, "_target_owner", counting)
+    monkeypatch.setattr(lineage_mod, "_target_owner", counting)
+    lin = _Lineage(_perform_thru_machine(40))
+    during_build = len(calls)                # the counts below resolve targets again
+    sites = _perform_sites(lin)
+    targets = {lin._perform_of(st) for st in lin.states.values()} - {None}
+    assert during_build and sites > len(targets), "the utility must be performed from many sites"
+    # perform_target may try the name and its `_2`-trimmed form: at most two per site,
+    # plus one per distinct target for the extent.
+    assert during_build <= 2 * sites + len(targets) + 1, (
+        f"{during_build} target resolutions for {sites} sites / {len(targets)} targets")
+
+
+def _reference_successors(lin):
+    """The per-state scan `_successors` replaced, kept as the oracle: for every PERFORM
+    node, walk EVERY state and keep the ones inside the performed extent that fall out
+    of it. Returns (succ, fold_src, fold_dst) built the old way."""
+    from cobol_xstate.emitter import _para_of, _target_owner
+    owns = lambda node, owner: _para_of(lin.origin_state.get(node, node)) in owner
+    succ, returns, fold_src, fold_dst = {}, {}, {}, {}
+    for name, st in lin.states.items():
+        target = lin._perform_of(st)
+        if not target:
+            succ[name] = [t for t in lin._edges(st) if t in lin.states]
+            continue
+        owner, init = _target_owner(target, lin.ordered, lin.sections)
+        cont = next(iter(lin._edges(st)), None)
+        if owner is None or init not in lin.states:
+            succ[name] = [t for t in lin._edges(st) if t in lin.states]
+            continue
+        succ[name] = [init]
+        if cont is None:
+            continue
+        for s2, st2 in lin.states.items():
+            if not owns(s2, owner) or lin._perform_of(st2):
+                continue
+            edges = lin._edges(st2)
+            stay = [t for t in edges if t in lin.states and owns(t, owner)]
+            leaves = [t for t in edges if t not in lin.states or not owns(t, owner)]
+            if leaves or not edges:
+                if s2 not in returns:
+                    returns[s2] = list(stay)
+                    fold_src[s2] = list(leaves)
+                if cont not in returns[s2]:
+                    returns[s2].append(cont)
+                    fold_dst.setdefault(s2, []).append(cont)
+    for s, conts in returns.items():
+        succ[s] = list(conts)
+    return succ, fold_src, fold_dst
+
+
+def test_return_wiring_matches_the_per_state_scan():
+    """Indexing the extent is a scheduling choice, never a semantic one - and the order
+    of every list matters: `succ` order drives the worklist, `fold_src` becomes edge
+    conditions. Checked against the old scan on the shapes that stress it: overlapping
+    THRU ranges and sections, nested and repeated PERFORMs, recursion, the house style."""
+    from pathlib import Path
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    machines = [_perform_thru_machine(30)]
+    for name in ("sectperf.cbl", "thrurange.cbl", "nestperf.cbl", "perftwice.cbl",
+                 "calltwice.cbl", "recur.cbl", "timesexit.cbl", "lineage.cbl"):
+        src = (examples / name).read_text()
+        machines.append(build_machine(parse_program(src), source_name=name))
+    checked = 0
+    for m in machines:
+        lin = _Lineage(m)
+        succ, fold_src, fold_dst = _reference_successors(lin)
+        assert list(lin.succs) == list(succ)
+        assert lin.succs == succ
+        assert lin.fold_src == fold_src and list(lin.fold_src) == list(fold_src)
+        assert lin.fold_dst == fold_dst and list(lin.fold_dst) == list(fold_dst)
+        checked += bool(fold_dst)
+    assert checked == len(machines), "every fixture must actually wire at least one return"
+
+
+def _set_partial(lin, state) -> bool:
+    """The definition `partial` had before it moved onto the packed masks, kept as the
+    oracle: some condition in MAY - MUST whose guard MAY does not hold both ways."""
+    must = lin._conds(lin.must.get(state))
+    may = lin._conds(lin.may.get(state))
+    return any(not ((g, True) in may and (g, False) in may) for g, _ in (may - must))
+
+
+def _condition_fixtures():
+    from pathlib import Path
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    out = [_perform_thru_machine(40)]
+    for name in ("lineage.cbl", "banktran.cbl", "altswitch.cbl", "condlin.cbl", "notend.cbl"):
+        out.append(build_machine(parse_program((examples / name).read_text()), source_name=name))
+    return out
+
+
+def test_partial_by_bit_arithmetic_matches_the_set_definition():
+    """Reconverging IF/ELSE, loops (a guard seen in both polarities), the two-IF
+    disjunction, and the utility performed from many sites: every reached state must
+    answer as the set definition does, and the corpus must contain both answers."""
+    seen = set()
+    for m in _condition_fixtures():
+        lin = _Lineage(m)
+        for s in lin.states:
+            if lin.must.get(s) is None:
+                continue
+            got = lin._conditions_of(s)[1]
+            assert got == _set_partial(lin, s), s
+            seen.add(got)
+    assert seen == {True, False}, "the fixtures must exercise both answers"
+
+
+def test_pair_mask_marks_exactly_the_adjacent_polarity_pairs():
+    paired = 0
+    for m in _condition_fixtures():
+        lin = _Lineage(m)
+        cl = lin.cond_list
+        both = {g for g, _ in cl if (g, False) in set(cl) and (g, True) in set(cl)}
+        marked = {cl[i][0] for i in range(len(cl)) if lin.pair_lo >> i & 1}
+        assert marked == both
+        for i in range(len(cl)):
+            if lin.pair_lo >> i & 1:
+                assert cl[i] == (cl[i][0], False) and cl[i + 1] == (cl[i][0], True)
+        paired += len(both)
+    assert paired, "the corpus must hold guards in both polarities, or nothing was checked"
+
+
+def test_partial_bits_on_hand_built_masks():
+    vocab = [("A", False), ("A", True), ("B", True), ("C", False), ("C", True)]
+    pair_lo = _Lineage._pair_mask(vocab)
+    assert pair_lo == 0b01001                    # A at bit 0, C at bit 3
+    bit = {c: 1 << i for i, c in enumerate(vocab)}
+
+    def expect(must, may):
+        m = {c for c in vocab if must & bit[c]}
+        y = {c for c in vocab if may & bit[c]}
+        want = any(not ((g, True) in y and (g, False) in y) for g, _ in (y - m))
+        assert _Lineage._partial_bits(must, may, pair_lo) is want, (must, may)
+        return want
+
+    a_both = bit[("A", False)] | bit[("A", True)]
+    assert expect(0, a_both) is False            # reconverged: says nothing
+    assert expect(0, bit[("B", True)]) is True   # one-sided: a real constraint
+    assert expect(bit[("B", True)], a_both | bit[("B", True)]) is False   # B is in MUST
+    assert expect(0, bit[("C", True)]) is True   # negated-only is one-sided too
+    assert expect(bit[("C", False)], bit[("C", False)]) is False          # MAY == MUST
+
+
+def test_partial_never_decodes_the_may_mask(monkeypatch):
+    """Only MUST is unpacked, and only once per state: the bits `_conds` is handed over
+    a whole run must equal the MUST population over the reached states."""
+    seen = []
+    real = _Lineage._conds
+
+    def counting(self, bits):
+        seen.append(bin(bits or 0).count("1"))
+        return real(self, bits)
+
+    monkeypatch.setattr(_Lineage, "_conds", counting)
+    lin = _Lineage(_perform_thru_machine(40))
+    lin.run()
+    assert seen, "_conds is no longer used to unpack MUST - this guard went blind"
+    must_bits = sum(bin(b).count("1") for b in lin.must.values() if b)
+    assert sum(seen) <= must_bits, (
+        f"{sum(seen)} bits unpacked against a MUST population of {must_bits} - MAY is "
+        f"being decoded again, or a state more than once")
+    assert len(seen) <= len(lin.states)
+
+
+def test_lineage_operation_count_grows_linearly_with_the_program(monkeypatch):
+    """The ledger's guard with teeth: the operations that were quadratic, counted at two
+    sizes. Doubling the program must not square the work. Wall clock would be flaky;
+    these counts are exact."""
+    import cobol_xstate.emitter as emitter_mod
+
+    def run(paras):
+        n = {"para": 0, "owner": 0, "bits": 0, "apply": 0}
+        r_para, r_owner = lineage_mod._para_of, emitter_mod._target_owner
+        r_conds, r_apply = _Lineage._conds, _Lineage._apply
+        monkeypatch.setattr(lineage_mod, "_para_of",
+                            lambda k: (n.__setitem__("para", n["para"] + 1), r_para(k))[1])
+        monkeypatch.setattr(emitter_mod, "_target_owner",
+                            lambda *a: (n.__setitem__("owner", n["owner"] + 1), r_owner(*a))[1])
+        monkeypatch.setattr(lineage_mod, "_target_owner", emitter_mod._target_owner)
+        monkeypatch.setattr(_Lineage, "_conds",
+                            lambda self, b: (n.__setitem__("bits", n["bits"] + bin(b or 0).count("1")),
+                                             r_conds(self, b))[1])
+        monkeypatch.setattr(_Lineage, "_apply",
+                            lambda self, *a: (n.__setitem__("apply", n["apply"] + 1),
+                                              r_apply(self, *a))[1])
+        m = _perform_thru_machine(paras)
+        _Lineage(m).run()
+        monkeypatch.undo()
+        return n
+
+    small, large = run(40), run(80)
+    for k in small:
+        assert small[k] > 0, f"{k} is not counted any more - this guard went blind"
+        assert large[k] < 2.6 * small[k], f"{k}: {small[k]} -> {large[k]} for 2x the program"
+
+
 def test_condition_bitmasks_round_trip_to_the_conditions_they_stand_for():
     lin = _Lineage(_wide_machine(4))
     assert lin.cond_list == sorted(set(lin.cond_list)), "bit order must be deterministic"
