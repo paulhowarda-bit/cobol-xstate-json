@@ -263,12 +263,17 @@ class _Lineage:
         self.edge_cond = self._edge_conditions()
         self.entries = self._entries()
         self.cond_list, self.edge_bits = self._intern_conditions()
+        self.pair_lo = self._pair_mask(self.cond_list)
         # Two passes over the same graph. MUST (meet = intersection) is what we report:
         # a condition that holds on EVERY path to the event, so stating it is always
         # true. MAY (meet = union) is only used to decide whether an empty MUST is
         # honest - see `_conditions_of`.
         self.must = self._cond_flow(lambda a, b: a & b)
         self.may = self._cond_flow(lambda a, b: a | b)
+        # state -> `_conditions_of`'s answer. Asked once per state by the write-site
+        # pass and once more per ROW; the answer is a property of the state.
+        self._cond_memo: Dict[str, Tuple[Optional[int], bool]] = {}
+        self._changed_memo: Dict[str, List[dict]] = {}     # field -> `_changed_by`
         # The OUTPUT's condition pools. Not to be confused with `_intern_conditions`
         # above, which packs the same vocabulary into BITMASKS for the fixpoint's own
         # meet/join; these two carry those predicates out to the document.
@@ -416,7 +421,9 @@ class _Lineage:
         step count and the answer both unchanged.
 
         Bits are handed out in SORTED order, never iteration order, so the packing
-        cannot make the emitted view depend on PYTHONHASHSEED.
+        cannot make the emitted view depend on PYTHONHASHSEED. Sorting also puts a
+        guard's two polarities side by side - ``(g, False)`` immediately before
+        ``(g, True)``, nothing can sort between them - which `_pair_mask` relies on.
         """
         cond_list = sorted({c for cs in self.edge_cond.values() for c in cs})
         bit = {c: 1 << i for i, c in enumerate(cond_list)}
@@ -427,6 +434,29 @@ class _Lineage:
                 mask |= bit[c]
             edge_bits[key] = mask
         return cond_list, edge_bits
+
+    @staticmethod
+    def _pair_mask(cond_list: List[Cond]) -> int:
+        """Bit ``i`` set where ``cond_list[i]`` is ``(g, False)`` and ``cond_list[i+1]``
+        is ``(g, True)``: the guards present in BOTH polarities, marked on their positive
+        bit. A guard seen in one polarity only gets no bit."""
+        mask = 0
+        for i in range(len(cond_list) - 1):
+            g, neg = cond_list[i]
+            if not neg and cond_list[i + 1] == (g, True):
+                mask |= 1 << i
+        return mask
+
+    @staticmethod
+    def _partial_bits(must: int, may: int, pair_lo: int) -> bool:
+        """Does some condition in MAY but not MUST belong to a guard that MAY does not
+        hold in both polarities? Pure mask algebra - see `_conditions_of` for what the
+        answer means. ``both`` marks the positive bit of every guard whose positive AND
+        negative bits are both in MAY; widened to both bits, its complement leaves the
+        one-sided guards, and any of those in ``MAY - MUST`` makes the point partial."""
+        both = may & (may >> 1) & pair_lo
+        both |= both << 1
+        return bool(may & ~must & ~both)
 
     def _conds(self, bits: Optional[int]) -> CondSet:
         """A packed bitmask back to the condition set it stands for.
@@ -534,12 +564,22 @@ class _Lineage:
         reports its loop guard and stays silent about the rest. The conditions listed
         stay true; the claim "these are all of them" is best-effort. Stated in the
         output's own note rather than left for a reader to discover.
+
+        The test runs on the packed masks (`_partial_bits`) and MAY is never decoded.
+        MUST is an intersection and stays small, but MAY is a union: deep in a program
+        it holds most of the guard vocabulary, and unpacking it into a set once per
+        state and once per row - 35 million bits on an 8,400-state program, to answer a
+        yes/no - was most of the lineage stage's time. The answer is memoised per state.
         """
-        must = self._conds(self.must.get(state))
-        may = self._conds(self.may.get(state))
-        partial = any(not ((g, True) in may and (g, False) in may)
-                      for g, _ in (may - must))
-        return self._cond_set_id(must), partial
+        got = self._cond_memo.get(state)
+        if got is not None:
+            return got
+        must_bits = self.must.get(state) or 0
+        may_bits = self.may.get(state) or 0
+        got = (self._cond_set_id(self._conds(must_bits)),
+               self._partial_bits(must_bits, may_bits, self.pair_lo))
+        self._cond_memo[state] = got
+        return got
 
     def _cond_id(self, name: str, negated: bool) -> int:
         """Intern one ``(guard, negated)`` predicate. Everything else about it - the
@@ -594,28 +634,83 @@ class _Lineage:
         # handler targets included - see emitter.iter_transitions / edge_target.
         return [t for _ev, e in iter_transitions(st) if (t := edge_target(e))]
 
-    def _owns(self, node: str, owner: Set[str]) -> bool:
-        """Is this (possibly split) node part of the performed paragraph's extent?"""
-        return _para_of(self.origin_state.get(node, node)) in owner
-
     def _successors(self) -> Dict[str, List[str]]:
         """Successor map. A PERFORM node enters its target; every node that would leave
         the performed paragraph's extent returns to the call site's continuation.
 
         Returns merge across call sites (context-insensitive) - sound for provenance: it
         can name an extra origin, never miss one. Flagged when it actually happens.
+
+        The exits of a performed extent are found ONCE per distinct target and replayed
+        per call site. This used to rescan every state of the program for every PERFORM
+        node - sites x states, with a target re-resolved through `ordered.index` each
+        time - which is what made a program written in the ``PERFORM p THRU p-EXIT``
+        house style, with a PERFORM per paragraph, quadratic in its own length: 8.4
+        million extent tests on an 8,400-state program, for a call graph whose answer
+        is linear in the states plus the sum of the extents.
+
+        What must not move, because it is byte-visible downstream: the outer loop still
+        walks `self.states` in order, so the unresolved flags, the `multi` counts and
+        `succ`'s key order are as before; the exits of an extent are visited in
+        `self.states` order (sorted by position, never by iterating the `owner` SET), so
+        on overlapping extents the same call site is still the first to reach a shared
+        exit - and `returns[s2]` / `fold_src[s2]` are seeded by whichever site gets
+        there first, which `_edge_conditions` turns into conditions; and every `succ`
+        list keeps its order, which drives the worklist order and with it the order the
+        fixpoint's own flags are appended in.
         """
         succ: Dict[str, List[str]] = {}
         returns: Dict[str, List[str]] = {}   # owner-exit node -> continuations
         multi: Dict[str, int] = {}
-        for name, st in self.states.items():
-            target = self._perform_of(st)
+        states = self.states
+        # Once per state, in order: its PERFORM target (if it is a call node), its edges,
+        # and the paragraph it belongs to (a `_split` segment belongs to its origin).
+        target_of = {s: self._perform_of(st) for s, st in states.items()}
+        edges_of = {s: self._edges(st) for s, st in states.items()}
+        para_of = {s: _para_of(self.origin_state.get(s, s)) for s in states}
+        by_para: Dict[str, List[str]] = {}
+        for s in states:
+            by_para.setdefault(para_of[s], []).append(s)
+        pos = {s: i for i, s in enumerate(states)}
+        owner_of: Dict[str, Tuple[Optional[set], Optional[str]]] = {}
+        exits_of: Dict[str, List[Tuple[str, List[str], List[str]]]] = {}
+
+        def exits(target: str, owner: Set[str]) -> List[Tuple[str, List[str], List[str]]]:
+            """``(exit node, in-range edges, leaving edges)`` for every node of the
+            extent that falls out of it or ends, in `self.states` order."""
+            got = exits_of.get(target)
+            if got is not None:
+                return got
+            got = []
+            extent = sorted((s2 for p in owner for s2 in by_para.get(p, ())),
+                            key=pos.__getitem__)
+            for s2 in extent:
+                if target_of[s2]:            # a call node inside the range is not an exit
+                    continue
+                edges = edges_of[s2]
+                # Only the edges that LEAVE the performed range are returns. The ones
+                # that stay are ordinary control flow inside the paragraph and must
+                # survive: a node can do both at once - `IF X ... END-IF` as a
+                # paragraph's last statement branches inward on X and falls out of the
+                # range otherwise. Replacing the whole list (as this once did) deleted
+                # the inward branch, and with it every event inside the IF.
+                stay = [t for t in edges if t in states and para_of[t] in owner]
+                leaves = [t for t in edges if t not in states or para_of[t] not in owner]
+                if leaves or not edges:      # falls out of the range, or ends
+                    got.append((s2, stay, leaves))
+            exits_of[target] = got
+            return got
+
+        for name in states:
+            target = target_of[name]
             if not target:
-                succ[name] = [t for t in self._edges(st) if t in self.states]
+                succ[name] = [t for t in edges_of[name] if t in states]
                 continue
-            owner, init = _target_owner(target, self.ordered, self.sections)
-            cont = next(iter(self._edges(st)), None)
-            if owner is None or init not in self.states:
+            if target not in owner_of:
+                owner_of[target] = _target_owner(target, self.ordered, self.sections)
+            owner, init = owner_of[target]
+            cont = edges_of[name][0] if edges_of[name] else None
+            if owner is None or init not in states:
                 # WHY it failed matters to whoever reads the flag. A THRU range whose
                 # endpoints both exist but run backwards is not a missing paragraph, and
                 # reporting it as one sends a reader hunting for a name that is right
@@ -630,33 +725,19 @@ class _Lineage:
                 self._unresolved[target] = kind
                 self._flag(f"PERFORM {target}: {why}; the call is not "
                            f"followed - origins produced inside it are not traced")
-                succ[name] = [t for t in self._edges(st) if t in self.states]
+                succ[name] = [t for t in edges_of[name] if t in states]
                 continue
             succ[name] = [init]                      # enter the call
             multi[target] = multi.get(target, 0) + 1
             if cont is None:
                 continue
-            for s2, st2 in self.states.items():      # wire the returns
-                if not self._owns(s2, owner) or self._perform_of(st2):
-                    continue
-                edges = self._edges(st2)
-                # Only the edges that LEAVE the performed range are returns. The ones
-                # that stay are ordinary control flow inside the paragraph and must
-                # survive: a node can do both at once - `IF X ... END-IF` as a
-                # paragraph's last statement branches inward on X and falls out of the
-                # range otherwise. Replacing the whole list (as this once did) deleted
-                # the inward branch, and with it every event inside the IF.
-                stay = [t for t in edges
-                        if t in self.states and self._owns(t, owner)]
-                leaves = [t for t in edges
-                          if t not in self.states or not self._owns(t, owner)]
-                if leaves or not edges:              # falls out of the range, or ends
-                    if s2 not in returns:
-                        returns[s2] = list(stay)
-                        self.fold_src[s2] = list(leaves)
-                    if cont not in returns[s2]:
-                        returns[s2].append(cont)
-                        self.fold_dst.setdefault(s2, []).append(cont)
+            for s2, stay, leaves in exits(target, owner):    # wire the returns
+                if s2 not in returns:
+                    returns[s2] = list(stay)
+                    self.fold_src[s2] = list(leaves)
+                if cont not in returns[s2]:
+                    returns[s2].append(cont)
+                    self.fold_dst.setdefault(s2, []).append(cont)
         for s, conts in returns.items():
             succ[s] = list(conts)                    # in-range edges + the return
         for target, n in multi.items():
@@ -816,8 +897,15 @@ class _Lineage:
         return []
 
     def _changed_by(self, field: str) -> List[dict]:
-        """Assignments writing this field; for a group, those writing any child."""
+        """Assignments writing this field; for a group, those writing any child.
+
+        Memoised per field: a field crosses the boundary once per event that carries
+        it, and each row asked again - for a record-level group that is every child's
+        write list, re-merged and re-keyed per row."""
         fu = field.upper()
+        got = self._changed_memo.get(fu)
+        if got is not None:
+            return got
         out = list(self.changers.get(fu, []))
         if not out:
             # Same dedup as the `changers` build, and the same reason for a `seen` set
@@ -831,6 +919,7 @@ class _Lineage:
                         continue
                     seen.add(k)
                     out.append(e)
+        self._changed_memo[fu] = out
         return out
 
     def _row(self, state: str, hit: dict, direction: str, field: str,

@@ -205,6 +205,9 @@ PERFORM is followed as a real call and returned from, using the same target reso
 the runnable emitter (`_target_owner`), so a section's whole extent is analyzed. States
 are **split at PERFORM boundaries** first — a folded run like
 `[ACCEPT, MOVE, perform_X, WRITE]` would otherwise run the `WRITE` with pre-call origins.
+Each distinct target is resolved once and its extent's exits found once, then replayed
+per call site — so a program in the `PERFORM p THRU p-EXIT` house style, one PERFORM per
+paragraph, costs linear time to wire rather than PERFORM sites × states.
 
 ### How the conditions are recovered
 
@@ -222,7 +225,10 @@ cannot:
    guard in MAY-but-not-MUST in *both* polarities says nothing — the branches reconverged
    (after `IF A ... ELSE ...` everything downstream has both `A` and `NOT A` behind it),
    or it is loop history. One that survives in a *single* polarity means the real
-   condition is a disjunction, and that sets `conditionsPartial`.
+   condition is a disjunction, and that sets `conditionsPartial`. The polarity test runs
+   on the packed bitmasks (a guard's two polarities sit on adjacent bits) and MAY is
+   never unpacked — deep in a program it holds most of the guard vocabulary, and decoding
+   it per state and per row was most of the lineage stage's cost.
 
 A PERFORM's synthetic return edge inherits the condition of the real edges it stands in
 for, so `IF X ... END-IF` at a paragraph's tail keeps its `NOT X` on the way out and the
