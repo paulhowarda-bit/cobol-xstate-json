@@ -42,3 +42,31 @@ out/
 *.prefetch.json
 *.fetch.json
 *.dynamic-calls.json
+
+# Incoming instruction files, and the photographs they arrive as.
+#
+# The upstream ledgers are transcriptions of an externally-managed estate: real
+# program and cursor names, library requests, audit findings. They are working
+# input, not part of this distribution, and this repository is public - so they
+# stay on disk and out of git. Six of them had been committed to a local-only
+# `master` for exactly this reason, which is what kept that branch unpushable.
+# Patterns carry no leading slash, so a ledger dropped in a subdirectory is
+# ignored too.
+UPSTREAM-*.md
+NEXT-SESSION-PROMPT.md
+*.WORK-BREAKDOWN.md
+*.TRANSCRIPTION-NOTES.md
+
+# Screenshots and photos of those instructions. No image is tracked anywhere in
+# this repository, so this costs nothing today; `git add -f` still works for a
+# deliberate asset.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+*.heic
+*.heif
+*.tif
+*.tiff
