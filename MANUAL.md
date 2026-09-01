@@ -684,9 +684,13 @@ cobol-xstate prog.cbl --no-lineage --outdir out       # -> out/prog.json only
 { "event": "CREATE.FILE.OUT-FILE", "direction": "output", "field": "OUT-FEE",
   "changedByProgram": true,
   "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44 }],
-  "conditions": [{ "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
-                   "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 }],
+  "conditionSetId": 4,
   "origins": [{ "event": "GET.CALLER.CALLER" }, { "event": "GET.CONSOLE.SYSIN" }] }
+
+// beside `rows`, the interned pools the id resolves through:
+"conditions":    { "0": { "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
+                          "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 } },
+"conditionSets": { "4": [0] }
 ```
 
 *The WRITE emits `OUT-FEE`; this program computed it at line 44; its value came from the
@@ -709,12 +713,19 @@ is a deposit.*
   real source.
 - **`CALL ... USING`** is by reference and the callee is another program, so its arguments
   get a `maybe` origin with `resolvedBy` naming the program that would settle it.
-- **`conditions`** are the guards that hold on *every* path to the event, so each is true
-  whenever it fires. `kind` separates a real decision (`business`) from loop and
-  end-of-file plumbing (`control`) — filter to `business` and you have the program's
-  rules. Negation is first-class: a `WHEN OTHER` reports `NOT (WS-KIND = 'P')` and
-  `NOT (WS-KIND = 'Q')`, which is the actual rule. The same list appears per write in
-  `changedBy`.
+- **`conditionSetId`** indexes `conditionSets` (ids into `conditions`): the guards that
+  hold on *every* path to the event, so each is true whenever it fires. `kind` separates a
+  real decision (`business`) from loop and end-of-file plumbing (`control`) — filter to
+  `business` and you have the program's rules. Negation is first-class: a `WHEN OTHER`
+  reports `NOT (WS-KIND = 'P')` and `NOT (WS-KIND = 'Q')`, which is the actual rule. The
+  same key appears per write in `changedBy`.
+- **The conditions are interned, and the document says so.** A point's conditions are a
+  set drawn from a small vocabulary, and the same set recurs at a row and at every write
+  site under it; written inline at each, one estate program spent 2.04 GB encoding 296
+  distinct predicates. Both levels are pooled once per document instead. The key is
+  **absent, never empty**, so `"conditionSetId" in row` is exactly the older
+  `bool(row.get("conditions"))`; documents carry `"formatVersion": 2` so a reader that
+  predates the pools can fail loudly rather than see every row as unconditional.
 - **`state` vs `baseState`**: `state` is where the row was emitted, and it can be a
   *synthetic* id — a paragraph whose folded run contains a `PERFORM` is split into
   `p__L1` / `p__L2` / `p__Lend` for this analysis, and **no other view splits that way**.
