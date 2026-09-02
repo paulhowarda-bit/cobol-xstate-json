@@ -529,7 +529,19 @@ class _Lowered:
 
 def _lower(machine: Machine) -> _Lowered:
     """Apply the reactive lowering to ``machine``: flatten PERFORM, split multi-reads,
-    rewrite the boundary, and build every table the artifacts need."""
+    rewrite the boundary, and build every table the artifacts need.
+
+    Lowered once per machine. ``--target reactive`` wants both the module and the
+    drawable JSON, and each used to lower again from scratch - a second deepcopy,
+    PERFORM flattening and interface build over the same unchanged machine. Cached on
+    the instance like ``interface()`` and ``lineage()``, never module-wide."""
+    cached = machine._lowered_cache
+    if cached is None:
+        cached = machine._lowered_cache = _lower_uncached(machine)
+    return cached
+
+
+def _lower_uncached(machine: Machine) -> _Lowered:
     fields = _field_table(machine)
     config = _strip_meta(copy.deepcopy(machine.config))
 

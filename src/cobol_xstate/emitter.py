@@ -823,6 +823,18 @@ def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: Lis
     resolve). A range target owns its whole paragraph span; a section owns its members;
     a plain target owns itself."""
     actor_configs: Dict[str, dict] = {}
+    # Slicing an actor's states out of the pool used to be a scan of EVERY state per
+    # actor - a `_para_of` (a str.split) on each key, once per PERFORM target - which is
+    # quadratic in exactly the `PERFORM p THRU p-EXIT` house style: 23M calls and 7.3 s
+    # for one Harel view of a 1,600-paragraph program, paid again for the reactive view.
+    # Index the pool by paragraph once; an actor then takes the union of its owner's
+    # buckets. `position` restores pool order across those buckets, because the key
+    # order of an actor's states is what the goldens hash.
+    by_para: Dict[str, List[str]] = {}
+    position: Dict[str, int] = {}
+    for i, k in enumerate(pool):
+        position[k] = i
+        by_para.setdefault(_para_of(k), []).append(k)
     # Drain the work list in a DEFINED order. `seed` and `needed` are sets, so iterating
     # them directly made actor build order - and therefore the key order of actorConfigs
     # in the emitted module and of `charts` in the JSON bundle - vary run to run on
@@ -836,7 +848,9 @@ def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: Lis
         owner, initial = _target_owner(target, ordered, sections)
         if owner is None:
             continue
-        own = copy.deepcopy({k: v for k, v in pool.items() if _para_of(k) in owner})
+        keys = [k for p in owner for k in by_para.get(p, ())]
+        keys.sort(key=position.__getitem__)
+        own = copy.deepcopy({k: pool[k] for k in keys})
         if initial not in own:
             continue
         needed: set = set()

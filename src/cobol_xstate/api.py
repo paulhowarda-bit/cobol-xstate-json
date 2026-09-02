@@ -237,13 +237,19 @@ def analyze(source: str, *, source_name: str = "<source>",
         with timer.stage("interface"):
             machine.interface()
         with timer.stage("lineage-fixpoint"):
-            machine.lineage().run()
+            # Sub-spans inside the one stage the estate measured at 93% of runtime:
+            # building the lineage graph (the split, its successors, the two condition
+            # fixpoints), then the origins worklist, then the row emission.
+            with timer.stage("lineage:build"):
+                lin = machine.lineage(timer=timer)
+            lin.run(timer=timer)
 
     bind_jobs: List[Any] = []
     if jcl:
         from .bind import bind_jobs as _bind
-        bind_jobs = _bind(jcl, fetcher=fetcher, paths=paths, dest=dest, result=pre,
-                          unavailable=unavailable, jobs=jobs)
+        with timer.stage("bind-jcl"):
+            bind_jobs = _bind(jcl, fetcher=fetcher, paths=paths, dest=dest, result=pre,
+                              unavailable=unavailable, jobs=jobs)
 
     analysis = Analysis(machine=machine, program=program, prefetch=pre,
                         source_name=source_name, bind_jobs=tuple(bind_jobs),
@@ -266,7 +272,8 @@ def gather(source: str, *, source_name: str = "<source>",
            fmt: Optional[SourceFormat] = None,
            paths: Sequence[str] = (), exts: Sequence[str] = (),
            dest: str, jobs: int = 1,
-           unavailable: Optional[str] = None) -> str:
+           unavailable: Optional[str] = None,
+           timer: Optional[StageTimer] = None) -> str:
     """Run the retrieval half where the estate is reachable, and keep what came off it.
 
     Both stages run - stage 2's plan needs the parse - but no view is written: the
@@ -274,9 +281,11 @@ def gather(source: str, *, source_name: str = "<source>",
     model from. Returns the path to the bundle manifest.
     """
     recorder, answers = recording_fetcher(fetcher) if fetcher is not None else (None, [])
+    # The timer goes through: a --gather-only --timing run used to report nothing,
+    # because the analysis inside built its own disabled timer.
     analysis = analyze(source, source_name=source_name, fmt=fmt, fetcher=recorder,
                        paths=paths, exts=exts, dest=dest, jobs=jobs,
-                       unavailable=unavailable)
+                       unavailable=unavailable, timer=timer)
     return write_bundle(dest, subject_name=source_name, subject_text=source,
                         kind="cobol", prefetch=analysis.prefetch, answers=answers,
                         fetch=analysis.fetch)

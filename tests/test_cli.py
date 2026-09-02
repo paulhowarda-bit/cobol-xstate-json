@@ -447,6 +447,36 @@ def test_timing_prints_a_per_stage_breakdown_to_stderr(tmp_path, capsys):
         assert stage in err, f"missing stage {stage!r} in stderr:\n{err}"
 
 
+def test_timing_names_each_view_not_just_their_total(tmp_path, capsys):
+    """`views` is a total over six builds, six serializations and six writes; one number
+    could not say WHICH view a slow run was slow in. Each written view gets its own line."""
+    assert run([EXAMPLES_CBL, "--timing", "--outdir", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    for view in ("view:bundle", "view:business", "view:lineage", "view:reactive",
+                 "view:artifacts", "view:dynamic-calls"):
+        assert view in err, f"missing {view!r} in stderr:\n{err}"
+
+
+def test_timing_splits_the_lineage_stage_into_its_parts(tmp_path, capsys):
+    """The estate measured `lineage-fixpoint` at 93% of all runtime and could see no
+    further, because it was one span. Its parts now report beside it."""
+    assert run([EXAMPLES_CBL, "--timing", "--outdir", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    for part in ("lineage:conditions", "lineage:build", "lineage:origins", "lineage:rows",
+                 "lineage-fixpoint"):
+        assert part in err, f"missing {part!r} in stderr:\n{err}"
+
+
+def test_timing_reaches_a_gather_only_run(tmp_path, capsys):
+    """--gather-only used to build its own disabled timer, so --timing printed nothing
+    for exactly the run - the one that talks to the estate - most worth timing."""
+    assert run([EXAMPLES_CBL, "--gather-only", str(tmp_path / "bundle"), "--timing"]) == 0
+    err = capsys.readouterr().err
+    assert "timing (ms):" in err
+    for stage in ("prefetch", "parse", "fetch"):
+        assert stage in err, f"missing stage {stage!r} in stderr:\n{err}"
+
+
 # --- timing_sink: an embedding program routing timings into its own log ---
 
 
