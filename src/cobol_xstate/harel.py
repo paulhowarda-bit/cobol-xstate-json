@@ -110,14 +110,17 @@ def _nest(states: Dict[str, dict]) -> Dict[str, dict]:
     for key in order:
         members = groups[key]
         if len(members) == 1 and key in members:
-            node = copy.deepcopy(members[key])
+            # No copy: every chart handed here is already private - `to_harel` deep-
+            # copies the config before the transform, and the emitter deep-copies each
+            # actor's slice - so this was a third full copy of the same tree.
+            node = members[key]
             node["id"] = key
             _retarget(node)
             out[key] = node
             continue
         if _is_special(key):                     # a sentinel never groups
             for n, st in members.items():
-                node = copy.deepcopy(st)
+                node = st
                 node["id"] = n
                 _retarget(node)
                 out[n] = node
@@ -125,7 +128,7 @@ def _nest(states: Dict[str, dict]) -> Dict[str, dict]:
         inner: Dict[str, dict] = {}
         initial: Optional[str] = None
         for n, st in members.items():
-            node = copy.deepcopy(st)
+            node = st
             node["id"] = n                       # the flat name remains the address
             _retarget(node)
             leaf = _leaf_key(n, key)

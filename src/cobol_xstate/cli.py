@@ -362,7 +362,7 @@ def _run(args, timing_sink=None) -> int:
         gathered = gather(source, source_name=source_name, fmt=_format(args.format),
                           fetcher=fetcher, paths=search_paths,
                           exts=tuple(args.copybook_ext), dest=args.gather_only,
-                          unavailable=why, jobs=_jobs(args))
+                          unavailable=why, jobs=_jobs(args), timer=timer)
         _log.info(f"[{source_name}] wrote estate bundle {gathered}")
         _log.info(f"[{source_name}] model from it with: --from-bundle "
                   f"{args.gather_only}")
@@ -413,7 +413,11 @@ def _run(args, timing_sink=None) -> int:
         code. --debug still gets the raw traceback, same contract as the top-level
         boundary in run()."""
         try:
-            writer(beside)
+            # Its own timing line: `views` below is the total, and one number over six
+            # view builds, six serializations and six writes could not say which view
+            # a slow run was slow in.
+            with timer.stage(f"view:{view_name}"):
+                writer(beside)
         except Exception as exc:
             if args.debug:
                 raise
@@ -498,17 +502,19 @@ def _run(args, timing_sink=None) -> int:
 
     _t_views = timer.start()
     if args.target in ("business", "lineage", "artifacts"):
-        obj = (analysis.lineage() if args.target == "lineage"
-               else analysis.artifacts() if args.target == "artifacts"
-               else analysis.business())
-        _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
+        with timer.stage(f"view:{args.target}"):
+            obj = (analysis.lineage() if args.target == "lineage"
+                   else analysis.artifacts() if args.target == "artifacts"
+                   else analysis.business())
+            _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
         _log.info(f"[{source_name}] wrote {out_path}")
         if args.target == "business":
             _companion_safe("lineage", _write_lineage_companion, out_path)
     elif args.target in ("js", "reactive"):
         try:
-            text = (analysis.reactive_module() if args.target == "reactive"
-                    else analysis.js_module())
+            with timer.stage(f"view:{args.target}"):
+                text = (analysis.reactive_module() if args.target == "reactive"
+                        else analysis.js_module())
         except NotImplementedError as exc:
             # An explicit --target reactive on a program the lowering refuses: report the
             # reason, not a traceback. The refusal is a fact about the program.
@@ -531,9 +537,10 @@ def _run(args, timing_sink=None) -> int:
                                      indent=args.indent) + "\n")
             _log.info(f"[{source_name}] wrote {view}")
     else:
-        text = analysis.machine_json(machine_only=args.machine_only,
-                                     indent=args.indent)
-        _write(out_path, text + "\n")
+        with timer.stage("view:bundle"):
+            text = analysis.machine_json(machine_only=args.machine_only,
+                                         indent=args.indent)
+            _write(out_path, text + "\n")
         _log.info(f"[{source_name}] wrote {out_path}")
         # A plain run yields the six JSON views of one program, each answering a
         # different question: the faithful machine (what it does), the business
@@ -554,7 +561,10 @@ def _run(args, timing_sink=None) -> int:
 
     def _summary() -> None:
         n_states = len(machine.config.get("states", {}))
-        iface = machine.bundle()["interface"]
+        # The cached overlay, not `machine.bundle()["interface"]`: that is the SAME
+        # object, but reaching it through bundle() re-ran the whole Harel transform -
+        # a second deepcopy of the config and every actor chart - for one log line.
+        iface = machine.interface()
         _log.info(
             f"[{machine.program_id}] {n_states} state(s), "
             f"{len(machine.provenance)} provenance entr(ies), "

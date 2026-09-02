@@ -41,6 +41,7 @@ Honest limits, all surfaced in ``flags`` rather than guessed:
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 from collections import deque
@@ -186,7 +187,9 @@ def _entry_key(entry: dict) -> str:
 
 
 class _Lineage:
-    def __init__(self, machine: Machine):
+    def __init__(self, machine: Machine, timer=None):
+        # `timer`: a StageTimer, only from the --timing run that builds this - it splits
+        # the condition fixpoints out of `lineage:build`. Nothing here depends on it.
         self.m = machine
         self.config = machine.config
         self.actions = machine.semantics.get("actions", {})
@@ -268,8 +271,11 @@ class _Lineage:
         # a condition that holds on EVERY path to the event, so stating it is always
         # true. MAY (meet = union) is only used to decide whether an empty MUST is
         # honest - see `_conditions_of`.
+        t_cond = timer.start() if timer is not None else None
         self.must = self._cond_flow(lambda a, b: a & b)
         self.may = self._cond_flow(lambda a, b: a | b)
+        if timer is not None:
+            timer.since("lineage:conditions", t_cond)
         # state -> `_conditions_of`'s answer. Asked once per state by the write-site
         # pass and once more per ROW; the answer is a property of the state.
         self._cond_memo: Dict[str, Tuple[Optional[int], bool]] = {}
@@ -1147,14 +1153,20 @@ class _Lineage:
             return "reached-predecessor-not-propagated"
         return "cascade"
 
-    def run(self) -> dict:
+    def run(self, timer=None) -> dict:
         # Solved once per instance. The dynamic-call view wants the primitive facts this
         # pass records (`fills`/`flow`/`dynamic_sites`) and the lineage table wants the
         # rows; both call this, and re-solving would also append every flag twice.
         if self._view is not None:
             return self._view
+        # `timer` (a StageTimer, from the --timing run that forces this pass) splits the
+        # one `lineage-fixpoint` span the estate reported as 93% of all runtime into the
+        # origins worklist and the row emission, so a per-program timing log can say
+        # WHICH half a slow program is slow in. Output is untouched either way.
+        t_origins = timer.start() if timer is not None else None
         self.changers = self._changers()
         entries = self.entries
+        entryset = set(entries)
 
         preds: Dict[str, List[str]] = {s: [] for s in self.states}
         for s, ts in self.succs.items():
@@ -1167,35 +1179,87 @@ class _Lineage:
         # distinction is what lets an all-empty prefix still propagate to successors.
         IN: Dict[str, Optional[State]] = {s: None for s in self.states}
         OUT: Dict[str, Optional[State]] = {s: None for s in self.states}
-        # A QUEUE, and a state already queued is not queued again - for exactly the
-        # reasons `_cond_flow` sets out above, which apply here with more force. That
-        # fixpoint's re-visits cost a few integer ops; this one re-runs `_apply` over a
-        # state's whole entry run and re-merges every predecessor's full field map, so a
-        # wasted visit is thousands of times dearer. It is also the WIDTH of the lattice
-        # that drives the waste, not the state count: measured on programs of one shape,
-        # a stack took 6.8 visits per state over 5 fields and 81.6 over 300, while a
-        # queue took exactly 1.0 in both - 19x to 48x, widening with program size,
-        # and the solved maps compare equal either way.
-        work = deque(entries)
+        # ORDER is what this pass costs. A state already queued is not queued again (the
+        # reasons `_cond_flow` sets out above apply here with more force: a visit re-runs
+        # `_apply` over a whole entry run), but dedup alone is not enough. A plain FIFO
+        # queue, which took 1.0 visits per state on the synthetic it was measured on, took
+        # 6.3 / 12.6 / 24.8 on real CICS programs of 1,459 / 2,098 / 4,236 lines - the
+        # whole body re-solved ~25 times - because a routine PERFORMed from 80 sites gets
+        # a NEW caller's map at every breadth-first depth, and each time its exit fans the
+        # change out to all 80 continuations and everything downstream of them.
+        #
+        # So: reverse postorder, in PASSES. Within a pass, states run in RPO (predecessors
+        # before successors along forward edges) from a heap; a state re-queued by a back
+        # edge, or one this pass has already run, waits for the NEXT pass. That bounds
+        # every state to one run per pass - a shared routine runs once with all its
+        # callers' maps merged, not once per caller - and passes settle at about the loop
+        # depth. A heap without the pass boundary was 4x WORSE than FIFO on a program whose
+        # every paragraph performs one utility (the routine re-ran per caller); with it,
+        # 4,236-line COACTUPC went 26.5 -> 3.0 pops per state in 5 passes, and the two
+        # utility-heavy synthetics stayed level. Same rows either way: the answer is the
+        # fixpoint, the order only decides how many wasted visits it takes to reach it.
+        order: List[str] = []
+        seen: set = set()
+        for e in entries:
+            if e in seen:
+                continue
+            seen.add(e)
+            stack = [(e, iter(self.succs.get(e, ())))]
+            while stack:
+                node, it = stack[-1]
+                nxt_node = None
+                for t in it:
+                    if t in self.states and t not in seen:
+                        nxt_node = t
+                        break
+                if nxt_node is None:
+                    stack.pop()
+                    order.append(node)
+                else:
+                    seen.add(nxt_node)
+                    stack.append((nxt_node, iter(self.succs.get(nxt_node, ()))))
+        rpo: Dict[str, int] = {n: i for i, n in enumerate(reversed(order))}
+        far = len(rpo)                       # anything the walk never reaches sorts last
+        work: List[Tuple[int, str]] = [(rpo.get(e, far), e) for e in entries]
+        heapq.heapify(work)
+        later: List[Tuple[int, str]] = []    # the next pass
         queued = set(entries)
         steps = 0
         # The lattice is finite (origins over fields), so this terminates; the bound is
         # a backstop against a graph shape we did not anticipate, never normal control.
         limit = max(50_000, len(self.states) * 500)
-        while work:
+        while work or later:
             steps += 1
             if steps > limit:
                 self._flag("lineage fixpoint hit its iteration bound; the result may be "
                            "incomplete - please report this program")
                 break
-            s = work.popleft()
+            if not work:
+                work, later = later, []
+                heapq.heapify(work)
+            cur, s = heapq.heappop(work)
             queued.discard(s)
-            merged: State = dict(seed) if s in entries else {}
-            for p in preds.get(s, []):
-                if OUT[p] is None:
-                    continue
-                for f, o in OUT[p].items():
-                    merged[f] = merged.get(f, frozenset()) | o
+            # Merging every predecessor's whole map, one `frozenset() | o` per field, was
+            # the cost of the pass: 17.4M dict.get calls on a 4,236-line CICS program,
+            # 8.7 of its 12 s, because a group input's fill seeds every leaf of a real
+            # copybook record (mean map width 341 fields there). Yet 81% of its states
+            # have exactly ONE predecessor, whose map can simply be shared - `_apply`
+            # copies its input, OUT entries are only ever reassigned, and the origin
+            # sets are frozen - and where there are several, the first writer of a
+            # field needs no union at all. Measured 2.9x on that corpus, byte-identical.
+            live = [OUT[p] for p in preds.get(s, []) if OUT[p] is not None]
+            merged: State
+            if s in entryset:
+                merged = dict(seed)
+            elif len(live) == 1:
+                merged = live[0]
+                live = ()
+            else:
+                merged = {}
+            for om in live:
+                for f, o in om.items():
+                    prev = merged.get(f)
+                    merged[f] = o if prev is None else (prev if prev is o else prev | o)
             if IN[s] is not None and merged == IN[s]:
                 continue                      # input unchanged - nothing to redo
             IN[s] = merged
@@ -1204,9 +1268,16 @@ class _Lineage:
                 OUT[s] = new_out
                 for t in self.succs.get(s, []):
                     if t in self.states and t not in queued:
-                        work.append(t)
+                        ti = rpo.get(t, far)
+                        if ti > cur:
+                            heapq.heappush(work, (ti, t))
+                        else:
+                            later.append((ti, t))
                         queued.add(t)
 
+        if timer is not None:
+            timer.since("lineage:origins", t_origins)
+        t_rows = timer.start() if timer is not None else None
         rows: List[dict] = []
         unreached: List[dict] = []
         reached = {s for s in self.states if IN[s] is not None}
@@ -1270,7 +1341,10 @@ class _Lineage:
             "conditions": {str(i): d for i, d in enumerate(self._cond_defs)},
             "conditionSets": {str(i): s for i, s in enumerate(self._set_defs)},
             "rows": rows,
-            "flags": self.flags,
+            # Sorted: `_flag` appends in visit order, so the list used to encode the
+            # traversal - a scheduling change reordered it with every flag's text
+            # unchanged. The answer must not depend on the order it was found in.
+            "flags": sorted(self.flags),
         }
         # Present ONLY when something was actually lost. A program whose every
         # event-carrying state is reachable says nothing here rather than saying
@@ -1294,6 +1368,8 @@ class _Lineage:
                 ),
                 "states": unreached,
             }
+        if timer is not None:
+            timer.since("lineage:rows", t_rows)
         return self._view
 
 

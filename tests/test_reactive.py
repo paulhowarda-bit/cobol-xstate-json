@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from cobol_xstate.parser import parse_program
-from cobol_xstate.reactive import _event_slug, emit_reactive_module
+from cobol_xstate.reactive import _event_slug, build_reactive_view, emit_reactive_module
 from cobol_xstate.statechart import build_machine
 
 REPO = Path(__file__).resolve().parents[1]
@@ -551,6 +551,29 @@ def test_reactive_view_and_module_are_the_same_machine():
 def _run_dir(root):
     """Where a run writes: --outdir itself, taken literally with nothing appended."""
     return Path(root)
+
+
+def test_reactive_lowering_is_solved_once_per_machine_and_cannot_alias():
+    """`--target reactive` writes the module AND the drawable JSON, and each used to
+    lower the machine again from scratch. `_lower` is now cached on the machine, so the
+    view reads the lowering the module was emitted from - safe only if neither caller
+    mutates it. Module first, then view, on ONE machine must equal the view on a fresh
+    machine, and the module re-emitted from the fresh one, for every example the
+    lowering accepts."""
+    lowered = 0
+    for path in sorted(EXAMPLES.glob("*.cbl")):
+        try:
+            shared = _machine(path.name)
+            module = emit_reactive_module(shared)
+            view_after_module = build_reactive_view(shared)
+        except NotImplementedError:
+            continue                        # refused by design (type:parallel)
+        assert shared._lowered_cache is not None, path.name
+        fresh = _machine(path.name)
+        assert build_reactive_view(fresh) == view_after_module, path.name
+        assert emit_reactive_module(fresh) == module, path.name
+        lowered += 1
+    assert lowered > 0
 
 
 def test_cli_reactive_writes_both_the_module_and_the_drawable_json(tmp_path):

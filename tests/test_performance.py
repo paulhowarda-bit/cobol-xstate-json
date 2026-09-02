@@ -355,6 +355,118 @@ def test_origins_fixpoint_settles_in_roughly_one_visit_per_state(monkeypatch):
         f"worklist is re-propagating, which is what stack order did")
 
 
+def _converging_handlers_machine(handlers: int, whens: int, width: int):
+    """The CICS shape that made a FIFO worklist re-solve a 4,236-line program 25 times
+    over (26.5 pops per state; 3.0 in reverse postorder).
+
+    A dispatch EVALUATE fans out to `handlers` handler paragraphs of DIFFERENT lengths.
+    Each moves literals of its own - a distinct origin per site - into a `width`-leaf
+    record a READ filled, then performs one shared edit routine, which performs SEND-MAP,
+    a `whens`-way EVALUATE. Breadth-first, handler h reaches the shared routine at depth
+    ~2h, so the routine's map changes once per handler and every change fans out through
+    the EVALUATE to everything after it.
+
+    The origins MUST differ per path. When every handler moved the same READ-filled
+    leaves, each arrival added nothing to the union, the join never re-fired, and the
+    shape measured a clean 1.0 - which is how the fixtures above stayed blind to this.
+    Even so it reproduces a fraction of the real program's waste (FIFO measured 1.6
+    here), so the threshold below is a floor on the scheduler, not a ceiling on the bug.
+    """
+    src = [
+        "       IDENTIFICATION DIVISION.",
+        "       PROGRAM-ID. CONVERGE.",
+        "       ENVIRONMENT DIVISION.",
+        "       INPUT-OUTPUT SECTION.",
+        "       FILE-CONTROL.",
+        "           SELECT CUSTFILE ASSIGN TO CUSTIN.",
+        "       DATA DIVISION.",
+        "       FILE SECTION.",
+        "       FD CUSTFILE.",
+        "       01 CUST-IN PIC X(2000).",
+        "       WORKING-STORAGE SECTION.",
+        "       01 WS-EOF PIC X VALUE 'N'.",
+        "       01 WS-AID PIC X(2).",
+        "       01 WS-OUT PIC X(10).",
+        "       01 WS-MSG PIC X(10).",
+        "       01 WS-REC.",
+    ]
+    src += [f"          05 WS-F{i:03d} PIC X(10)." for i in range(width)]
+    src += [
+        "       LINKAGE SECTION.",
+        "       01 DFHCOMMAREA.",
+        "          05 CA-ID PIC X(8).",
+        "       PROCEDURE DIVISION.",
+        "       0000-MAIN.",
+        "           OPEN INPUT CUSTFILE",
+        "           READ CUSTFILE INTO WS-REC",
+        "               AT END MOVE 'Y' TO WS-EOF",
+        "           END-READ",
+        "           EVALUATE WS-AID",
+    ]
+    for h in range(1, handlers + 1):
+        src += [f"               WHEN '{h:02d}'",
+                f"                   PERFORM {h:04d}-HANDLE THRU {h:04d}-EXIT"]
+    src += [
+        "               WHEN OTHER",
+        "                   PERFORM 3000-SEND-MAP THRU 3000-EXIT",
+        "           END-EVALUATE",
+        "           DISPLAY WS-OUT",
+        "           STOP RUN.",
+    ]
+    for h in range(1, handlers + 1):
+        src += [f"       {h:04d}-HANDLE."]
+        for k in range(h * 2):                     # handler h is 2h statements long
+            src.append(f"           MOVE 'L{h:02d}{k:02d}' TO WS-F{(h * 5 + k) % width:03d}")
+        src += [
+            f"           MOVE CA-ID TO WS-F{h % width:03d}",
+            f"           MOVE 'M{h:02d}' TO WS-MSG",
+            "           PERFORM 9000-EDIT THRU 9000-EXIT.",
+            f"       {h:04d}-EXIT.",
+            "           EXIT.",
+        ]
+    src += [
+        "       9000-EDIT.",
+        "           IF WS-MSG = 'X'",
+        "               MOVE WS-F000 TO WS-OUT",
+        "           END-IF",
+        "           PERFORM 3000-SEND-MAP THRU 3000-EXIT.",
+        "       9000-EXIT.",
+        "           EXIT.",
+        "       3000-SEND-MAP.",
+        "           EVALUATE TRUE",
+    ]
+    for w in range(whens):
+        src += [f"               WHEN WS-F{w % width:03d} = 'A'",
+                f"                   MOVE WS-F{w % width:03d} TO WS-OUT"]
+    src += [
+        "           END-EVALUATE",
+        "           DISPLAY WS-MSG.",
+        "       3000-EXIT.",
+        "           EXIT.",
+    ]
+    return build_machine(parse_program("\n".join(src) + "\n"))
+
+
+def test_origins_fixpoint_holds_near_one_visit_per_state_on_converging_paths(monkeypatch):
+    """Reverse postorder, in passes: a state runs about once per pass and the passes
+    settle at the loop depth. Counts only the fixpoint's runs (the row-emitting pass
+    hands `_apply` a list), so the number IS the scheduler's waste."""
+    runs = []
+    real = _Lineage._apply
+
+    def counting(self, name, st, incoming, rows):
+        if rows is None:
+            runs.append(1)
+        return real(self, name, st, incoming, rows)
+
+    monkeypatch.setattr(_Lineage, "_apply", counting)
+    lin = _Lineage(_converging_handlers_machine(40, 80, 150))
+    lin.run()
+    assert len(runs) < 1.3 * len(lin.states), (
+        f"{len(runs)} transfer-function runs for {len(lin.states)} states - a FIFO "
+        f"queue measured 1.6 per state on this shape and 26.5 on the real program")
+
+
 def test_origins_fixpoint_answer_does_not_depend_on_visit_order():
     """The queue and the dedup set are a scheduling choice, never a semantic one.
 

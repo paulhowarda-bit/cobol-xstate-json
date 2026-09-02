@@ -122,6 +122,8 @@ class Machine:
     sql_cursors: List[dict] = field(default_factory=list)
     _iface_cache: Optional[dict] = field(default=None, repr=False, compare=False)
     _lineage_cache: object = field(default=None, repr=False, compare=False)
+    # The reactive lowering (reactive._lower), solved once for the same reason.
+    _lowered_cache: object = field(default=None, repr=False, compare=False)
 
     def interface(self) -> dict:
         """The external-interface overlay over THIS machine's config, computed once.
@@ -144,8 +146,9 @@ class Machine:
                 sql_cursors=self.sql_cursors)
         return self._iface_cache
 
-    def lineage(self):
-        """The reaching-origins analysis over THIS machine, solved once.
+    def lineage(self, timer=None):
+        """The reaching-origins analysis over THIS machine, solved once. ``timer`` (a
+        StageTimer) reaches the analysis only on the call that builds it.
 
         The lineage table and the dynamic-call view are two projections of the SAME
         fixpoint - "which external event is responsible for this field's value" - and a
@@ -156,7 +159,10 @@ class Machine:
         """
         if self._lineage_cache is None:
             from .lineage import _Lineage
-            self._lineage_cache = _Lineage(self)
+            # The plain call when there is no timer, so a caller (or a test double)
+            # that knows only `_Lineage(machine)` keeps working unchanged.
+            self._lineage_cache = (_Lineage(self) if timer is None
+                                   else _Lineage(self, timer=timer))
         return self._lineage_cache
 
     def bundle(self) -> dict:

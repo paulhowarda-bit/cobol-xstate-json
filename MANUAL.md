@@ -537,6 +537,17 @@ Print a per-stage wall-clock breakdown to **stderr**. Diagnostic only — it tou
 output file, and a run is byte-identical with and without it. Use it before optimizing
 anything: the stage that dominates is rarely the one that looks slow.
 
+The lines, in run order: `prefetch`, `parse`, `build_machine`, `interface`,
+`lineage:conditions` (the two condition fixpoints, part of) `lineage:build` (the lineage
+graph), `lineage:origins` (the origins worklist), `lineage:rows` (the row emission) and
+their total `lineage-fixpoint`,
+`bind-jcl` (with `--bind-jcl`), `artifacts`, `fetch`, then one
+`view:<name>` per artifact written (`view:bundle`, `view:business`, `view:lineage`,
+`view:reactive`, `view:artifacts`, `view:dynamic-calls`, or `view:<target>` for a single
+`--target`) — each covering that view's build, serialization and write — and `views`,
+their total. `measured` is the sum of every line. `--gather-only --timing` reports the
+retrieval stages of the gather run.
+
 ### `--summary`
 
 Print a human-readable summary to **stderr**: state/provenance/flag counts, the external
