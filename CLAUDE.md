@@ -64,7 +64,7 @@ COBOL_PARSER_KOOPA_JAR=~/tools/koopa.jar cobol-parser prog.cbl --diff-producers
 
 # Db2 synonym->base-table knowledge (catalog knowledge as input, never guessed): lets a
 # column-list-less INSERT written under a synonym find the base table's DECLARE TABLE
-# column order. Two doors, both shared with eztrieve-dependencies through
+# column order. Two doors, shared with eztrieve-dependencies and jcl-dependencies through
 # mainframe_artifacts.cliargs.add_synonym_args / synonyms.SynonymLookup: a map file
 # (the operator's explicit answer, wins when both are given) and a host-injected
 # resolver FUNC(name) -> base | None, asked only at the point of need. A resolver that
