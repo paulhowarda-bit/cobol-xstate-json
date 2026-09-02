@@ -587,7 +587,7 @@ def test_inspect_tallying_for_a_literal_spelling_replacing_is_still_a_read():
 
 # --------------------------------------------------------------------------- #
 # a WHERE-clause filter is not a field flowing to Db2
-# (docs/issues/unmapped-fields-v52.md, Issue 2)
+# (the v52 tracer report, Issue 2)
 # --------------------------------------------------------------------------- #
 
 def test_a_dml_row_selector_emits_no_lineage_row():

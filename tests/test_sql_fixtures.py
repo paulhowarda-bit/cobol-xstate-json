@@ -67,7 +67,7 @@ def test_dml_where_clause_variables_are_parameters_not_fields():
     `UPDATE ACCOUNT SET BALANCE = :WS-BAL WHERE ID = :WS-ID` writes one column from one
     variable; :WS-ID picks the row. Carried among the fields it reached the graph loader
     as a write with no column mapping - an "unmapped field" - which is where thousands
-    of the v52 warnings came from (docs/issues/unmapped-fields-v52.md, Issue 2). A
+    of the v52 warnings came from (the v52 tracer report, Issue 2). A
     SELECT has always reported its WHERE variables as `params`; these are the same
     thing, said the same way.
     """
@@ -708,7 +708,7 @@ def test_no_varchar_child_is_a_field_param_or_host_variable_of_any_event():
 
 # --------------------------------------------------------------------------- #
 # sqlqual: qualified host variables
-# (docs/issues/unmapped-fields-v52.md, Issue 3)
+# (the v52 tracer report, Issue 3)
 # --------------------------------------------------------------------------- #
 
 def test_qualified_host_vars_resolve_to_the_elementary_field():
@@ -774,7 +774,7 @@ def test_qualified_lineage_names_fields_the_data_dictionary_holds():
 
 # --------------------------------------------------------------------------- #
 # sqlderiv: what a DERIVED slot was made of
-# (docs/issues/unmapped-fields-v52.md, Issue 1)
+# (the v52 tracer report, Issue 1)
 # --------------------------------------------------------------------------- #
 
 def _derived(iface, host_var):
@@ -854,7 +854,7 @@ def test_a_fetch_takes_its_derivation_from_the_cursors_declare():
 
 # --------------------------------------------------------------------------- #
 # why the columns are missing, as a token a consumer can branch on
-# (docs/issues/unmapped-fields-v52.md, Issue 4)
+# (the v52 tracer report, Issue 4)
 # --------------------------------------------------------------------------- #
 
 def test_an_unresolvable_event_says_why_in_a_stable_token():
@@ -889,7 +889,7 @@ def test_a_residual_note_is_not_an_unresolved_event():
 
 # --------------------------------------------------------------------------- #
 # sqlhost: Db2 host structures and null indicators
-# (docs/issues/host-structure-expansion.md)
+# (the host-structure tracer report)
 # --------------------------------------------------------------------------- #
 
 def test_a_group_host_variable_becomes_one_field_per_elementary_item():

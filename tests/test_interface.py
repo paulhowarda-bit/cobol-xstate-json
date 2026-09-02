@@ -688,7 +688,7 @@ def test_cursor_table_binds_past_a_from_inside_the_select_list():
 
 # --------------------------------------------------------------------------- #
 # DML: the row selector is not the data written
-# (docs/issues/unmapped-fields-v52.md, Issue 2)
+# (the v52 tracer report, Issue 2)
 # --------------------------------------------------------------------------- #
 
 _DML_DATA = (

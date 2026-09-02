@@ -541,7 +541,7 @@ def test_every_view_builds_over_convention_columns():
 
 # --------------------------------------------------------------------------- #
 # a column-list-less INSERT is an UNKNOWN column list, so it is recoverable
-# (docs/issues/unmapped-fields-v52.md, Issue 5)
+# (the v52 tracer report, Issue 5)
 # --------------------------------------------------------------------------- #
 
 INSERT_NO_COLUMN_LIST = (

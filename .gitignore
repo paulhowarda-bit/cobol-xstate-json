@@ -70,3 +70,11 @@ NEXT-SESSION-PROMPT.md
 *.heif
 *.tif
 *.tiff
+
+# Estate-derived analysis reports from the tracer team's runs. Same class as the
+# UPSTREAM ledgers above and kept out for the same reason: they name real programs,
+# Db2 tables, cursors and client paths, and this repository is public. They stay on
+# disk as working input. Anything the code needs to cite is stated in the code.
+docs/issues/cobol-xstate-issues-v50.md
+docs/issues/unmapped-fields-v52.md
+docs/issues/host-structure-expansion.md
