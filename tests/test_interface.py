@@ -688,7 +688,7 @@ def test_cursor_table_binds_past_a_from_inside_the_select_list():
 
 # --------------------------------------------------------------------------- #
 # DML: the row selector is not the data written
-# (docs/issues/unmapped-fields-v52.md, Issue 2)
+# (the v52 tracer report, Issue 2)
 # --------------------------------------------------------------------------- #
 
 _DML_DATA = (
@@ -783,7 +783,7 @@ def test_an_indicator_variable_does_not_demote_the_write_it_qualifies():
 
 
 # -- CICS operands are blank-padded to their 8-byte field inside the quotes ----------
-# `PROGRAM('ACTC000 ')` used to match nothing at all: the optional closing quote sat
+# `PROGRAM('CALLA000 ')` used to match nothing at all: the optional closing quote sat
 # BEFORE the `\s*`, so it could only match a quote adjacent to the captured name. The
 # failure then surfaced as a name-shaped sentinel (`<program>`), not as an error - and
 # two padded targets in one program deduped into ONE `<program>` endpoint, dropping the
@@ -798,9 +798,9 @@ _PADDED_SRC = (
     "       PROCEDURE DIVISION.\n"
     "       0000-MAIN.\n"
     "           IF WS-FLAG = 'Y'\n"
-    "               EXEC CICS XCTL PROGRAM('ACTC000 ') END-EXEC\n"
+    "               EXEC CICS XCTL PROGRAM('CALLA000 ') END-EXEC\n"
     "           ELSE\n"
-    "               EXEC CICS XCTL PROGRAM ('ACTC099 ') END-EXEC\n"
+    "               EXEC CICS XCTL PROGRAM ('CALLA099 ') END-EXEC\n"
     "           END-IF\n"
     "           EXEC CICS READ FILE('CUSTFIL ') INTO(WS-REC) END-EXEC\n"
     "           EXEC CICS SEND MAP('MP1     ') MAPSET('MSET1   ') END-EXEC\n"
@@ -814,8 +814,8 @@ def test_quoted_blank_padded_program_operands_do_not_collapse_to_a_sentinel():
     iface = _iface_of(_PADDED_SRC)
     endpoints = {e["endpoint"]: e for e in iface["endpoints"]}
     # BOTH callees survive - they used to dedupe into a single `<program>` row.
-    assert endpoints["ACTC000"]["type"] == "program"
-    assert endpoints["ACTC099"]["type"] == "program"
+    assert endpoints["CALLA000"]["type"] == "program"
+    assert endpoints["CALLA099"]["type"] == "program"
     assert "<program>" not in endpoints
 
 
@@ -840,13 +840,13 @@ def test_unpadded_and_unquoted_cics_operands_still_resolve():
         "       PROGRAM-ID. T.\n"
         "       DATA DIVISION.\n"
         "       WORKING-STORAGE SECTION.\n"
-        "       01  WS-PGM   PIC X(8) VALUE 'ACTC150'.\n"
+        "       01  WS-PGM   PIC X(8) VALUE 'CALLA150'.\n"
         "       PROCEDURE DIVISION.\n"
         "       0000-MAIN.\n"
-        "           EXEC CICS LINK PROGRAM('ACTC099') END-EXEC\n"
+        "           EXEC CICS LINK PROGRAM('CALLA099') END-EXEC\n"
         "           EXEC CICS XCTL PROGRAM(WS-PGM) END-EXEC.\n")
     endpoints = {e["endpoint"] for e in iface["endpoints"]}
-    assert "ACTC099" in endpoints and "ACTC150" in endpoints
+    assert "CALLA099" in endpoints and "CALLA150" in endpoints
 
 
 def test_seed_cursor_maps_lets_the_more_specific_evidence_win():

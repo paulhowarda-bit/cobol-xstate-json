@@ -715,7 +715,7 @@ class _ParaCompiler:
                 # PARSER's list here as it already does for the DML verbs, instead of
                 # falling back to its regex over the raw text. The two disagree now that
                 # the parser expands host structures: the raw text still says
-                # `:BSTI-TRNF-INIT`, which is in no assignment target, so the group name
+                # `:DSTI-TRNF-INIT`, which is in no assignment target, so the group name
                 # arrived as a phantom PARAMETER of the very event whose fields it had
                 # just been expanded into.
                 "hostVars": st.host_vars,

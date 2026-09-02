@@ -110,7 +110,7 @@ def analyze_calls(program: Program) -> CallAnalysis:
 
     # 88-level condition names with string VALUEs: `SET <cond> TO TRUE` stores the
     # condition's (first) VALUE into its parent item - a literal-assignment channel on
-    # a par with MOVE 'lit' (the `88 DCIOC104-MODULE VALUE 'DCIOC104'` idiom for
+    # a par with MOVE 'lit' (the `88 DEMOC104-MODULE VALUE 'DEMOC104'` idiom for
     # dynamic CALL targets). cond -> (parent, literal-it-SETs); parent -> all its
     # 88 string literals (candidate values even when no SET is visible).
     cond_lit: Dict[str, tuple] = {}

@@ -13,16 +13,16 @@
       *================================================================*
        DATA DIVISION.
        WORKING-STORAGE SECTION.
-       01  MFER-ERROR      PIC X(80).
+       01  DFER-ERROR      PIC X(80).
        01  WS-ACCT-ID      PIC S9(9) COMP.
        01  WS-ACCT-NAME    PIC X(20).
        01  SQLCODE         PIC S9(9) COMP VALUE 0.
            EXEC SQL
-               DECLARE T_MFER_ERROR TABLE
+               DECLARE T_DFER_ERROR TABLE
                    ( MFER_ERROR       CHAR(80) NOT NULL )
            END-EXEC.
            EXEC SQL
-               DECLARE T_RTAC_ACCOUNT TABLE
+               DECLARE T_DRAC_ACCOUNT TABLE
                    ( ACCT_ID          INTEGER NOT NULL,
                      ACCT_NAME        CHAR(20) NOT NULL )
            END-EXEC.
@@ -33,10 +33,10 @@
            STOP RUN.
        1000-DECLARED.
            EXEC SQL
-               INSERT INTO T_MFER_ERROR VALUES (:MFER-ERROR)
+               INSERT INTO T_DFER_ERROR VALUES (:DFER-ERROR)
            END-EXEC.
        2000-SYNONYM.
            EXEC SQL
-               INSERT INTO RTAC_ACCOUNT
+               INSERT INTO DRAC_ACCOUNT
                VALUES (:WS-ACCT-ID, :WS-ACCT-NAME)
            END-EXEC.

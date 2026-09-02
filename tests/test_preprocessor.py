@@ -222,20 +222,20 @@ def test_standalone_replace_directive_applies_until_off():
 
 _FETCH_SRC = (
     "       IDENTIFICATION DIVISION.\n"
-    "       PROGRAM-ID. FBSB066B.\n"
+    "       PROGRAM-ID. SAMPB066.\n"
     "       DATA DIVISION.\n"
     "       WORKING-STORAGE SECTION.\n"
     "       COPY DC01104.\n"
     "       PROCEDURE DIVISION.\n"
     "       JM0004.\n"
-    "           SET DCIOC104-MODULE TO TRUE\n"
-    "           CALL CN-DCIOC104 USING DC01104-PARMS\n"
+    "           SET DEMOC104-MODULE TO TRUE\n"
+    "           CALL CN-DEMOC104 USING DC01104-PARMS\n"
     "           GOBACK.\n"
 )
 _FETCH_CPY = (
     "       01 DC01104-CONSTANTS.\n"
-    "          05 CN-DCIOC104            PIC X(08).\n"
-    "             88 DCIOC104-MODULE     VALUE 'DCIOC104'.\n"
+    "          05 CN-DEMOC104            PIC X(08).\n"
+    "             88 DEMOC104-MODULE     VALUE 'DEMOC104'.\n"
     "       01 DC01104-PARMS             PIC X(100).\n"
 )
 
@@ -251,7 +251,7 @@ def test_fetcher_supplying_text_resolves_the_copybook_and_the_call():
     machine = _fetch_machine(lambda name: _FETCH_CPY if name == "DC01104" else None)
     assert machine.flags == []
     actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
-    assert "call_DCIOC104" in actions
+    assert "call_DEMOC104" in actions
 
 
 def test_fetcher_returning_a_dict_with_a_path_is_read_from_disk(tmp_path):
@@ -268,7 +268,7 @@ def test_fetcher_returning_a_dict_with_a_path_is_read_from_disk(tmp_path):
 
     machine = _fetch_machine(fetch)
     actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
-    assert "call_DCIOC104" in actions
+    assert "call_DEMOC104" in actions
     assert calls == ["DC01104"]          # cached: fetched once, not per reference
 
 

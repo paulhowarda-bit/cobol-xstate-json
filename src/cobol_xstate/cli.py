@@ -406,7 +406,7 @@ def _run(args, timing_sink=None) -> int:
 
         Once the PRIMARY artifact is on disk the run has usable output, and the exit
         code must keep saying so: a batch caller reads non-zero as "no usable output"
-        and discards the valid files it already has (the MXBNKSUM false negative - a
+        and discards the valid files it already has (the SUMPGM01 false negative - a
         valid bundle + lineage thrown away over a crash in a later view). A companion
         that CRASHES - as opposed to refusing, which each writer already handles - is
         therefore a loud WARNING naming the view and the reason, never a changed exit

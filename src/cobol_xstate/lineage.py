@@ -227,7 +227,7 @@ class _Lineage:
         # depends on the cursor maps handed to it, and reactive builds two
         # provenance-only maps deliberately left unseeded (they consume booleans only).
         # `examples/sqlwscsr.cbl` proves it - action `exec_sql_fetch` classifies as
-        # `T_MMAA_ACC_ANAL` here and as `<cursor ACCT_CSR>` there. A module-level
+        # `T_DMAA_ACC_ANAL` here and as `<cursor ACCT_CSR>` there. A module-level
         # `lru_cache` on `_classify` would return whichever answer was computed first
         # and silently corrupt the other view, with no test failure, because those two
         # sites read only `h["direction"]`.

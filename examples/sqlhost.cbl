@@ -20,7 +20,7 @@
       *================================================================*
        DATA DIVISION.
        WORKING-STORAGE SECTION.
-       01  BSTI-TRNF-INIT.
+       01  DSTI-TRNF-INIT.
            05  TRNF-NBR            PIC X(14).
            05  SBRX-GRP.
                10  SBRX-OFFC-C     PIC X(3).
@@ -32,7 +32,7 @@
        01  WS-NULL-IND-01          PIC S9(4) COMP.
        01  SQLCODE                 PIC S9(9) COMP VALUE 0.
            EXEC SQL
-               DECLARE T_BSTI_TRNF_INIT TABLE
+               DECLARE T_DSTI_TRNF_INIT TABLE
                (TRNF_NBR      CHAR(14),
                 SBRX_OFFC_C   CHAR(3),
                 SBRX_BASE_C   CHAR(6),
@@ -54,32 +54,32 @@
                DECLARE POSN-UPDT-CURSOR CURSOR FOR
                    SELECT TRNF_NBR, SBRX_OFFC_C, SBRX_BASE_C,
                           BRCH_CORR_I
-                   FROM T_BSTI_TRNF_INIT
+                   FROM T_DSTI_TRNF_INIT
            END-EXEC
            EXEC SQL OPEN POSN-UPDT-CURSOR END-EXEC.
        1000-FETCH-GROUP.
            EXEC SQL
                FETCH POSN-UPDT-CURSOR
-               INTO :BSTI-TRNF-INIT
+               INTO :DSTI-TRNF-INIT
            END-EXEC.
        2000-INSERT-COLS.
            EXEC SQL
-               INSERT INTO T_BSTI_TRNF_INIT
+               INSERT INTO T_DSTI_TRNF_INIT
                       (TRNF_NBR, SBRX_OFFC_C, SBRX_BASE_C, BRCH_CORR_I,
                        MULTI_CO_N)
-               VALUES (:BSTI-TRNF-INIT, :WS-MULTI-CO-N)
+               VALUES (:DSTI-TRNF-INIT, :WS-MULTI-CO-N)
            END-EXEC.
        3000-INSERT-NO-COLS.
            EXEC SQL
-               INSERT INTO T_BSTI_TRNF_INIT
-               VALUES (:BSTI-TRNF-INIT, :WS-MULTI-CO-N)
+               INSERT INTO T_DSTI_TRNF_INIT
+               VALUES (:DSTI-TRNF-INIT, :WS-MULTI-CO-N)
            END-EXEC.
        4000-MIXED.
            EXEC SQL
                SELECT TRNF_NBR, SBRX_OFFC_C, SBRX_BASE_C, BRCH_CORR_I,
                       MULTI_CO_N
-               INTO :BSTI-TRNF-INIT, :WS-MULTI-CO-N:WS-NULL-IND-01
-               FROM T_BSTI_TRNF_INIT
+               INTO :DSTI-TRNF-INIT, :WS-MULTI-CO-N:WS-NULL-IND-01
+               FROM T_DSTI_TRNF_INIT
            END-EXEC.
        5000-ABSENT.
            EXEC SQL
@@ -90,5 +90,5 @@
            EXEC SQL
                SELECT SBRX_OFFC_C, SBRX_BASE_C
                INTO :SBRX-GRP
-               FROM T_BSTI_TRNF_INIT
+               FROM T_DSTI_TRNF_INIT
            END-EXEC.

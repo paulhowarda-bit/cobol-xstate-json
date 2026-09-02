@@ -265,7 +265,7 @@ def test_unbalanced_program_units_do_not_drop_a_units_calls():
 
 
 # --------------------------------------------------------------------------- #
-# a nested program hidden by a hyphenated data name (the FBMMAAIO failure)
+# a nested program hidden by a hyphenated data name (the SAMPMAIN failure)
 #
 # A copybook item like PNET-MQ-PROGRAM-ID false-matched the PROGRAM-ID regex, so
 # _split_program_units miscounted, bailed out, and reported NO contained programs. The
@@ -276,7 +276,7 @@ def test_unbalanced_program_units_do_not_drop_a_units_calls():
 
 _NESTED_HIDDEN = (
     "       IDENTIFICATION DIVISION.\n"
-    "       PROGRAM-ID. FBMMAAIO.\n"
+    "       PROGRAM-ID. SAMPMAIN.\n"
     "       DATA DIVISION.\n"
     "       WORKING-STORAGE SECTION.\n"
     "       01  PNET-MQ-PROGRAM-ID   PIC X(8).\n"
@@ -290,7 +290,7 @@ _NESTED_HIDDEN = (
     "       0000-USECICS.\n"
     "           GOBACK.\n"
     "       END PROGRAM USECICS.\n"
-    "       END PROGRAM FBMMAAIO.\n"
+    "       END PROGRAM SAMPMAIN.\n"
 )
 
 

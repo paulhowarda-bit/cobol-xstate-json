@@ -16,7 +16,7 @@ FROM CUSTOMER
 
 DB2 syntax: `:WS-BAL:IND-BAL` means host variable `WS-BAL` with null indicator `IND-BAL`. So there are 2 columns and 2 real host variables — the parser sees 3 tokens in INTO and correctly refuses (2 columns vs 3 host variables).
 
-With conventions active, `_correlate_selects` → `_conventions_recover` fires on this site. `resolve_columns(["WS-NAME", "WS-BAL", "IND-BAL"], ...)` resolves 2 of 3 (IND-BAL returns None because `IND` isn't a known DCLGEN prefix) — but the 2 it resolves map to `T_APWS_WKFL_STEP`, which is unrelated to the actual `CUSTOMER` table. The result is **wrong lineage injected by convention** where the parser had correctly said "I can't map this".
+With conventions active, `_correlate_selects` → `_conventions_recover` fires on this site. `resolve_columns(["WS-NAME", "WS-BAL", "IND-BAL"], ...)` resolves 2 of 3 (IND-BAL returns None because `IND` isn't a known DCLGEN prefix) — but the 2 it resolves map to `T_DPWS_WKFL_STEP`, which is unrelated to the actual `CUSTOMER` table. The result is **wrong lineage injected by convention** where the parser had correctly said "I can't map this".
 
 ## Root Cause
 
@@ -25,7 +25,7 @@ With conventions active, `_correlate_selects` → `_conventions_recover` fires o
   column list is genuinely unknown. A cursor DECLAREd **FOR a PREPAREd statement** has no
   select list until run time, so there is nothing for a naming convention to be a fallback
   FOR; it is now classified as `dynamic_sql` and `continue`s before this point. That path
-  fired: a dynamic FETCH acquired `T_MMAA_ACC_ANAL.FUND_A` / `.ACCT_NBR`, both
+  fired: a dynamic FETCH acquired `T_DMAA_ACC_ANAL.FUND_A` / `.ACCT_NBR`, both
   `viaConventions: true`, for a select list that does not exist at build time.
 - "N columns vs M host variables" → conventions fallback is NOT appropriate (the count mismatch signals indicator variables or host structures that break the 1:1 column↔variable assumption)
 
@@ -61,10 +61,10 @@ class _CorrelationFailure(enum.Enum):
 
 ## Secondary Issue: WS-prefixed variables resolve to wrong table
 
-`WS-NAME` and `WS-BAL` resolve via conventions to `T_APWS_WKFL_STEP` — a completely unrelated table. This happens because `WS` is a DCLGEN prefix for that table. In practice, `WS-` is overwhelmingly used as a generic working-storage prefix, not a DCLGEN prefix.
+`WS-NAME` and `WS-BAL` resolve via conventions to `T_DPWS_WKFL_STEP` — a completely unrelated table. This happens because `WS` is a DCLGEN prefix for that table. In practice, `WS-` is overwhelmingly used as a generic working-storage prefix, not a DCLGEN prefix.
 
 The conventions system should either:
 1. Deprioritize `WS` as a prefix (it's too generic/ambiguous), or
 2. Not resolve when the inferred table doesn't match any table the program actually references (the `program_tables` disambiguation should reject it — but only if `program_tables` is correctly populated for this site)
 
-Check whether `program_tables` is being passed correctly at the SELECT correlation sites — if the program references `CUSTOMER` but not `T_APWS_WKFL_STEP`, the disambiguation should reject the WS-based resolution.
+Check whether `program_tables` is being passed correctly at the SELECT correlation sites — if the program references `CUSTOMER` but not `T_DPWS_WKFL_STEP`, the disambiguation should reject the WS-based resolution.

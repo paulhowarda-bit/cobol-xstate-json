@@ -31,7 +31,7 @@
            EXEC SQL
                DECLARE ACCT_CSR CURSOR FOR
                    SELECT FUND_A, BALANCE_A
-                   FROM T_MMAA_ACC_ANAL
+                   FROM T_DMAA_ACC_ANAL
            END-EXEC.
        PROCEDURE DIVISION.
        0000-MAIN.

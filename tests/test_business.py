@@ -440,4 +440,4 @@ def test_a_working_storage_cursor_names_its_real_table_here_too():
     view = _view("sqlwscsr.cbl")
     blob = json.dumps(view)
     assert "<cursor ACCT_CSR>" not in blob
-    assert "T_MMAA_ACC_ANAL" in blob
+    assert "T_DMAA_ACC_ANAL" in blob

@@ -67,7 +67,7 @@ def test_dml_where_clause_variables_are_parameters_not_fields():
     `UPDATE ACCOUNT SET BALANCE = :WS-BAL WHERE ID = :WS-ID` writes one column from one
     variable; :WS-ID picks the row. Carried among the fields it reached the graph loader
     as a write with no column mapping - an "unmapped field" - which is where thousands
-    of the v52 warnings came from (docs/issues/unmapped-fields-v52.md, Issue 2). A
+    of the v52 warnings came from (the v52 tracer report, Issue 2). A
     SELECT has always reported its WHERE variables as `params`; these are the same
     thing, said the same way.
     """
@@ -385,7 +385,7 @@ def test_working_storage_cursor_names_the_real_table_endpoint():
     """Without the scan the endpoint degraded to `<cursor ACCT_CSR>` - a phantom that
     propagated into the artifact manifest and on into retrieval."""
     iface = _iface("sqlwscsr.cbl")
-    assert "T_MMAA_ACC_ANAL" in _dirs(iface, "db2")
+    assert "T_DMAA_ACC_ANAL" in _dirs(iface, "db2")
     assert not any(e["endpoint"].startswith("<cursor")
                    for e in iface["events"] if e["endpointType"] == "db2")
 
@@ -395,7 +395,7 @@ def test_whole_stream_scan_records_the_declaration_with_provenance():
     (decl,) = prog.sql_cursors
     assert decl["cursor"] == "ACCT_CSR"
     assert decl["selectList"] == ["FUND_A", "ACCOUNT_N", "BALANCE_A"]
-    assert decl["table"] == "T_MMAA_ACC_ANAL"
+    assert decl["table"] == "T_DMAA_ACC_ANAL"
     assert decl["line"] > 0 and decl["member"] is None
 
 
@@ -408,18 +408,18 @@ def test_declare_table_gives_a_column_list_less_insert_its_columns():
     table's declared order - which the DCLGEN's DECLARE TABLE states in the source."""
     m = _machine("sqldclgen.cbl")
     ins = next(e for e in m.interface()["events"]
-               if e["verb"] == "INSERT" and e["endpoint"] == "T_MFER_ERROR")
+               if e["verb"] == "INSERT" and e["endpoint"] == "T_DFER_ERROR")
     assert [(c["column"], c["hostVar"]) for c in ins["columns"]] == [
-        ("MFER_ERROR", "MFER-ERROR")]
+        ("MFER_ERROR", "DFER-ERROR")]
     assert "columnNote" not in ins
-    assert not any("T_MFER_ERROR" in f["message"] for f in m.flags)
+    assert not any("T_DFER_ERROR" in f["message"] for f in m.flags)
 
 
 def test_declare_table_scan_records_the_declared_order():
     prog = parse_program((EXAMPLES / "sqldclgen.cbl").read_text())
     tables = {t["table"]: t["columns"] for t in prog.declared_tables}
-    assert tables == {"T_MFER_ERROR": ["MFER_ERROR"],
-                      "T_RTAC_ACCOUNT": ["ACCT_ID", "ACCT_NAME"]}
+    assert tables == {"T_DFER_ERROR": ["MFER_ERROR"],
+                      "T_DRAC_ACCOUNT": ["ACCT_ID", "ACCT_NAME"]}
 
 
 def test_synonym_insert_without_a_map_flags_and_names_the_remedy():
@@ -427,23 +427,23 @@ def test_synonym_insert_without_a_map_flags_and_names_the_remedy():
     catalog knowledge - refusing to guess it, and saying what input closes it, is the
     contract."""
     m = _machine("sqldclgen.cbl")
-    flagged = [f["message"] for f in m.flags if "RTAC_ACCOUNT" in f["message"]]
+    flagged = [f["message"] for f in m.flags if "DRAC_ACCOUNT" in f["message"]]
     assert flagged and "synonym map" in flagged[0]
 
 
 def test_synonym_map_resolves_the_insert_and_stamps_the_base_table():
     """With the map supplied, the mapping lands on the BASE table's name - the one the
     DDL declares, which is what cross-program identity joins on."""
-    m = _machine("sqldclgen.cbl", synonyms={"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"})
+    m = _machine("sqldclgen.cbl", synonyms={"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"})
     ins = next(e for e in m.interface()["events"]
-               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
+               if e["verb"] == "INSERT" and e["endpoint"] == "DRAC_ACCOUNT")
     assert [(c["table"], c["column"], c["hostVar"]) for c in ins["columns"]] == [
-        ("T_RTAC_ACCOUNT", "ACCT_ID", "WS-ACCT-ID"),
-        ("T_RTAC_ACCOUNT", "ACCT_NAME", "WS-ACCT-NAME")]
-    assert not any("RTAC_ACCOUNT" in f["message"] for f in m.flags)
+        ("T_DRAC_ACCOUNT", "ACCT_ID", "WS-ACCT-ID"),
+        ("T_DRAC_ACCOUNT", "ACCT_NAME", "WS-ACCT-NAME")]
+    assert not any("DRAC_ACCOUNT" in f["message"] for f in m.flags)
     spec = next(s for s in m.semantics["actions"].values()
-                if s.get("verb") == "INSERT" and s.get("table") == "RTAC_ACCOUNT")
-    assert spec["columnsFrom"] == "DECLARE TABLE T_RTAC_ACCOUNT via synonym RTAC_ACCOUNT"
+                if s.get("verb") == "INSERT" and s.get("table") == "DRAC_ACCOUNT")
+    assert spec["columnsFrom"] == "DECLARE TABLE T_DRAC_ACCOUNT via synonym DRAC_ACCOUNT"
 
 
 # --------------------------------------------------------------------------- #
@@ -454,8 +454,8 @@ def test_sql_call_is_a_db2_proc_endpoint_not_a_phantom_table():
     """Classified as a table, the call parameters read as 'columns' and downstream
     tooling hunts for Column nodes that cannot exist. db2_proc is the discriminator."""
     iface = _iface("sqlproc.cbl")
-    assert _dirs(iface, "db2_proc") == {"PCBEN171": ["create", "get"]}
-    assert "PCBEN171" not in _dirs(iface, "db2")
+    assert _dirs(iface, "db2_proc") == {"DEMOPRC1": ["create", "get"]}
+    assert "DEMOPRC1" not in _dirs(iface, "db2")
     calls = [e for e in iface["events"] if e["verb"] == "CALL"]
     assert {e["direction"] for e in calls} == {"get", "create"}
     for e in calls:
@@ -468,7 +468,7 @@ def test_sql_call_is_a_db2_proc_endpoint_not_a_phantom_table():
 def test_sql_call_lands_in_the_artifact_manifest_as_a_stored_procedure():
     from cobol_xstate.artifacts import build_artifacts
     art = build_artifacts(_machine("sqlproc.cbl"))
-    row = next(r for r in art["artifacts"] if r["artifact"] == "PCBEN171")
+    row = next(r for r in art["artifacts"] if r["artifact"] == "DEMOPRC1")
     assert row["kind"] == "db2-stored-procedure"
     assert "signature" in row["needs"]
 
@@ -478,17 +478,17 @@ def test_synonym_map_flag_reaches_the_run(tmp_path):
     import json
     from cobol_xstate.cli import run
     smap = tmp_path / "syn.json"
-    smap.write_text(json.dumps({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}), encoding="utf-8")
+    smap.write_text(json.dumps({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}), encoding="utf-8")
     out = tmp_path / "o"
     rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(out), "--no-fetch",
               "--synonym-map", str(smap), "-qq"])
     assert rc == 0
     doc = json.loads((out / "sqldclgen.json").read_text(encoding="utf-8"))
     ins = next(e for e in doc["interface"]["events"]
-               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
-    assert [c["table"] for c in ins["columns"]] == ["T_RTAC_ACCOUNT",
-                                                    "T_RTAC_ACCOUNT"]
-    assert not any("RTAC_ACCOUNT" in f["message"] for f in doc["flags"])
+               if e["verb"] == "INSERT" and e["endpoint"] == "DRAC_ACCOUNT")
+    assert [c["table"] for c in ins["columns"]] == ["T_DRAC_ACCOUNT",
+                                                    "T_DRAC_ACCOUNT"]
+    assert not any("DRAC_ACCOUNT" in f["message"] for f in doc["flags"])
 
 
 def test_synonym_map_that_is_not_a_string_map_is_exit_2(tmp_path):
@@ -533,7 +533,7 @@ def _everything(m):
 
 def _rtac_insert(m):
     return next(s for s in m.semantics["actions"].values()
-                if s.get("verb") == "INSERT" and s.get("table") == "RTAC_ACCOUNT")
+                if s.get("verb") == "INSERT" and s.get("table") == "DRAC_ACCOUNT")
 
 
 def test_synonym_resolver_returning_none_is_byte_identical_to_no_map():
@@ -543,38 +543,38 @@ def test_synonym_resolver_returning_none_is_byte_identical_to_no_map():
     m = _machine("sqldclgen.cbl", synonym_resolver=r)
     assert _everything(m) == _everything(_machine("sqldclgen.cbl"))
     assert "supply a synonym map" in _rtac_insert(m)["columnNote"]
-    assert r.calls == ["RTAC_ACCOUNT"]
+    assert r.calls == ["DRAC_ACCOUNT"]
 
 
 def test_synonym_resolver_resolves_the_insert_and_says_which_door():
     m = _machine("sqldclgen.cbl",
-                 synonym_resolver=_Resolver({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}))
+                 synonym_resolver=_Resolver({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}))
     ins = next(e for e in m.interface()["events"]
-               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
+               if e["verb"] == "INSERT" and e["endpoint"] == "DRAC_ACCOUNT")
     assert [(c["table"], c["column"], c["hostVar"]) for c in ins["columns"]] == [
-        ("T_RTAC_ACCOUNT", "ACCT_ID", "WS-ACCT-ID"),
-        ("T_RTAC_ACCOUNT", "ACCT_NAME", "WS-ACCT-NAME")]
-    assert not any("RTAC_ACCOUNT" in f["message"] for f in m.flags)
+        ("T_DRAC_ACCOUNT", "ACCT_ID", "WS-ACCT-ID"),
+        ("T_DRAC_ACCOUNT", "ACCT_NAME", "WS-ACCT-NAME")]
+    assert not any("DRAC_ACCOUNT" in f["message"] for f in m.flags)
     assert _rtac_insert(m)["columnsFrom"] == (
-        "DECLARE TABLE T_RTAC_ACCOUNT via synonym RTAC_ACCOUNT (catalog resolver)")
+        "DECLARE TABLE T_DRAC_ACCOUNT via synonym DRAC_ACCOUNT (catalog resolver)")
 
 
 def test_synonym_map_wins_over_the_resolver_and_the_resolver_is_not_asked():
     """Their test (b), with the precedence pinned: the map is the operator's explicit
     answer, so a name it holds is never a question for the catalog."""
-    r = _Resolver({"RTAC_ACCOUNT": "T_SOMETHING_ELSE"})
-    both = _machine("sqldclgen.cbl", synonyms={"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"},
+    r = _Resolver({"DRAC_ACCOUNT": "T_SOMETHING_ELSE"})
+    both = _machine("sqldclgen.cbl", synonyms={"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"},
                     synonym_resolver=r)
-    map_only = _machine("sqldclgen.cbl", synonyms={"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"})
+    map_only = _machine("sqldclgen.cbl", synonyms={"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"})
     assert _everything(both) == _everything(map_only)
     assert r.calls == []
 
 
 def test_synonym_resolver_fills_what_the_map_does_not_hold():
-    r = _Resolver({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"})
+    r = _Resolver({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"})
     m = _machine("sqldclgen.cbl", synonyms={"UNRELATED": "T_UNRELATED"},
                  synonym_resolver=r)
-    assert r.calls == ["RTAC_ACCOUNT"]
+    assert r.calls == ["DRAC_ACCOUNT"]
     assert _rtac_insert(m)["columnsFrom"].endswith("(catalog resolver)")
 
 
@@ -584,7 +584,7 @@ def test_synonym_resolver_is_asked_only_at_the_point_of_need():
     DECLARE, never asks at all."""
     r = _Resolver()
     _machine("sqldclgen.cbl", synonym_resolver=r)
-    assert r.calls == ["RTAC_ACCOUNT"]
+    assert r.calls == ["DRAC_ACCOUNT"]
     r = _Resolver()
     _machine("sqlhost.cbl", synonym_resolver=r)
     assert r.calls == []
@@ -602,12 +602,12 @@ def test_synonym_resolver_that_raises_flags_once_and_leaves_the_site_unresolved(
     assert len(catalog) == 1
     assert "resolver raised RuntimeError: catalog down" in catalog[0]["message"]
     assert "fix the resolver and re-run" in catalog[0]["message"]
-    assert r.calls == ["RTAC_ACCOUNT"]
+    assert r.calls == ["DRAC_ACCOUNT"]
 
 
 def test_synonym_resolver_returning_a_non_string_is_a_failed_lookup_not_a_synonym():
     m = _machine("sqldclgen.cbl",
-                 synonym_resolver=_Resolver(returns={"real_table": "T_RTAC_ACCOUNT"}))
+                 synonym_resolver=_Resolver(returns={"real_table": "T_DRAC_ACCOUNT"}))
     assert "columns" not in _rtac_insert(m)
     (flag,) = [f for f in m.flags if f["paragraph"] == "CATALOG"]
     assert "returned dict" in flag["message"]
@@ -615,11 +615,11 @@ def test_synonym_resolver_returning_a_non_string_is_a_failed_lookup_not_a_synony
 
 def test_synonym_resolver_may_return_a_schema_qualified_base():
     m = _machine("sqldclgen.cbl",
-                 synonym_resolver=_Resolver({"RTAC_ACCOUNT": "MMD1DBO.T_RTAC_ACCOUNT"}))
+                 synonym_resolver=_Resolver({"DRAC_ACCOUNT": "DMD1DBO.T_DRAC_ACCOUNT"}))
     spec = _rtac_insert(m)
-    assert [c["table"] for c in spec["columns"]] == ["MMD1DBO.T_RTAC_ACCOUNT"] * 2
-    assert spec["columnsFrom"] == ("DECLARE TABLE T_RTAC_ACCOUNT via synonym "
-                                   "RTAC_ACCOUNT (catalog resolver)")
+    assert [c["table"] for c in spec["columns"]] == ["DMD1DBO.T_DRAC_ACCOUNT"] * 2
+    assert spec["columnsFrom"] == ("DECLARE TABLE T_DRAC_ACCOUNT via synonym "
+                                   "DRAC_ACCOUNT (catalog resolver)")
 
 
 def test_synonym_resolver_flag_loads_module_func_and_reaches_the_run(tmp_path,
@@ -629,7 +629,7 @@ def test_synonym_resolver_flag_loads_module_func_and_reaches_the_run(tmp_path,
     from cobol_xstate.cli import run
     (tmp_path / "synres_ok.py").write_text(
         "def resolve(name):\n"
-        "    return {'RTAC_ACCOUNT': 'T_RTAC_ACCOUNT'}.get(name)\n", encoding="utf-8")
+        "    return {'DRAC_ACCOUNT': 'T_DRAC_ACCOUNT'}.get(name)\n", encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path))
     out = tmp_path / "o"
     rc = run([str(EXAMPLES / "sqldclgen.cbl"), "--outdir", str(out), "--no-fetch",
@@ -637,9 +637,9 @@ def test_synonym_resolver_flag_loads_module_func_and_reaches_the_run(tmp_path,
     assert rc == 0
     doc = json.loads((out / "sqldclgen.json").read_text(encoding="utf-8"))
     ins = next(e for e in doc["interface"]["events"]
-               if e["verb"] == "INSERT" and e["endpoint"] == "RTAC_ACCOUNT")
-    assert [c["table"] for c in ins["columns"]] == ["T_RTAC_ACCOUNT"] * 2
-    assert not any("RTAC_ACCOUNT" in f["message"] for f in doc["flags"])
+               if e["verb"] == "INSERT" and e["endpoint"] == "DRAC_ACCOUNT")
+    assert [c["table"] for c in ins["columns"]] == ["T_DRAC_ACCOUNT"] * 2
+    assert not any("DRAC_ACCOUNT" in f["message"] for f in doc["flags"])
 
 
 def test_synonym_resolver_bad_spec_is_exit_2(tmp_path):
@@ -694,7 +694,7 @@ def test_a_varchar_inside_an_inserted_record_maps_the_parent_to_its_column():
         ("ACC_N", "BE-O-ACC"), ("CMT", "BE-O-CMT")]
     spec = next(s for s in m.semantics["actions"].values()
                 if s.get("verb") == "INSERT")
-    assert spec["columnsFrom"] == "DECLARE TABLE T_BE_COMMENT"
+    assert spec["columnsFrom"] == "DECLARE TABLE T_DEMO_COMMENT"
     assert not any("INSERT" in f["message"] for f in m.flags)
 
 
@@ -708,7 +708,7 @@ def test_no_varchar_child_is_a_field_param_or_host_variable_of_any_event():
 
 # --------------------------------------------------------------------------- #
 # sqlqual: qualified host variables
-# (docs/issues/unmapped-fields-v52.md, Issue 3)
+# (the v52 tracer report, Issue 3)
 # --------------------------------------------------------------------------- #
 
 def test_qualified_host_vars_resolve_to_the_elementary_field():
@@ -774,7 +774,7 @@ def test_qualified_lineage_names_fields_the_data_dictionary_holds():
 
 # --------------------------------------------------------------------------- #
 # sqlderiv: what a DERIVED slot was made of
-# (docs/issues/unmapped-fields-v52.md, Issue 1)
+# (the v52 tracer report, Issue 1)
 # --------------------------------------------------------------------------- #
 
 def _derived(iface, host_var):
@@ -802,7 +802,7 @@ def test_a_derived_slot_never_gains_a_column_identity():
 def test_an_aggregates_source_column_is_kept_as_provenance():
     iface = _iface("sqlderiv.cbl")
     assert _derived(iface, "W-TOTAL-SPOKE") == {
-        "table": "T_MMJT_JRNL_TXN", "hostVar": "W-TOTAL-SPOKE", "derived": True,
+        "table": "T_DMJT_JRNL_TXN", "hostVar": "W-TOTAL-SPOKE", "derived": True,
         "expression": "SUM", "derivedFrom": ["SPOKE_DOL_A"]}
     # Nested: `VALUE(SUM(COL), 0)` reports the outermost function and recurses through
     # its arguments, so the innermost NAMED column is the source.
@@ -854,7 +854,7 @@ def test_a_fetch_takes_its_derivation_from_the_cursors_declare():
 
 # --------------------------------------------------------------------------- #
 # why the columns are missing, as a token a consumer can branch on
-# (docs/issues/unmapped-fields-v52.md, Issue 4)
+# (the v52 tracer report, Issue 4)
 # --------------------------------------------------------------------------- #
 
 def test_an_unresolvable_event_says_why_in_a_stable_token():
@@ -889,11 +889,11 @@ def test_a_residual_note_is_not_an_unresolved_event():
 
 # --------------------------------------------------------------------------- #
 # sqlhost: Db2 host structures and null indicators
-# (docs/issues/host-structure-expansion.md)
+# (the host-structure tracer report)
 # --------------------------------------------------------------------------- #
 
 def test_a_group_host_variable_becomes_one_field_per_elementary_item():
-    """`FETCH c INTO :BSTI-TRNF-INIT` reads FOUR fields, which is what Db2 does.
+    """`FETCH c INTO :DSTI-TRNF-INIT` reads FOUR fields, which is what Db2 does.
 
     The precompiler expands the group before the statement reaches the database, so a
     recovery that keeps the source spelling weighs one host variable against the
@@ -909,7 +909,7 @@ def test_a_group_host_variable_becomes_one_field_per_elementary_item():
         ("SBRX_BASE_C", "SBRX-BASE-C"), ("BRCH_CORR_I", "BRCH-CORR-I")]
     assert "columnsUnresolved" not in fetch
     # The group name is NOT a leftover parameter of the event whose fields it became.
-    assert "BSTI-TRNF-INIT" not in (fetch.get("params") or [])
+    assert "DSTI-TRNF-INIT" not in (fetch.get("params") or [])
 
 
 def test_a_group_values_slot_fills_every_column_it_expands_to():
@@ -971,7 +971,7 @@ def test_the_expansion_says_so_on_the_event():
     for state in ("1000-FETCH-GROUP", "2000-INSERT-COLS", "3000-INSERT-NO-COLS",
                   "4000-MIXED"):
         e = next(x for x in iface["events"] if x["state"] == state)
-        assert e["expandedStructures"] == ["BSTI-TRNF-INIT"], state
+        assert e["expandedStructures"] == ["DSTI-TRNF-INIT"], state
 
 
 def test_no_group_name_reaches_the_lineage():
@@ -981,7 +981,7 @@ def test_no_group_name_reaches_the_lineage():
     m = build_machine(parse_program((EXAMPLES / "sqlhost.cbl").read_text()),
                       source_name="sqlhost.cbl")
     fields = {r["field"] for r in build_lineage(m)["rows"]}
-    assert "BSTI-TRNF-INIT" not in fields
+    assert "DSTI-TRNF-INIT" not in fields
     assert "SBRX-GRP" not in fields
     assert "WS-NULL-IND-01" not in fields
     assert {"TRNF-NBR", "SBRX-OFFC-C", "SBRX-BASE-C", "BRCH-CORR-I"} <= fields
@@ -1033,7 +1033,7 @@ def test_a_static_cursor_in_the_same_program_still_resolves():
     iface = _iface("sqldyncsr.cbl")
     sta = next(e for e in iface["events"]
                if e["verb"] == "FETCH" and e.get("endpointType") == "db2")
-    assert sta["endpoint"] == "T_MMAA_ACC_ANAL"
+    assert sta["endpoint"] == "T_DMAA_ACC_ANAL"
     assert [(c["column"], c["hostVar"]) for c in sta["columns"]] == [
         ("FUND_A", "WS-FUND"), ("BALANCE_A", "WS-BAL")]
 

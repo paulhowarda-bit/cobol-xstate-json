@@ -302,13 +302,13 @@ def test_return_transid_eib_field_flagged_as_cics_supplied():
 
 _COPYBOOK_CALL_SRC = (
     "       IDENTIFICATION DIVISION.\n"
-    "       PROGRAM-ID. FBSB066B.\n"
+    "       PROGRAM-ID. SAMPB066.\n"
     "       DATA DIVISION.\n"
     "       WORKING-STORAGE SECTION.\n"
     "       COPY DC01104.\n"
     "       PROCEDURE DIVISION.\n"
     "       JM0004.\n"
-    "           CALL CN-DCIOC104 USING DC01104-PARMS\n"
+    "           CALL CN-DEMOC104 USING DC01104-PARMS\n"
     "           GOBACK.\n"
 )
 
@@ -319,33 +319,33 @@ def test_dynamic_call_target_from_copybook_value_resolves(tmp_path):
     from cobol_xstate.preprocessor import CopybookResolver
     (tmp_path / "DC01104.cpy").write_text(
         "       01 DC01104-CONSTANTS.\n"
-        "          05 CN-DCIOC104            PIC X(8)  VALUE 'DCIOC104'.\n"
+        "          05 CN-DEMOC104            PIC X(8)  VALUE 'DEMOC104'.\n"
         "       01 DC01104-PARMS             PIC X(100).\n")
     machine = _machine_with(
         _COPYBOOK_CALL_SRC, resolver=CopybookResolver(paths=[str(tmp_path)]))
     assert machine.flags == []
     actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
-    assert "call_DCIOC104" in actions
+    assert "call_DEMOC104" in actions
 
 
 def test_dynamic_call_via_88_level_set_to_true_resolves(tmp_path):
-    # The FBSB066B idiom: the target item has NO VALUE clause - an 88-level condition
+    # The SAMPB066 idiom: the target item has NO VALUE clause - an 88-level condition
     # carries the module name, and the program does SET <88> TO TRUE before the CALL.
     # SET stores the 88's VALUE into the parent, so the target is provably constant.
     from cobol_xstate.preprocessor import CopybookResolver
     (tmp_path / "DC01104.cpy").write_text(
         "       01 DC01104-CONSTANTS.\n"
-        "          05 CN-DCIOC104            PIC X(08).\n"
-        "             88 DCIOC104-MODULE     VALUE 'DCIOC104'.\n"
+        "          05 CN-DEMOC104            PIC X(08).\n"
+        "             88 DEMOC104-MODULE     VALUE 'DEMOC104'.\n"
         "       01 DC01104-PARMS             PIC X(100).\n")
     src = _COPYBOOK_CALL_SRC.replace(
-        "           CALL CN-DCIOC104 USING DC01104-PARMS\n",
-        "           SET DCIOC104-MODULE TO TRUE\n"
-        "           CALL CN-DCIOC104 USING DC01104-PARMS\n")
+        "           CALL CN-DEMOC104 USING DC01104-PARMS\n",
+        "           SET DEMOC104-MODULE TO TRUE\n"
+        "           CALL CN-DEMOC104 USING DC01104-PARMS\n")
     machine = _machine_with(src, resolver=CopybookResolver(paths=[str(tmp_path)]))
     assert machine.flags == []
     actions = [a for s in machine.config["states"].values() for a in s.get("entry", [])]
-    assert "call_DCIOC104" in actions
+    assert "call_DEMOC104" in actions
 
 
 def test_dynamic_call_with_88_values_but_no_set_lists_candidates(tmp_path):
@@ -355,14 +355,14 @@ def test_dynamic_call_with_88_values_but_no_set_lists_candidates(tmp_path):
     from cobol_xstate.preprocessor import CopybookResolver
     (tmp_path / "DC01104.cpy").write_text(
         "       01 DC01104-CONSTANTS.\n"
-        "          05 CN-DCIOC104            PIC X(08).\n"
-        "             88 DCIOC104-MODULE     VALUE 'DCIOC104'.\n"
+        "          05 CN-DEMOC104            PIC X(08).\n"
+        "             88 DEMOC104-MODULE     VALUE 'DEMOC104'.\n"
         "       01 DC01104-PARMS             PIC X(100).\n")
     machine = _machine_with(
         _COPYBOOK_CALL_SRC, resolver=CopybookResolver(paths=[str(tmp_path)]))
     msgs = " ".join(f["message"] for f in machine.flags)
-    assert "dynamic CALL CN-DCIOC104" in msgs
-    assert "88-level" in msgs and "DCIOC104" in msgs
+    assert "dynamic CALL CN-DEMOC104" in msgs
+    assert "88-level" in msgs and "DEMOC104" in msgs
 
 
 def test_two_88_modules_both_set_stay_ambiguous():
@@ -397,7 +397,7 @@ def test_dynamic_call_target_in_missing_copybook_diagnosed():
     # and the missing copybook is where its VALUE hides - not "set from variables".
     machine = _machine(_COPYBOOK_CALL_SRC)
     msgs = " ".join(f["message"] for f in machine.flags)
-    assert "dynamic CALL CN-DCIOC104" in msgs
+    assert "dynamic CALL CN-DEMOC104" in msgs
     assert "not declared in the visible source" in msgs
     assert "DC01104" in msgs
 
@@ -699,11 +699,11 @@ def test_padded_quoted_cics_resource_operand_is_recorded_as_a_literal():
         "       PROGRAM-ID. T.\n"
         "       PROCEDURE DIVISION.\n"
         "       0000-MAIN.\n"
-        "           EXEC CICS XCTL PROGRAM('ACTC000 ') END-EXEC.\n")
+        "           EXEC CICS XCTL PROGRAM('CALLA000 ') END-EXEC.\n")
     spec = m.semantics["actions"]["exec_cics_xctl"]
     # A quoted literal is a known name: no `dynamic`, no candidates, no flag asking
     # the estate to resolve it.
-    assert spec["resources"]["PROGRAM"] == {"name": "ACTC000"}
+    assert spec["resources"]["PROGRAM"] == {"name": "CALLA000"}
     assert not [f for f in m.flags if "dynamic CICS" in f["message"]]
 
 
@@ -715,12 +715,12 @@ def test_unpadded_and_data_name_cics_operands_still_classify_correctly():
         "       PROGRAM-ID. T.\n"
         "       DATA DIVISION.\n"
         "       WORKING-STORAGE SECTION.\n"
-        "       01  WS-PGM   PIC X(8) VALUE 'ACTC150'.\n"
+        "       01  WS-PGM   PIC X(8) VALUE 'CALLA150'.\n"
         "       PROCEDURE DIVISION.\n"
         "       0000-MAIN.\n"
-        "           EXEC CICS LINK PROGRAM('ACTC099') END-EXEC\n"
+        "           EXEC CICS LINK PROGRAM('CALLA099') END-EXEC\n"
         "           EXEC CICS XCTL PROGRAM(WS-PGM) END-EXEC.\n")
     acts = m.semantics["actions"]
-    assert acts["link_ACTC099"]["resources"]["PROGRAM"] == {"name": "ACTC099"}
+    assert acts["link_CALLA099"]["resources"]["PROGRAM"] == {"name": "CALLA099"}
     xctl = acts["exec_cics_xctl"]["resources"]["PROGRAM"]
-    assert xctl["name"] == "ACTC150" and xctl["via"] == "WS-PGM"
+    assert xctl["name"] == "CALLA150" and xctl["via"] == "WS-PGM"

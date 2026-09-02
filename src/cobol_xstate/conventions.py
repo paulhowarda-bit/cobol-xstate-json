@@ -2,7 +2,7 @@
 
 Every DB2 table on the estate has a DCLGEN copybook declaring host variables under a
 consistent prefix (``NAMES(AA)`` -> ``AA-FUND-A`` fills column ``FUND_A`` on
-``T_MMAA_ACC_ANAL``), and COPY REPLACING mints variant prefixes onto the same columns.
+``T_DMAA_ACC_ANAL``), and COPY REPLACING mints variant prefixes onto the same columns.
 mfdep indexes those conventions; when the *statement* evidence for a column<->host-
 variable mapping is missing (cursor DECLARE not visible, count mismatch), the naming
 convention can still recover it. See ``docs/mfdep-conventions-integration.md``.

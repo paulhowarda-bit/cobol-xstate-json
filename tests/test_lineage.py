@@ -587,7 +587,7 @@ def test_inspect_tallying_for_a_literal_spelling_replacing_is_still_a_read():
 
 # --------------------------------------------------------------------------- #
 # a WHERE-clause filter is not a field flowing to Db2
-# (docs/issues/unmapped-fields-v52.md, Issue 2)
+# (the v52 tracer report, Issue 2)
 # --------------------------------------------------------------------------- #
 
 def test_a_dml_row_selector_emits_no_lineage_row():
@@ -617,13 +617,13 @@ def test_a_working_storage_cursor_names_its_real_table_here_too():
     provenance and semantics cannot see that DECLARE; only the whole-stream scan can.
 
     The interface overlay was seeded from it and every other view was not, so the
-    bundle event named `T_MMAA_ACC_ANAL` while this row said `<cursor ACCT_CSR>` - and
+    bundle event named `T_DMAA_ACC_ANAL` while this row said `<cursor ACCT_CSR>` - and
     no (event, endpoint) join between the two views was possible for that class, nor
     any join on `origins[].event`.
     """
     d = _lin("sqlwscsr.cbl")
     endpoints = {r["endpoint"] for r in d["rows"]}
-    assert endpoints == {"T_MMAA_ACC_ANAL"}
+    assert endpoints == {"T_DMAA_ACC_ANAL"}
     assert not [e for e in endpoints if str(e).startswith("<cursor")]
     origins = {o["event"] for r in d["rows"] for o in r.get("origins", [])}
     assert all("<cursor" not in e for e in origins)
@@ -728,7 +728,7 @@ def test_the_classify_memo_is_scoped_to_the_lineage_instance():
     they consume only `h["direction"]`.
 
     `examples/sqlwscsr.cbl` is the counterexample the repo already ships: its cursor is
-    DECLAREd in WORKING-STORAGE, so `exec_sql_fetch` classifies as `T_MMAA_ACC_ANAL`
+    DECLAREd in WORKING-STORAGE, so `exec_sql_fetch` classifies as `T_DMAA_ACC_ANAL`
     from a seeded caller and as `<cursor ACCT_CSR>` from an unseeded one. A
     module-level cache would return whichever ran first and silently corrupt the other,
     with NO test failure - which is why this test exists rather than a comment.
@@ -760,11 +760,11 @@ def test_the_classify_memo_is_scoped_to_the_lineage_instance():
     assert len(seen["exec_sql_fetch"]) > 1, (
         "expected exec_sql_fetch to classify differently across callers; "
         "got %r" % (seen["exec_sql_fetch"],))
-    assert ("db2", "T_MMAA_ACC_ANAL") in seen["exec_sql_fetch"]
+    assert ("db2", "T_DMAA_ACC_ANAL") in seen["exec_sql_fetch"]
     assert ("db2", "<cursor ACCT_CSR>") in seen["exec_sql_fetch"]
 
     # ...and the lineage view, which is the memo's owner, reports only the seeded one.
-    assert {r["endpoint"] for r in build_lineage(m)["rows"]} == {"T_MMAA_ACC_ANAL"}
+    assert {r["endpoint"] for r in build_lineage(m)["rows"]} == {"T_DMAA_ACC_ANAL"}
 
 
 def test_data_view_leaves_is_memoised_and_answers_the_same():
@@ -887,9 +887,9 @@ def test_unreached_states_do_not_leak_into_the_dynamic_call_primitives():
 def test_a_varchar_input_row_is_keyed_on_the_parent_with_pic_group():
     d = _lin("sqlvarchar.cbl")
     row = _row(d, "BE-CMT-X", "input")
-    assert row["event"] == "GET.DB2.T_BE_COMMENT"
+    assert row["event"] == "GET.DB2.T_DEMO_COMMENT"
     assert row["pic"] == "group"
-    assert _origins(row) == {"GET.DB2.T_BE_COMMENT"}
+    assert _origins(row) == {"GET.DB2.T_DEMO_COMMENT"}
 
 
 def test_a_move_out_of_the_varchar_text_carries_the_select_origin_to_the_insert():
@@ -898,8 +898,8 @@ def test_a_move_out_of_the_varchar_text_carries_the_select_origin_to_the_insert(
     "internally set" with no external origin, a false negative."""
     d = _lin("sqlvarchar.cbl")
     row = _row(d, "BE-O-CMT", "output")
-    assert row["event"] == "CREATE.DB2.T_BE_COMMENT"
-    assert _origins(row) == {"GET.DB2.T_BE_COMMENT"}
+    assert row["event"] == "CREATE.DB2.T_DEMO_COMMENT"
+    assert _origins(row) == {"GET.DB2.T_DEMO_COMMENT"}
     assert row["changedByProgram"] is True
     assert {c["action"] for c in row["changedBy"]} == {
         "MOVE_WS-NOTE_TO_BE-O-CMT-TEXT", "MOVE_WS-LEN_TO_BE-O-CMT-LEN"}
@@ -916,5 +916,5 @@ def test_varchar_rows_are_keyed_on_the_parent_not_the_outer_record_or_a_child():
 def test_a_varchar_fetched_inside_a_record_keys_its_row_on_the_varchar_parent():
     d = _lin("sqlvarchar.cbl")
     row = _row(d, "BE-R-CMT", "input")
-    assert row["pic"] == "group" and _origins(row) == {"GET.DB2.T_BE_COMMENT"}
+    assert row["pic"] == "group" and _origins(row) == {"GET.DB2.T_DEMO_COMMENT"}
     assert _row(d, "BE-R-ACC", "input")["pic"] == "X(9)"

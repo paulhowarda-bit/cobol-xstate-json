@@ -12,7 +12,7 @@ from cobol_xstate.statechart import build_machine
 
 CALLEE = (
     "       IDENTIFICATION DIVISION.\n"
-    "       PROGRAM-ID. DCIOC104.\n"
+    "       PROGRAM-ID. DEMOC104.\n"
     "       PROCEDURE DIVISION.\n"
     "       0000-MAIN.\n"
     "           EXEC SQL SELECT BAL INTO :WS-BAL FROM ACCOUNT END-EXEC\n"
@@ -28,7 +28,7 @@ LEAF = (
     "           GOBACK.\n"
 )
 STORE = {
-    "DCIOC104": CALLEE,
+    "DEMOC104": CALLEE,
     "AUDITLOG": LEAF,
     "ACCOUNT": "CREATE TABLE ACCOUNT (BAL DECIMAL(11,2));\n",
     "MENUMAP": "MENUMAP  DFHMSD TYPE=MAP\n",
@@ -74,7 +74,7 @@ def _by(report, artifact):
 def test_plan_covers_every_artifact_kind_with_its_retrieval_type():
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'\n"
+        "           CALL 'DEMOC104'\n"
         "           EXEC SQL SELECT BAL INTO :WS-B FROM ACCOUNT END-EXEC\n"
         "           EXEC CICS SEND MAP('MENUMAP') END-EXEC\n"
         "           EXEC CICS WRITEQ TS QUEUE('ERRQ') END-EXEC.\n",
@@ -82,13 +82,13 @@ def test_plan_covers_every_artifact_kind_with_its_retrieval_type():
     plan = {p["artifact"]: p for p in build_fetch_plan(man)}
     # A called program carries NO assumed language: it is probed in likelihood order, and
     # whichever request retrieves it is the finding.
-    assert plan["DCIOC104"]["type"] is None
-    assert plan["DCIOC104"]["probeTypes"] == ["cobol", "asm"]
+    assert plan["DEMOC104"]["type"] is None
+    assert plan["DEMOC104"]["probeTypes"] == ["cobol", "asm"]
     assert plan["ACCOUNT"]["type"] == "ddl"
     assert plan["MENUMAP"]["type"] == "bms"
     assert plan["ERRQ"]["type"] == "csd"
     assert all(p["status"] == "planned"
-               for p in (plan["DCIOC104"], plan["ACCOUNT"], plan["MENUMAP"]))
+               for p in (plan["DEMOC104"], plan["ACCOUNT"], plan["MENUMAP"]))
 
 
 def test_a_file_is_requested_by_its_ddname_not_the_program_local_name():
@@ -145,27 +145,27 @@ def test_caller_and_spool_are_skipped():
 def test_fetches_every_kind_and_records_the_source():
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'\n"
+        "           CALL 'DEMOC104'\n"
         "           EXEC CICS SEND MAP('MENUMAP') END-EXEC.\n")
     rep = fetch_dependencies(man, _fetcher())
-    assert _by(rep, "DCIOC104")["status"] == "fetched"
-    assert _by(rep, "DCIOC104")["source"] == r"\\share\DCIOC104"
+    assert _by(rep, "DEMOC104")["status"] == "fetched"
+    assert _by(rep, "DEMOC104")["source"] == r"\\share\DEMOC104"
     assert _by(rep, "MENUMAP")["status"] == "fetched"
     assert rep["counts"]["fetched"] == 2
 
 
 def test_only_immediate_dependencies_are_fetched():
-    """MAINPGM -> DCIOC104 -> (ACCOUNT, AUDITLOG). Only DCIOC104 is this program's
-    dependency; what DCIOC104 in turn needs is a question about DCIOC104, answered by
+    """MAINPGM -> DEMOC104 -> (ACCOUNT, AUDITLOG). Only DEMOC104 is this program's
+    dependency; what DEMOC104 in turn needs is a question about DEMOC104, answered by
     running the tool on it - with its own prefetch and its own complete parse. Walking
     on from here would answer it from a parse that had never been prefetched, which is
     exactly the shortfall stage 1 exists to prevent."""
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'.\n")
+        "           CALL 'DEMOC104'.\n")
     rep = fetch_dependencies(man, _fetcher())
     assert [r["artifact"] for r in rep["artifacts"] if r["status"] == "fetched"] \
-        == ["DCIOC104"]
+        == ["DEMOC104"]
 
 
 def test_one_member_is_one_round_trip_however_many_rows_reach_it():
@@ -188,10 +188,10 @@ def test_a_prefetched_member_is_reported_but_not_requested_again():
     calls = []
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'.\n")
+        "           CALL 'DEMOC104'.\n")
     rep = fetch_dependencies(man, _fetcher(log=calls),
-                             prefetched={"DCIOC104": ("...text...", "PROD.SRCLIB")})
-    row = _by(rep, "DCIOC104")
+                             prefetched={"DEMOC104": ("...text...", "PROD.SRCLIB")})
+    row = _by(rep, "DEMOC104")
     assert row["status"] == "prefetched"
     assert row["source"] == "PROD.SRCLIB"
     assert calls == []
@@ -210,9 +210,9 @@ def test_no_service_is_distinct_from_not_found():
     Reporting this as 'not-found' would manufacture evidence of absence."""
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'.\n")
+        "           CALL 'DEMOC104'.\n")
     rep = fetch_dependencies(man, None, unavailable="no client installed")
-    row = _by(rep, "DCIOC104")
+    row = _by(rep, "DEMOC104")
     assert row["status"] == "no-service"
     assert "no client installed" in row["reason"]
 
@@ -223,12 +223,12 @@ def test_a_failing_fetcher_is_reported_not_fatal():
 
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'.\n")
+        "           CALL 'DEMOC104'.\n")
     rep = fetch_dependencies(man, boom)
-    row = _by(rep, "DCIOC104")
+    row = _by(rep, "DEMOC104")
     assert row["status"] == "error"
     assert "ConnectionError" in row["error"]
-    assert rep["errors"] and rep["errors"][0]["artifact"] == "DCIOC104"
+    assert rep["errors"] and rep["errors"][0]["artifact"] == "DEMOC104"
 
 
 def test_a_fetcher_without_a_type_keyword_still_works():
@@ -240,22 +240,22 @@ def test_a_fetcher_without_a_type_keyword_still_works():
 
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'.\n")
+        "           CALL 'DEMOC104'.\n")
     rep = fetch_dependencies(man, name_only)
-    assert _by(rep, "DCIOC104")["status"] == "fetched"
-    assert seen == ["DCIOC104"]
+    assert _by(rep, "DEMOC104")["status"] == "fetched"
+    assert seen == ["DEMOC104"]
 
 
 def test_fetched_artifacts_are_collected_and_usable_as_a_search_path(tmp_path):
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'\n"
+        "           CALL 'DEMOC104'\n"
         "           EXEC SQL SELECT BAL INTO :WS-B FROM ACCOUNT END-EXEC.\n",
         data_body="       01 WS-B PIC 9(5).\n")
     rep = fetch_dependencies(man, _fetcher(), dest=str(tmp_path))
     names = {p.name for p in tmp_path.iterdir()}
-    assert {"DCIOC104.cbl", "ACCOUNT.sql"} <= names
-    assert _by(rep, "DCIOC104")["copiedTo"].endswith("DCIOC104.cbl")
+    assert {"DEMOC104.cbl", "ACCOUNT.sql"} <= names
+    assert _by(rep, "DEMOC104")["copiedTo"].endswith("DEMOC104.cbl")
 
 
 def test_the_service_type_wins_over_our_guess_and_the_disagreement_is_recorded():
@@ -265,11 +265,11 @@ def test_the_service_type_wins_over_our_guess_and_the_disagreement_is_recorded()
     worth surfacing, not a discrepancy to smooth over."""
     def asm(name, type=None, copy=None):
         return {"artifact_name": name, "found": True, "text": "         CSECT\n",
-                "detected_type": "asm", "source_location": "PROD.ASMLIB(DCIOC104)"}
+                "detected_type": "asm", "source_location": "PROD.ASMLIB(DEMOC104)"}
 
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), asm)
-    row = _by(rep, "DCIOC104")
+        _manifest("       0000-MAIN.\n           CALL 'DEMOC104'.\n"), asm)
+    row = _by(rep, "DEMOC104")
     assert row["detectedType"] == "asm"
     assert "requested as cobol" in row["typeNote"]
     assert row["language"] == "asm"
@@ -284,13 +284,13 @@ def test_a_called_program_absent_from_the_cobol_library_is_found_as_asm():
     not-found or mislabelled cobol."""
     def estate(name, type=None, copy=None):
         if type == "asm":
-            return {"artifact_name": name, "found": True, "text": "DCIOC104 CSECT\n",
-                    "source_location": "PROD.ASMLIB(DCIOC104)"}
+            return {"artifact_name": name, "found": True, "text": "DEMOC104 CSECT\n",
+                    "source_location": "PROD.ASMLIB(DEMOC104)"}
         return {"artifact_name": name, "found": False}      # absent from the cobol library
 
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), estate)
-    row = _by(rep, "DCIOC104")
+        _manifest("       0000-MAIN.\n           CALL 'DEMOC104'.\n"), estate)
+    row = _by(rep, "DEMOC104")
     assert row["status"] == "fetched"
     assert row["language"] == "asm"
     assert "asm" in row["languageBasis"] and "cobol not present" in row["languageBasis"]
@@ -302,15 +302,15 @@ def test_an_estate_language_synonym_is_normalised_and_not_a_false_disagreement(t
     disagreement (the first probe requested cobol, which IS the real disagreement here)."""
     def estate(name, type=None, copy=None):
         return {"artifact_name": name, "found": True, "text": "X CSECT\n",
-                "detected_type": "ASSEMBLER", "source_location": "PROD.ASMLIB(DCIOC104)"}
+                "detected_type": "ASSEMBLER", "source_location": "PROD.ASMLIB(DEMOC104)"}
 
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), estate,
+        _manifest("       0000-MAIN.\n           CALL 'DEMOC104'.\n"), estate,
         dest=str(tmp_path))
-    row = _by(rep, "DCIOC104")
+    row = _by(rep, "DEMOC104")
     assert row["language"] == "asm"                          # folded from ASSEMBLER
-    assert row["copiedTo"].endswith("DCIOC104.asm")          # saved under the asm extension
-    assert {p.name for p in tmp_path.iterdir()} == {"DCIOC104.asm"}
+    assert row["copiedTo"].endswith("DEMOC104.asm")          # saved under the asm extension
+    assert {p.name for p in tmp_path.iterdir()} == {"DEMOC104.asm"}
 
 
 def test_alternatives_are_recorded_so_the_syslib_choice_is_visible():
@@ -318,14 +318,14 @@ def test_alternatives_are_recorded_so_the_syslib_choice_is_visible():
     resolved is a fact; that two others could have is a fact the reader needs too."""
     def many(name, type=None, copy=None):
         return {"artifact_name": name, "found": True, "text": "X\n",
-                "source_location": "PROD.SRCLIB(DCIOC104)",
-                "alternatives": ["TEST.SRCLIB(DCIOC104)", "DEV.SRCLIB(DCIOC104)"]}
+                "source_location": "PROD.SRCLIB(DEMOC104)",
+                "alternatives": ["TEST.SRCLIB(DEMOC104)", "DEV.SRCLIB(DEMOC104)"]}
 
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), many)
-    row = _by(rep, "DCIOC104")
-    assert row["source"] == "PROD.SRCLIB(DCIOC104)"
-    assert row["alternatives"] == ["TEST.SRCLIB(DCIOC104)", "DEV.SRCLIB(DCIOC104)"]
+        _manifest("       0000-MAIN.\n           CALL 'DEMOC104'.\n"), many)
+    row = _by(rep, "DEMOC104")
+    assert row["source"] == "PROD.SRCLIB(DEMOC104)"
+    assert row["alternatives"] == ["TEST.SRCLIB(DEMOC104)", "DEV.SRCLIB(DEMOC104)"]
 
 
 def test_a_control_member_is_requested_out_of_its_dataset():
@@ -341,7 +341,7 @@ def test_a_control_member_is_requested_out_of_its_dataset():
 
 def test_report_shape_is_self_describing():
     rep = fetch_dependencies(
-        _manifest("       0000-MAIN.\n           CALL 'DCIOC104'.\n"), _fetcher())
+        _manifest("       0000-MAIN.\n           CALL 'DEMOC104'.\n"), _fetcher())
     assert rep["format"] == "cobol-xstate-fetch"
     assert rep["program"] == "MAINPGM"
     assert "note" in rep and "counts" in rep and "errors" in rep
@@ -371,10 +371,10 @@ def test_two_calls_in_one_sentence_are_two_dependencies():
     losing an entire program dependency from every view."""
     man = _manifest(
         "       0000-MAIN.\n"
-        "           CALL 'DCIOC104'\n"
+        "           CALL 'DEMOC104'\n"
         "           CALL 'AUDITLOG'.\n")
     assert {a["artifact"] for a in man["artifacts"] if a["kind"] == "program"} \
-        == {"DCIOC104", "AUDITLOG"}
+        == {"DEMOC104", "AUDITLOG"}
 
 
 def test_call_with_using_still_binds_its_arguments():
@@ -459,12 +459,12 @@ def _slow_fetcher(peak, log=None):
 # a member the estate lacks, one whose request fails outright, a duplicate name, the
 # subject itself, a row that was never fetchable, and one stage 1 already paid for.
 MIXED = {"program": "MAINPGM", "artifacts": [
-    {"artifact": "DCIOC104", "kind": "program", "dependency": "runtime"},
+    {"artifact": "DEMOC104", "kind": "program", "dependency": "runtime"},
     {"artifact": "ACCOUNT", "kind": "db2-table", "dependency": "runtime"},
     {"artifact": "GONE", "kind": "program", "dependency": "runtime"},
     {"artifact": "BOOM", "kind": "program", "dependency": "runtime"},
     {"artifact": "AUDITLOG", "kind": "program", "dependency": "runtime"},
-    {"artifact": "DCIOC104", "kind": "copybook", "dependency": "compile-time"},
+    {"artifact": "DEMOC104", "kind": "copybook", "dependency": "compile-time"},
     {"artifact": "MAINPGM", "kind": "program", "dependency": "runtime"},
     {"artifact": "CALLER", "kind": "caller", "dependency": "runtime"},
     {"artifact": "CUSTCPY", "kind": "copybook", "dependency": "compile-time"},
@@ -495,9 +495,9 @@ def test_a_duplicate_name_is_still_one_round_trip_when_requests_overlap():
     collapse when the plan is read, before anything is dispatched."""
     calls = []
     rep = fetch_dependencies(MIXED, _slow_fetcher([0], log=calls), prefetched=PRE, jobs=8)
-    assert [n for n, _ in calls].count("DCIOC104") == 1
+    assert [n for n, _ in calls].count("DEMOC104") == 1
     # ...and the row that did NOT cause the round-trip is still the second one
-    dup = [r for r in rep["artifacts"] if r["artifact"] == "DCIOC104"]
+    dup = [r for r in rep["artifacts"] if r["artifact"] == "DEMOC104"]
     assert [r["status"] for r in dup] == ["fetched", "already-fetched"]
     # the member stage 1 paid for is never requested at all
     assert "CUSTCPY" not in [n for n, _ in calls]

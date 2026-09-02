@@ -37,14 +37,14 @@
        01  WS-LEN                  PIC S9(4) COMP.
        01  SQLCODE                 PIC S9(9) COMP VALUE 0.
            EXEC SQL
-               DECLARE T_BE_COMMENT TABLE
+               DECLARE T_DEMO_COMMENT TABLE
                (ACC_N         CHAR(9) NOT NULL,
                 CMT           VARCHAR(200) NOT NULL)
            END-EXEC.
            EXEC SQL
                DECLARE CMT_CSR CURSOR FOR
                    SELECT ACC_N, CMT
-                   FROM T_BE_COMMENT
+                   FROM T_DEMO_COMMENT
            END-EXEC.
        PROCEDURE DIVISION.
        0000-MAIN.
@@ -56,7 +56,7 @@
            EXEC SQL
                SELECT CMT
                INTO :BE-CMT-X
-               FROM T_BE_COMMENT
+               FROM T_DEMO_COMMENT
                WHERE ACC_N = :BE-ACC-N
            END-EXEC
            MOVE BE-CMT-X-TEXT TO WS-NOTE
@@ -73,6 +73,6 @@
            MOVE WS-NOTE TO BE-O-CMT-TEXT
            MOVE WS-LEN TO BE-O-CMT-LEN
            EXEC SQL
-               INSERT INTO T_BE_COMMENT
+               INSERT INTO T_DEMO_COMMENT
                VALUES (:BE-OUT)
            END-EXEC.

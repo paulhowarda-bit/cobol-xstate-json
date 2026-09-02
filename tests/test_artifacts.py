@@ -172,13 +172,13 @@ def test_dynamic_call_via_missing_copybook_points_at_the_copybook():
     copybook - so the reader knows exactly which artifact to supply."""
     man = _artifacts_src(
         "       JM0004.\n"
-        "           CALL CN-DCIOC104 USING DC01104-PARMS\n"
+        "           CALL CN-DEMOC104 USING DC01104-PARMS\n"
         "           GOBACK.\n",
         data_body="       COPY DC01104.\n"
                   "       01 WS-DUMMY PIC X.\n",
     )
     by = _by_name(man)
-    pg = by["CN-DCIOC104"]
+    pg = by["CN-DEMOC104"]
     assert pg["dynamic"] is True
     assert "not declared in the visible source" in pg["needs"]
     assert "DC01104" in pg["needs"]
@@ -377,15 +377,15 @@ def test_no_name_shaped_sentinel_reaches_the_manifest_for_a_padded_operand():
     manifest = _artifacts_src(
         "       0000-MAIN.\n"
         "           IF WS-FLAG = 'Y'\n"
-        "               EXEC CICS XCTL PROGRAM('ACTC000 ') END-EXEC\n"
+        "               EXEC CICS XCTL PROGRAM('CALLA000 ') END-EXEC\n"
         "           ELSE\n"
-        "               EXEC CICS XCTL PROGRAM ('ACTC099 ') END-EXEC\n"
+        "               EXEC CICS XCTL PROGRAM ('CALLA099 ') END-EXEC\n"
         "           END-IF\n"
         "           EXEC CICS READ FILE('CUSTFIL ') INTO(WS-REC) END-EXEC.\n",
         "       01  WS-FLAG   PIC X VALUE 'N'.\n"
         "       01  WS-REC    PIC X(80).\n")
     names = _by_name(manifest)
     assert not [n for n in names if n.startswith("<")]
-    assert names["ACTC000"]["kind"] == "program"
-    assert names["ACTC099"]["kind"] == "program"
+    assert names["CALLA000"]["kind"] == "program"
+    assert names["CALLA099"]["kind"] == "program"
     assert names["CUSTFIL"]["kind"] == "file"

@@ -6,21 +6,21 @@ This document describes the `mfdep` naming conventions system and how cobol-xsta
 
 The graph loader maps lineage fields to DB2 columns using the `columns[]` array on interface events. When `columns[]` is empty (cursor DECLARE not visible, count mismatch, dynamic SQL, etc.), fields are logged as "unmapped".
 
-Many of these fields CAN be resolved using the naming conventions already indexed in `mfdep.db`. For example, `NP-ID-POSN-A` trivially resolves to column `ID_POSN_A` on table `T_MMNP_NCMM_POSN` via the DCLGEN prefix system.
+Many of these fields CAN be resolved using the naming conventions already indexed in `mfdep.db`. For example, `NP-ID-POSN-A` trivially resolves to column `ID_POSN_A` on table `T_DMNP_NCMM_POSN` via the DCLGEN prefix system.
 
 ## How Mainframe COBOL Naming Works
 
 Every DB2 table has a **DCLGEN copybook** that declares host variables with a consistent prefix:
 
 ```
-Table:    T_MMAA_ACC_ANAL
-DCLGEN:   MMAA (copybook member name)
+Table:    T_DMAA_ACC_ANAL
+DCLGEN:   DMAA (copybook member name)
 Prefix:   AA
 Variable: AA-FUND-A    -> column FUND_A
 Variable: AA-ACCT-NBR  -> column ACCT_NBR
 ```
 
-The prefix is declared in the DCLGEN via `NAMES(AA)`. The entity code is the first 4 chars after `T_` (e.g., `MMAA`). The family is the first 2 chars of the entity (e.g., `MM`).
+The prefix is declared in the DCLGEN via `NAMES(AA)`. The entity code is the first 4 chars after `T_` (e.g., `DMAA`). The family is the first 2 chars of the entity (e.g., `MM`).
 
 COPY REPLACING creates additional prefixes:
 ```cobol
@@ -60,7 +60,7 @@ The primary resolution function. Given a COBOL host variable name and optional t
     "original": "NP-ID-POSN-A",
     "core": "ID-POSN-A",          # prefix stripped
     "db2_column": "ID_POSN_A",    # hyphens -> underscores
-    "table": "T_MMNP_NCMM_POSN",  # inferred from prefix
+    "table": "T_DMNP_NCMM_POSN",  # inferred from prefix
     "prefix": "NP",
     "all_prefixed": ["NP-ID-POSN-A"],
     "search_terms": ["ID-POSN-A", "ID_POSN_A", "NP-ID-POSN-A"]
@@ -69,7 +69,7 @@ The primary resolution function. Given a COBOL host variable name and optional t
 
 When a table is provided, disambiguation improves:
 ```python
->>> resolve_field_variants("NP-ID-POSN-A", "T_MMNP_NCMM_POSN")
+>>> resolve_field_variants("NP-ID-POSN-A", "T_DMNP_NCMM_POSN")
 # Same result but higher confidence — prefix validated against table's DCLGEN
 ```
 
@@ -79,7 +79,7 @@ Quick conversion when you just need the column name:
 ```python
 >>> cobol_to_db2_column("AA-FUND-A")
 "FUND_A"
->>> cobol_to_db2_column("AA-FUND-A", "T_MMAA_ACC_ANAL")
+>>> cobol_to_db2_column("AA-FUND-A", "T_DMAA_ACC_ANAL")
 "FUND_A"  # uses table context for correct prefix stripping
 ```
 
@@ -88,9 +88,9 @@ Quick conversion when you just need the column name:
 Given a field prefix, returns candidate table names:
 ```python
 >>> infer_table_from_prefix("AA")
-["T_MMAA_ACC_ANAL"]
+["T_DMAA_ACC_ANAL"]
 >>> infer_table_from_prefix("NP")
-["T_MMNP_NCMM_POSN", "T_SMNP_NWK_PART"]  # ambiguous — 2 entities share prefix
+["T_DMNP_NCMM_POSN", "T_EXNP_NWK_PART"]  # ambiguous — 2 entities share prefix
 ```
 
 #### `strip_prefix(field) -> str`
@@ -109,9 +109,9 @@ Strips the COBOL prefix using the DCLGEN prefix table:
 
 Look up a DCLGEN copybook by member name:
 ```python
->>> lookup_dclgen("MMAA")
-{"member": "MMAA", "schema": "MMD1DBO", "table_name": "T_MMAA_ACC_ANAL",
- "names_prefix": "AA", "structure": "MMAA", "entity": "MMAA"}
+>>> lookup_dclgen("DMAA")
+{"member": "DMAA", "schema": "DMD1DBO", "table_name": "T_DMAA_ACC_ANAL",
+ "names_prefix": "AA", "structure": "DMAA", "entity": "DMAA"}
 ```
 
 #### `lookup_prefix(prefix) -> list[dict]`
@@ -119,22 +119,22 @@ Look up a DCLGEN copybook by member name:
 Find all DCLGENs using a prefix:
 ```python
 >>> lookup_prefix("AA")
-[{"member": "MMAA", "schema": "MMD1DBO", "table_name": "T_MMAA_ACC_ANAL", ...}]
+[{"member": "DMAA", "schema": "DMD1DBO", "table_name": "T_DMAA_ACC_ANAL", ...}]
 ```
 
 #### `lookup_entity(entity) -> dict | None`
 
 Look up by 4-char entity code:
 ```python
->>> lookup_entity("MMAA")
-{"member": "MMAA", "schema": "MMD1DBO", "table_name": "T_MMAA_ACC_ANAL", ...}
+>>> lookup_entity("DMAA")
+{"member": "DMAA", "schema": "DMD1DBO", "table_name": "T_DMAA_ACC_ANAL", ...}
 ```
 
 #### `all_prefixes_for_entity(entity) -> list[str]`
 
 All known prefixes including REPLACING variants:
 ```python
->>> all_prefixes_for_entity("MMAA")
+>>> all_prefixes_for_entity("DMAA")
 ["AA", "AAR", "MAAR", ...]
 ```
 
@@ -152,9 +152,9 @@ COPY REPLACING data for a copybook:
 
 Resolves table synonyms, views, and work tables to real tables:
 ```python
->>> resolve_table_synonym("W_MMAA_ACC_ANAL")
-{"name": "W_MMAA_ACC_ANAL", "real_table": "T_MMAA_ACC_ANAL",
- "schema": "MMD1DBO", "source": "convention_W_strip", "confidence": "high"}
+>>> resolve_table_synonym("W_DMAA_ACC_ANAL")
+{"name": "W_DMAA_ACC_ANAL", "real_table": "T_DMAA_ACC_ANAL",
+ "schema": "DMD1DBO", "source": "convention_W_strip", "confidence": "high"}
 ```
 
 ### Prefix Collision Awareness
@@ -164,8 +164,8 @@ Some prefixes map to multiple entities (ambiguous). Use `infer_table_from_prefix
 ```python
 >>> from mfdep.conventions import collision_candidates
 >>> collision_candidates("NP")
-[{"entity": "MMNP", "prefix": "NP", "table_name": "T_MMNP_NCMM_POSN", "family": "MM"},
- {"entity": "SMNP", "prefix": "NP", "table_name": "T_SMNP_NWK_PART", "family": "SM"}]
+[{"entity": "DMNP", "prefix": "NP", "table_name": "T_DMNP_NCMM_POSN", "family": "MM"},
+ {"entity": "EXNP", "prefix": "NP", "table_name": "T_EXNP_NWK_PART", "family": "SM"}]
 ```
 
 ## Where to Integrate
@@ -258,7 +258,7 @@ mfdep conventions summary
 
 # Look up a specific prefix/entity/field
 mfdep conventions lookup-prefix AA
-mfdep conventions lookup-entity MMAA
+mfdep conventions lookup-entity DMAA
 mfdep conventions resolve NP-ID-POSN-A
 
 # Run full discovery analysis

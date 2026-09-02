@@ -44,10 +44,10 @@ class FakeMfdep:
     """
 
     PREFIXES = {
-        "AA":  ["T_MMAA_ACC_ANAL"],
-        "AAR": ["T_MMAA_ACC_ANAL"],
-        "NP":  ["T_MMNP_NCMM_POSN", "T_SMNP_NWK_PART"],
-        "WS":  ["T_APWS_WKFL_STEP"],
+        "AA":  ["T_DMAA_ACC_ANAL"],
+        "AAR": ["T_DMAA_ACC_ANAL"],
+        "NP":  ["T_DMNP_NCMM_POSN", "T_EXNP_NWK_PART"],
+        "WS":  ["T_DPWS_WKFL_STEP"],
     }
 
     def resolve_field_variants(self, field, table=""):
@@ -135,29 +135,29 @@ def test_load_fails_loudly_without_mfdep():
 
 
 def test_base_table_drops_schema_qualifier():
-    assert base_table("MMD1DBO.T_MMAA_ACC_ANAL") == "T_MMAA_ACC_ANAL"
-    assert base_table("T_MMAA_ACC_ANAL") == "T_MMAA_ACC_ANAL"
+    assert base_table("DMD1DBO.T_DMAA_ACC_ANAL") == "T_DMAA_ACC_ANAL"
+    assert base_table("T_DMAA_ACC_ANAL") == "T_DMAA_ACC_ANAL"
 
 
 def test_resolve_field_unique_prefix():
     assert _conv().resolve_field("AA-FUND-A") == {
-        "column": "FUND_A", "table": "T_MMAA_ACC_ANAL"}
+        "column": "FUND_A", "table": "T_DMAA_ACC_ANAL"}
 
 
 def test_resolve_field_replacing_variant_reaches_same_table():
     assert _conv().resolve_field("AAR-FUND-A") == {
-        "column": "FUND_A", "table": "T_MMAA_ACC_ANAL"}
+        "column": "FUND_A", "table": "T_DMAA_ACC_ANAL"}
 
 
 def test_resolve_field_table_context_validated_first():
-    got = _conv().resolve_field("NP-ID-POSN-A", table="T_SMNP_NWK_PART")
-    assert got == {"column": "ID_POSN_A", "table": "T_SMNP_NWK_PART"}
+    got = _conv().resolve_field("NP-ID-POSN-A", table="T_EXNP_NWK_PART")
+    assert got == {"column": "ID_POSN_A", "table": "T_EXNP_NWK_PART"}
 
 
 def test_resolve_field_ambiguous_narrowed_by_program_tables():
     got = _conv().resolve_field("NP-ID-POSN-A",
-                                program_tables=frozenset({"T_SMNP_NWK_PART"}))
-    assert got == {"column": "ID_POSN_A", "table": "T_SMNP_NWK_PART"}
+                                program_tables=frozenset({"T_EXNP_NWK_PART"}))
+    assert got == {"column": "ID_POSN_A", "table": "T_EXNP_NWK_PART"}
 
 
 def test_resolve_field_ambiguous_stays_unresolved():
@@ -165,8 +165,8 @@ def test_resolve_field_ambiguous_stays_unresolved():
     # lineage, which is worse than none.
     assert _conv().resolve_field("NP-ID-POSN-A") is None
     assert _conv().resolve_field("NP-ID-POSN-A",
-                                 program_tables=frozenset({"T_MMNP_NCMM_POSN",
-                                                           "T_SMNP_NWK_PART"})) is None
+                                 program_tables=frozenset({"T_DMNP_NCMM_POSN",
+                                                           "T_EXNP_NWK_PART"})) is None
 
 
 def test_resolve_field_unknown_prefix_unresolved():
@@ -175,7 +175,7 @@ def test_resolve_field_unknown_prefix_unresolved():
 
 def test_resolve_field_endpoint_contradiction_rejected():
     # The statement's own table is the ground truth: a prefix whose candidate
-    # tables contradict it (WS -> T_APWS_WKFL_STEP vs FROM CUSTOMER) is the
+    # tables contradict it (WS -> T_DPWS_WKFL_STEP vs FROM CUSTOMER) is the
     # generic-prefix hazard, not evidence - it must resolve nothing.
     assert _conv().resolve_field("WS-NAME", table="CUSTOMER") is None
 
@@ -188,16 +188,16 @@ def test_resolve_field_program_reference_veto():
     # ...while an EMPTY reference set vetoes nothing (a pure reader whose only
     # table mention was the missing DECLARE).
     assert _conv().resolve_field("WS-NAME") == {
-        "column": "NAME", "table": "T_APWS_WKFL_STEP"}
+        "column": "NAME", "table": "T_DPWS_WKFL_STEP"}
 
 
 def test_resolve_columns_marks_each_slot():
     # The indicator variable is MFDEP'S call: it declines IND-X, and the wrapper
     # records exactly that (an explicit unresolved entry) - no re-classification.
-    cols, n = _conv().resolve_columns(["AA-FUND-A", "IND-X"], "T_MMAA_ACC_ANAL")
+    cols, n = _conv().resolve_columns(["AA-FUND-A", "IND-X"], "T_DMAA_ACC_ANAL")
     assert n == 1
     assert cols == [
-        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_DMAA_ACC_ANAL",
          "viaConventions": True},
         {"hostVar": "IND-X", "unresolved": True},
     ]
@@ -221,9 +221,9 @@ def test_fetch_without_declare_recovered_by_convention():
     m = _machine(FETCH_NODECL)
     spec = _spec(m, "FETCH")
     assert spec["columns"] == [
-        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_DMAA_ACC_ANAL",
          "viaConventions": True},
-        {"column": "ACCT_NBR", "hostVar": "AA-ACCT-NBR", "table": "T_MMAA_ACC_ANAL",
+        {"column": "ACCT_NBR", "hostVar": "AA-ACCT-NBR", "table": "T_DMAA_ACC_ANAL",
          "viaConventions": True},
     ]
     assert spec["columnsFrom"] == "mfdep naming conventions"
@@ -266,7 +266,7 @@ def test_mfdep_is_imported_only_on_first_need(monkeypatch):
     m = _machine(
         "           EXEC SQL\n"
         "               SELECT FUND_A INTO :AA-FUND-A\n"
-        "               FROM T_MMAA_ACC_ANAL\n"
+        "               FROM T_DMAA_ACC_ANAL\n"
         "           END-EXEC\n", conv=statechart_module._AUTO_CONVENTIONS)
     assert _spec(m, "SELECT")["columns"] == [
         {"column": "FUND_A", "hostVar": "AA-FUND-A"}]
@@ -299,7 +299,7 @@ def test_fetch_count_mismatch_is_never_convention_resolved():
     body = (
         "           EXEC SQL\n"
         "               DECLARE C1 CURSOR FOR\n"
-        "                   SELECT FUND_A FROM T_MMAA_ACC_ANAL\n"
+        "                   SELECT FUND_A FROM T_DMAA_ACC_ANAL\n"
         "           END-EXEC\n"
         "           EXEC SQL\n"
         "               FETCH C1 INTO :AA-FUND-A, :AA-ACCT-NBR\n"
@@ -317,7 +317,7 @@ SELECT_MISMATCH = (
     "           EXEC SQL\n"
     "               SELECT FUND_A\n"
     "               INTO :AA-FUND-A, :AA-ACCT-NBR\n"
-    "               FROM T_MMAA_ACC_ANAL\n"
+    "               FROM T_DMAA_ACC_ANAL\n"
     "           END-EXEC\n")
 
 
@@ -332,7 +332,7 @@ def test_bug_doc_case_maps_from_the_source_and_never_by_convention():
     # docs/issues/conventions-indicator-variable-bug.md verbatim: 2 columns,
     # 2 real host variables + 1 null indicator. That doc's complaint was that the
     # conventions overruled the parser's refusal and resolved WS-NAME / WS-BAL to
-    # T_APWS_WKFL_STEP - a table this statement never mentions.
+    # T_DPWS_WKFL_STEP - a table this statement never mentions.
     #
     # The refusal was the weaker half of the answer. `:WS-BAL:IND-BAL` is host variable
     # WS-BAL with a null indicator: 2 columns, 2 slots, and the statement says which
@@ -365,11 +365,11 @@ def test_select_star_recovered_by_convention():
         "           EXEC SQL\n"
         "               SELECT *\n"
         "               INTO :AA-FUND-A\n"
-        "               FROM T_MMAA_ACC_ANAL\n"
+        "               FROM T_DMAA_ACC_ANAL\n"
         "           END-EXEC\n")
     spec = _spec(m, "SELECT")
     assert spec["columns"] == [
-        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_DMAA_ACC_ANAL",
          "viaConventions": True}]
     assert spec["columnsFrom"] == "mfdep naming conventions"
     assert any("EXEC SQL SELECT: column<->host-variable mapping recovered by mfdep "
@@ -385,7 +385,7 @@ def test_correlated_select_with_derived_slot_is_not_deferred():
         "           EXEC SQL\n"
         "               SELECT FUND_A, COUNT(*)\n"
         "               INTO :AA-FUND-A, :WS-CNT\n"
-        "               FROM T_MMAA_ACC_ANAL GROUP BY FUND_A\n"
+        "               FROM T_DMAA_ACC_ANAL GROUP BY FUND_A\n"
         "           END-EXEC\n")
     with_conv = _machine(body)
     pinned = _machine(body, conv=None)
@@ -430,7 +430,7 @@ def test_fetch_indicator_stripped_before_conventions():
         "           END-EXEC\n")
     spec = _spec(m, "FETCH")
     assert spec["columns"] == [
-        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_DMAA_ACC_ANAL",
          "viaConventions": True}]
     assert not any("IND-X" in str(c) for c in spec["columns"])
     assert any("(1 of 1 host variable(s) resolved" in x for x in _messages(m))
@@ -441,11 +441,11 @@ def test_select_star_indicator_stripped_before_conventions():
         "           EXEC SQL\n"
         "               SELECT *\n"
         "               INTO :AA-FUND-A:IND-X\n"
-        "               FROM T_MMAA_ACC_ANAL\n"
+        "               FROM T_DMAA_ACC_ANAL\n"
         "           END-EXEC\n")
     spec = _spec(m, "SELECT")
     assert spec["columns"] == [
-        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_MMAA_ACC_ANAL",
+        {"column": "FUND_A", "hostVar": "AA-FUND-A", "table": "T_DMAA_ACC_ANAL",
          "viaConventions": True}]
     assert any("(1 of 1 host variable(s) resolved" in x for x in _messages(m))
 
@@ -459,18 +459,18 @@ AMBIG_FETCH = (
 
 
 def test_ambiguous_prefix_narrowed_by_program_reference():
-    # The program provably touches T_SMNP_NWK_PART (the COUNT(*) SELECT's FROM), so
+    # The program provably touches T_EXNP_NWK_PART (the COUNT(*) SELECT's FROM), so
     # the two-entity NP prefix narrows to it.
     m = _machine(
         "           EXEC SQL\n"
         "               SELECT COUNT(*) INTO :WS-CNT\n"
-        "               FROM T_SMNP_NWK_PART\n"
+        "               FROM T_EXNP_NWK_PART\n"
         "           END-EXEC\n"
         + AMBIG_FETCH)
     spec = _spec(m, "FETCH")
     assert spec["columns"] == [
         {"column": "ID_POSN_A", "hostVar": "NP-ID-POSN-A",
-         "table": "T_SMNP_NWK_PART", "viaConventions": True}]
+         "table": "T_EXNP_NWK_PART", "viaConventions": True}]
 
 
 def test_ambiguous_prefix_without_context_degrades_to_todays_output():
@@ -487,7 +487,7 @@ def test_generic_prefix_vetoed_by_program_references():
     # secondary issue) - the refusal stands instead.
     m = _machine(
         "           EXEC SQL\n"
-        "               UPDATE T_MMAA_ACC_ANAL SET FUND_A = :AA-FUND-A\n"
+        "               UPDATE T_DMAA_ACC_ANAL SET FUND_A = :AA-FUND-A\n"
         "           END-EXEC\n"
         "           EXEC SQL\n"
         "               FETCH C9 INTO :WS-CNT\n"
@@ -518,9 +518,9 @@ def test_interface_event_carries_convention_columns():
     iface = m.bundle()["interface"]
     ev = next(e for e in iface["events"] if e["verb"] == "FETCH")
     assert ev["columns"] == [
-        {"table": "T_MMAA_ACC_ANAL", "column": "FUND_A", "hostVar": "AA-FUND-A",
+        {"table": "T_DMAA_ACC_ANAL", "column": "FUND_A", "hostVar": "AA-FUND-A",
          "viaConventions": True},
-        {"table": "T_MMAA_ACC_ANAL", "column": "ACCT_NBR", "hostVar": "AA-ACCT-NBR",
+        {"table": "T_DMAA_ACC_ANAL", "column": "ACCT_NBR", "hostVar": "AA-ACCT-NBR",
          "viaConventions": True},
     ]
     assert "NAMING CONVENTION" in ev["columnNote"]
@@ -541,12 +541,12 @@ def test_every_view_builds_over_convention_columns():
 
 # --------------------------------------------------------------------------- #
 # a column-list-less INSERT is an UNKNOWN column list, so it is recoverable
-# (docs/issues/unmapped-fields-v52.md, Issue 5)
+# (the v52 tracer report, Issue 5)
 # --------------------------------------------------------------------------- #
 
 INSERT_NO_COLUMN_LIST = (
     "           EXEC SQL\n"
-    "               INSERT INTO T_MMAA_ACC_ANAL\n"
+    "               INSERT INTO T_DMAA_ACC_ANAL\n"
     "               VALUES (:AA-FUND-A, :AA-ACCT-NBR)\n"
     "           END-EXEC\n")
 
@@ -586,7 +586,7 @@ def test_an_insert_count_mismatch_is_never_convention_resolved():
     """
     body = (
         "           EXEC SQL\n"
-        "               DECLARE T_MMAA_ACC_ANAL TABLE\n"
+        "               DECLARE T_DMAA_ACC_ANAL TABLE\n"
         "                   (FUND_A CHAR(6), ACCT_NBR INTEGER, OPEN_D DATE)\n"
         "           END-EXEC\n" + INSERT_NO_COLUMN_LIST)
     spec = _spec(_machine(body), "INSERT")
@@ -619,7 +619,7 @@ def test_a_run_time_select_list_never_reaches_the_conventions_fallback():
     inherent unknown into graph-shaped fact.
 
     This fired. With mfdep present the FETCH came back carrying
-    `T_MMAA_ACC_ANAL.FUND_A` and `.ACCT_NBR`, both `viaConventions: true`, for a select
+    `T_DMAA_ACC_ANAL.FUND_A` and `.ACCT_NBR`, both `viaConventions: true`, for a select
     list that does not exist until run time - a direct breach of "no invented logic;
     flag, never guess". Reproduced against this fake before the guard existed.
     """
@@ -662,7 +662,7 @@ SYNONYM_INSERT = (
     "           END-EXEC\n")
 
 DECLARE_BASE = (
-    "           EXEC SQL DECLARE T_MMAA_ACC_ANAL TABLE\n"
+    "           EXEC SQL DECLARE T_DMAA_ACC_ANAL TABLE\n"
     "               (FUND_A CHAR(6), ACCT_NBR DECIMAL(9))\n"
     "           END-EXEC.\n")
 
@@ -687,9 +687,9 @@ def test_a_resolved_synonym_is_never_offered_to_the_conventions():
         "           STOP RUN.\n")
     m = build_machine(parse_program(src), source_name="convtest.cbl",
                       conventions=Conventions(fake),
-                      synonym_resolver=lambda n: {"V_ACC_ANAL": "T_MMAA_ACC_ANAL"}.get(n))
+                      synonym_resolver=lambda n: {"V_ACC_ANAL": "T_DMAA_ACC_ANAL"}.get(n))
     spec = _spec(m, "INSERT")
-    assert spec["columnsFrom"] == ("DECLARE TABLE T_MMAA_ACC_ANAL via synonym "
+    assert spec["columnsFrom"] == ("DECLARE TABLE T_DMAA_ACC_ANAL via synonym "
                                    "V_ACC_ANAL (catalog resolver)")
     assert [c["column"] for c in spec["columns"]] == ["FUND_A", "ACCT_NBR"]
     assert fake.asked == []

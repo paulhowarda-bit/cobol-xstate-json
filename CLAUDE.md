@@ -84,7 +84,7 @@ cobol-xstate prog.cbl --synonym-resolver mycatalog:resolve_synonym
 # (docs/issues/conventions-indicator-variable-bug.md). What USED to cause most
 # mismatches no longer does: a group-level host variable is expanded to its elementary
 # items the way the Db2 precompiler expands it, and `:DATA:IND` is one slot
-# (docs/issues/host-structure-expansion.md). Tests and the gate pin
+# (the host-structure tracer report). Tests and the gate pin
 # conventions=None (tests/conftest.py autouse fixture + tools/byteproof*.py): a
 # determinism seam so output never depends on the day's mfdep.db - which is what keeps
 # the goldens valid on every machine, this mfdep-less one included.

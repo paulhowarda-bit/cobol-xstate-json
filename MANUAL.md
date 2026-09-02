@@ -279,8 +279,8 @@ retrieves through `mf_fetch:fetch_artifact` by default, because only the
 estate knows where its members live. Use this only for a differently-named client.
 
 ```bash
-cobol-xstate FBSB066B.cbl                                    # uses mf-fetch
-cobol-xstate FBSB066B.cbl --copybook-fetcher pkg.client:get  # ...or your own
+cobol-xstate SAMPB066.cbl                                    # uses mf-fetch
+cobol-xstate SAMPB066.cbl --copybook-fetcher pkg.client:get  # ...or your own
 ```
 
 `FUNC(name, type=, copy=)` is called for any member not found under an `-I` path. Both
@@ -348,8 +348,8 @@ mapsets, PROCs. What a *callee* depends on is a question about the callee — ru
 on the callee, and it gets its own prefetch and its own complete parse.
 
 ```bash
-cobol-xstate FBSB066B.cbl                 # both stages; deps in out/deps/
-cobol-xstate FBSB066B.cbl -I out/deps     # a later run reuses them, no round-trips
+cobol-xstate SAMPB066.cbl                 # both stages; deps in out/deps/
+cobol-xstate SAMPB066.cbl -I out/deps     # a later run reuses them, no round-trips
 ```
 
 Why the order is not negotiable: a copybook that does not arrive takes its `VALUE`
@@ -1246,7 +1246,7 @@ fields were `FETCH`es on exactly such cursors.
 SYNONYM/ALIAS finds only the *base* table's `DECLARE TABLE`, and the synonym→base join
 lives in the catalog, not the source. That knowledge arrives by one of two doors, both
 the host's to supply and neither ever guessed. `--synonym-map file.json` is a flat
-`{"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}` object (the shape `mfdep catalog
+`{"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}` object (the shape `mfdep catalog
 export-synonym-map` emits) — the operator's explicit answer, and the only door for a
 hand run. `--synonym-resolver MODULE:FUNC` names a callable `FUNC(name) -> base | None`
 that is asked **at the point of need** — only for a column-list-less INSERT with no
@@ -1273,7 +1273,7 @@ already collapsed.
 
 A **host structure** — a group-level host variable — is expanded to its elementary
 items first, because that is what the Db2 precompiler does to the statement before it
-reaches the database. `INTO :BSTI-TRNF-INIT` names one variable in the source and fifty
+reaches the database. `INTO :DSTI-TRNF-INIT` names one variable in the source and fifty
 targets to Db2; recovered the source's way it weighs 1 against the cursor's 50 columns,
 refuses, and leaves fifty fields mapped to nothing. The expansion is Db2's own:
 elementary items in declaration order, `FILLER` and `REDEFINES` (with their
@@ -1318,7 +1318,7 @@ run — silent degradation is exactly the v50 failure). When a `SELECT`/`FETCH`'
 list is *unknown* — the cursor's DECLARE is not visible, or `SELECT *` — the estate's
 DCLGEN naming conventions get one more shot: every DB2 table's DCLGEN declares its
 host variables under a consistent prefix (`NAMES(AA)` → `AA-FUND-A` fills `FUND_A` on
-`T_MMAA_ACC_ANAL`, COPY REPLACING variants included), and mfdep indexes them. A
+`T_DMAA_ACC_ANAL`, COPY REPLACING variants included), and mfdep indexes them. A
 **count mismatch is never convention-resolved**: a visible select list that disagrees
 with the INTO count means the 1:1 column↔variable assumption itself is broken — after
 host-structure expansion and indicator attachment, nothing in the statement explains the
@@ -1362,7 +1362,7 @@ it — `expression` (the outermost function, or `literal` / `expression` / `CASE
 
 ```json
 { "hostVar": "W-TOTAL-SPOKE", "derived": true,
-  "expression": "SUM", "derivedFrom": ["SPOKE_DOL_A"], "table": "T_MMJT_JRNL_TXN" }
+  "expression": "SUM", "derivedFrom": ["SPOKE_DOL_A"], "table": "T_DMJT_JRNL_TXN" }
 ```
 
 This is **provenance, never identity**: `SUM(SPOKE_DOL_A)` aggregates over many rows,

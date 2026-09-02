@@ -16,7 +16,7 @@
        PROCEDURE DIVISION.
        0000-MAIN.
            EXEC SQL
-               CALL PCBEN171 (:IN-MESSAGE, :OUT-RETURN-CODE)
+               CALL DEMOPRC1 (:IN-MESSAGE, :OUT-RETURN-CODE)
            END-EXEC
            IF SQLCODE NOT = 0
                DISPLAY 'CALL FAILED'

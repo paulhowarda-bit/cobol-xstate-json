@@ -43,37 +43,37 @@
            EXEC SQL
                SELECT SUM(SPOKE_DOL_A)
                INTO :W-TOTAL-SPOKE
-               FROM T_MMJT_JRNL_TXN
+               FROM T_DMJT_JRNL_TXN
            END-EXEC.
        2000-NESTED.
            EXEC SQL
                SELECT VALUE(SUM(TRX_RUN_COLL_BAL_A), 0)
                INTO :W-TOTAL-HST
-               FROM T_MMAR_ACC_ANAL_HST
+               FROM T_DMAR_ACC_ANAL_HST
            END-EXEC.
        3000-LITERAL.
            EXEC SQL
                SELECT 'Y'
                INTO :W-EXISTS-SW
-               FROM T_MMTC_TRX_CTL
+               FROM T_DMTC_TRX_CTL
            END-EXEC.
        4000-COUNT.
            EXEC SQL
                SELECT COUNT(*)
                INTO :W-ROW-COUNT
-               FROM T_MMTC_TRX_CTL
+               FROM T_DMTC_TRX_CTL
            END-EXEC.
        5000-EXPRESSION.
            EXEC SQL
                SELECT QTY * PRICE
                INTO :W-EXTENDED
-               FROM T_MMOR_ORDER
+               FROM T_DMOR_ORDER
            END-EXEC.
        6000-CASE.
            EXEC SQL
                SELECT CASE WHEN BAL_A > 0 THEN HIGH_C ELSE LOW_C END
                INTO :W-BANDING
-               FROM T_MMAR_ACC_ANAL
+               FROM T_DMAR_ACC_ANAL
            END-EXEC.
        7000-CURSOR.
            EXEC SQL
