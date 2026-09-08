@@ -551,25 +551,55 @@ _JOBS_PROG = (
 )
 
 
-def _peak_probe(monkeypatch, peak):
+# How long the rendezvous below waits for a second request in the same stage before it
+# gives up. A stage that IS parallel joins in well under a second - measured at 0.33s
+# worst case with 48 spinners on 16 cores - so this is ~15x the load-bound latency it has
+# to cover. The full wait is only ever paid by a stage that --jobs never reached, which
+# then fails its own assertion in tens of seconds rather than hanging: generous, because
+# the cost of being too small is a flaky test and the cost of being too big is a slower
+# red build.
+_RENDEZVOUS_TIMEOUT = 5.0
+
+
+def _peak_probe(monkeypatch, peak, rendezvous=False):
     """Install a fake estate client that reports the most requests ever in flight at
     once, per stage. Sleeps, because without one nothing overlaps and a peak of 1 would
-    prove the flag was ignored when it was merely fast."""
+    prove the flag was ignored when it was merely fast.
+
+    Requests are counted PER STAGE, so a stage's peak is its own overlap and is never
+    borrowed from the other one.
+
+    ``rendezvous`` makes that overlap deterministic instead of merely likely: the first
+    request of a stage blocks until a second one joins it, so a peak of 2 records what the
+    stage PERMITS rather than what the scheduler happened to do - a loaded box can
+    serialise the workers of a correctly parallel stage, and did, which is what made the
+    assertion flaky. The wait is latched per stage (once a stage has overlapped, nothing
+    in it waits again, so a wave of a single request costs nothing) and bounded by
+    ``_RENDEZVOUS_TIMEOUT``, so a stage that really is sequential fails its assertion
+    instead of hanging the suite."""
     import threading
     import time
 
     import cobol_xstate.cli as cli_mod
-    state = {"now": 0}
+    # prefetch asks for copybooks; fetch asks for the called programs
+    inflight = {"prefetch": 0, "fetch": 0}
+    overlapped = {"prefetch": threading.Event(), "fetch": threading.Event()}
     lock = threading.Lock()
 
     def fetch_artifact(name, type=None, copy=None):
+        slot = "prefetch" if str(type) == "copybook" else "fetch"
         with lock:
-            state["now"] += 1
-            peak["all"] = max(peak["all"], state["now"])
-            # prefetch asks for copybooks; fetch asks for the called programs
-            slot = "prefetch" if str(type) == "copybook" else "fetch"
-            peak[slot] = max(peak.get(slot, 0), state["now"])
+            inflight[slot] += 1
+            peak[slot] = max(peak.get(slot, 0), inflight[slot])
+            peak["all"] = max(peak["all"], inflight["prefetch"] + inflight["fetch"])
+            joined = inflight[slot] > 1
+        if joined:
+            # Second request in flight in this stage: release the one waiting for it, and
+            # leave the latch set so the rest of the stage runs at full speed.
+            overlapped[slot].set()
         try:
+            if rendezvous:
+                overlapped[slot].wait(_RENDEZVOUS_TIMEOUT)
             time.sleep(0.01)
             text = _JOBS_ESTATE.get(name.upper())
             if text is None:
@@ -579,7 +609,7 @@ def _peak_probe(monkeypatch, peak):
                     "source_location": f"PROD.SYSLIB({name})"}
         finally:
             with lock:
-                state["now"] -= 1
+                inflight[slot] -= 1
 
     monkeypatch.setattr(cli_mod, "load_fetcher", lambda spec: (fetch_artifact, None))
 
@@ -603,8 +633,11 @@ def test_jobs_reaches_prefetch_and_fetch_alike(tmp_path, monkeypatch):
     sequential = _all_files(out)
     shutil.rmtree(out)
 
+    # Rendezvous: each stage is HELD OPEN until a second request joins it, so "did --jobs
+    # reach this stage" is answered by what the stage allows, not by whether a busy box
+    # let two of its threads run in the same instant.
     many = {"all": 0}
-    _peak_probe(monkeypatch, many)
+    _peak_probe(monkeypatch, many, rendezvous=True)
     assert run([str(src), "--jobs", "4", "--outdir", str(out)]) == 0
     assert many["prefetch"] > 1, "--jobs never reached prefetch"
     assert many["fetch"] > 1, "--jobs never reached fetch"
