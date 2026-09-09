@@ -119,6 +119,20 @@ Source → **`Machine`** (`statechart.build_machine`) via: `normalizer` (fixed/f
 | `artifacts.py` / `dynamic_calls.py` | `artifacts` / `dynamic-calls` | Db2 tables, files, called programs it touches; and the dynamic call targets it won't name |
 | `reactive.py` | `--target reactive` | Event-driven push machine: `on` waits + `publish_*` effects = the new system's message contract |
 
+### A run has two halves and BOTH are published — `cli.py` owns neither
+
+`api.analyze(source, ...) -> Analysis` is the analysis half. `api.write_views(analysis,
+dest, *, base, targets, indent, machine_only, timer, debug) -> {name: Path}` is the write
+half: the base name (`api.artifact_base`, source stem else PROGRAM-ID), the suffix and
+fixed order per target, and the per-view error boundary — the five companions isolated, the
+bundle and the two retrieval reports not, because those are the run's product. `cli.py`
+keeps only what is genuinely its own (argv, reading files, exit codes) and calls both.
+**Never re-open a copy of the writing inside the CLI**: `mainframe-tracer` embeds this
+package and uses the published pair, and a second copy diverges from it silently — which is
+exactly what upstream ledger item 35 asked us to end. An explicit `--target` writes its
+primary itself, deliberately: that artifact IS the run, so its failure must reach the exit
+code rather than be isolated.
+
 ### `emitter.py` owns the cross-cutting primitives — reuse them, never re-implement
 
 The flat IR is walked and rewritten the same way by several views, so the shared logic lives **once** in `emitter.py` and every other view imports it. If you touch how transitions/PERFORMs/entry-runs are handled, change the primitive, not a copy:

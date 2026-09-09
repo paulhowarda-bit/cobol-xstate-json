@@ -902,6 +902,62 @@ never guessed. In Python, supply your own `parse_jcl(text, resolver=…)` or use
 `jcl_dependencies.api.analyze(...)`, which wires retrieval the way the CLI does. See
 [docs/jcl-target.md](docs/jcl-target.md).
 
+### Driving it from Python: `analyze`, then `write_views`
+
+The CLI is a front door, not the only one. `cobol_xstate.api` publishes both halves of a
+run, and the command line calls exactly these:
+
+```python
+from cobol_xstate.api import analyze, write_views
+
+analysis = analyze(source, source_name="CUSTRPT.cbl", fetcher=my_estate_client)
+written = write_views(analysis, "out/")   # {"bundle": Path("out/CUSTRPT.json"), ...}
+```
+
+`analyze(...) -> Analysis` is the **analysis half**: it retrieves, parses and models, and
+the `Analysis` it returns carries every view as a memoized builder — `.machine_json()`,
+`.lineage()`, `.business()`, `.reactive()`, `.artifacts()`, `.dynamic_calls()`, plus the
+runnable `.js_module()` / `.reactive_module()`. Its docstring documents the four explicit
+ways to reach the estate.
+
+`write_views(analysis, dest, *, base=None, targets=None, indent=2, machine_only=False,
+timer=None, debug=False) -> {name: Path}` is the **write half**: it leaves on disk exactly
+what a run leaves, under the names a run uses, and returns what it wrote.
+
+| target | file | isolated |
+|---|---|---|
+| `prefetch` | `<base>.prefetch.json` | no |
+| `fetch` | `<base>.fetch.json` | no |
+| `bundle` | `<base>.json` | no |
+| `business` | `<base>.business.json` | yes |
+| `lineage` | `<base>.lineage.json` | yes |
+| `reactive` | `<base>.reactive.json` | yes |
+| `artifacts` | `<base>.artifacts.json` | yes |
+| `dynamic-calls` | `<base>.dynamic-calls.json` | yes |
+
+- **`base`** defaults to the derivation the CLI uses: the source stem, falling back to the
+  PROGRAM-ID when the source has no usable one (stdin). It is published on its own as
+  `api.artifact_base(stem, program_id)`. Guessing `path.stem` instead differs for exactly
+  the members where it matters — `MY.PROG.cbl` would name its companions `MY.*`.
+- **`targets`** defaults to all eight, in the order above, and decides what is **computed**
+  rather than merely what is written: `targets=("bundle", "lineage")` never builds the
+  business view. An unknown name raises `ValueError`.
+- **Isolation.** The five companions are each written behind their own error boundary. One
+  that crashes is a `WARNING` naming the view; one the reactive lowering *refuses* is a
+  note, because the refusal is a fact about that program and not a failure of the run.
+  Either way the name is absent from the returned mapping and every other artifact still
+  lands. The bundle and the two retrieval reports are the run's product — a failure there
+  is the run's failure and propagates. `debug=True` re-raises everything, as `--debug` does.
+- **`machine_only`** trims the *bundle* to the machine alone (`--machine-only`); it does not
+  change the target set — pass `targets` for that.
+- **`timer`** takes a `mainframe_artifacts.profiling.StageTimer`, so an embedding caller
+  gets the same per-view `view:<name>` stages [`--timing`](#--timing) prints.
+
+Not covered: the two runnable modules. `--target js` and `--target reactive` write a `.mjs`
+whose text is `analysis.js_module()` / `.reactive_module()`, plus the decimal runtime beside
+it from `read_runtime_asset("cobolRuntime.mjs")` — three lines, with none of the naming or
+isolation logic above to reproduce.
+
 ### Beyond one program: the state axis
 
 Every target above answers *"what does this program do?"* — the **program axis**. A

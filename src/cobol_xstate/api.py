@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from cobol_parser.parse_bundle import ParseBundle, ParseBundleError
 from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
 from mainframe_artifacts.fetch import fetch_dependencies
+from mainframe_artifacts.output import write_json, write_text
 from mainframe_artifacts.prefetch import PrefetchResult
 from mainframe_artifacts.profiling import StageTimer
 
@@ -313,3 +315,160 @@ def gather(source: str, *, source_name: str = "<source>",
     return write_bundle(dest, subject_name=source_name, subject_text=source,
                         kind="cobol", prefetch=analysis.prefetch, answers=answers,
                         fetch=analysis.fetch)
+
+
+# -- the write half -----------------------------------------------------------------
+#
+# Publishing this beside analyze() is upstream ledger item 35: api.py used to publish the
+# ANALYSIS half of a run only, so a program embedding this package could reach every view
+# in memory and then had to reimplement the writing - the base-name derivation, the
+# suffix per view, and the per-view error boundary - to leave behind what a run leaves
+# behind. Reimplementing it means diverging from it silently on the next change here.
+
+#: Every artifact a default run writes, in the order it writes them.
+#:
+#: The two retrieval reports are part of a run, not a mode of it: what was fetched decides
+#: whether the machine is right, so a caller reproducing a run's output needs them.
+DEFAULT_TARGETS: Tuple[str, ...] = (
+    "prefetch", "fetch", "bundle", "business", "lineage", "reactive", "artifacts",
+    "dynamic-calls",
+)
+
+#: The filename suffix each target is written under. Every artifact of one run is built
+#: from the same base and a DISTINCT suffix, which is what keeps any one of them from
+#: landing on another's path (``tests/test_api_write_views.py`` pins the distinctness).
+_SUFFIX: Dict[str, str] = {
+    "prefetch": ".prefetch.json",
+    "fetch": ".fetch.json",
+    "bundle": ".json",
+    "business": ".business.json",
+    "lineage": ".lineage.json",
+    "reactive": ".reactive.json",
+    "artifacts": ".artifacts.json",
+    "dynamic-calls": ".dynamic-calls.json",
+}
+
+#: The two retrieval reports: a record of what the estate was asked for and what came
+#: back, written like a view but not built like one.
+_REPORTS = frozenset({"prefetch", "fetch"})
+
+#: The views written behind their own error boundary. The bundle and the two reports are
+#: the run's product - a failure there IS the failure of the run and must reach the
+#: caller - while a companion that crashes leaves the usable artifacts usable.
+#:
+#: Once the bundle is on disk the run HAS usable output and must keep saying so: a batch
+#: caller reads a failure as "no usable output" and discards the valid files it already
+#: has (the SUMPGM01 false negative - a valid bundle + lineage thrown away over a crash in
+#: a later view). A companion that CRASHES - as opposed to one the lowering REFUSES, which
+#: is handled a line above it - is therefore a loud warning naming the view and the
+#: reason, never a failure of the run.
+_ISOLATED = frozenset({"business", "lineage", "reactive", "artifacts", "dynamic-calls"})
+
+
+def artifact_base(stem: Optional[str], program_id: Optional[str] = None) -> str:
+    """The shared base name every artifact of one run is built from.
+
+    Derived from the SOURCE stem, never by chopping a written filename at its first dot -
+    a source called ``MY.PROG.cbl`` would otherwise yield companions named ``MY.*``, and
+    one called ``X.business.cbl`` would have its bundle silently overwritten by the
+    business view landing on the same path. A source with no usable stem (stdin) falls
+    back to the PROGRAM-ID, which is why this takes both.
+    """
+    return stem or program_id or "machine"
+
+
+def _source_stem(source_name: Optional[str]) -> Optional[str]:
+    """The stem to build artifact names from, or None if this source has no filename.
+
+    ``<stdin>`` and ``<source>`` are placeholders, not paths: a run reading from a pipe
+    has no stem and falls back to the PROGRAM-ID, exactly as the CLI does.
+    """
+    if not source_name or source_name.startswith("<"):
+        return None
+    return Path(source_name).stem
+
+
+def write_views(analysis: Analysis, dest, *, base: Optional[str] = None,
+                targets: Optional[Sequence[str]] = None, indent: int = 2,
+                machine_only: bool = False, timer: Optional[StageTimer] = None,
+                debug: bool = False) -> Dict[str, Path]:
+    """Write the run's artifacts for ``analysis`` into ``dest``; return ``{name: Path}``.
+
+    ``base`` defaults to the same derivation the CLI uses (the source stem, else the
+    PROGRAM-ID); ``targets`` to :data:`DEFAULT_TARGETS`, the set a default run writes. A
+    caller wanting only the bundle and lineage passes those two, and nothing else is
+    computed - the views are built here, one at a time, as each is written.
+
+    ``machine_only`` trims the BUNDLE to the machine alone (what ``--machine-only``
+    writes). It does not change the target set: pass ``targets`` for that.
+
+    Per-view failures are isolated exactly as the CLI isolates them. A companion that
+    CRASHES is a warning naming the view; a ``reactive`` view the lowering REFUSES is a
+    note, because the refusal is a fact about the program rather than a failure of the
+    run. Either way that name is absent from the returned mapping and the rest of the
+    run's artifacts are still written. The bundle and the two retrieval reports are not
+    isolated - they are the run's product, and a failure there is the run's failure.
+    ``debug=True`` re-raises instead of isolating (what ``--debug`` does).
+    """
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    if base is None:
+        base = artifact_base(_source_stem(analysis.source_name),
+                             analysis.machine.program_id)
+    wanted = DEFAULT_TARGETS if targets is None else tuple(targets)
+    unknown = [t for t in wanted if t not in _SUFFIX]
+    if unknown:
+        raise ValueError(f"unknown target(s) {', '.join(sorted(unknown))}; "
+                         f"known targets are {', '.join(DEFAULT_TARGETS)}")
+    timer = timer or StageTimer(_log, False, analysis.source_name)
+
+    # Built lazily, one per target, so `targets` really does decide what is COMPUTED and
+    # not merely what is written: the views are the expensive half of a run.
+    def _view(name: str):
+        if name == "prefetch":
+            return analysis.prefetch.report()
+        if name == "fetch":
+            return analysis.fetch
+        return getattr(analysis, name.replace("-", "_"))()
+
+    written: Dict[str, Path] = {}
+    for name in DEFAULT_TARGETS:          # a fixed order, never the caller's iteration
+        if name not in wanted:
+            continue
+        path = dest / (base + _SUFFIX[name])
+        try:
+            if name in _REPORTS:
+                # Retrieval already happened, inside analyze(); writing its record is not
+                # a view build and takes no `view:<name>` stage, so a --timing run reads
+                # the same here as it does from the CLI.
+                write_json(path, _view(name), indent)
+            else:
+                # A timing line per view: one number over six view builds, six
+                # serializations and six writes could not say which view a slow run was
+                # slow in. `views` (the CLI's total) is the sum of these.
+                with timer.stage(f"view:{name}"):
+                    if name == "bundle":
+                        write_text(path, analysis.machine_json(machine_only=machine_only,
+                                                               indent=indent) + "\n")
+                    else:
+                        write_json(path, _view(name), indent)
+        except Exception as exc:
+            if name == "reactive" and isinstance(exc, NotImplementedError):
+                # The lowering REFUSES some programs (CICS handler regions, recursive
+                # PERFORM). That is a fact about the program rather than a failure of the
+                # run, so it stays a note even under debug: there is no defect here to
+                # get a traceback for. From any other view a NotImplementedError is a
+                # defect, and takes the boundary below like any other crash.
+                _log.info(f"[{analysis.source_name}] note: no reactive view - {exc}")
+                continue
+            if debug or name not in _ISOLATED:
+                raise
+            _log.warning(f"[{analysis.source_name}] WARNING: {name} view failed "
+                         f"({type(exc).__name__}: {exc}) - the other artifacts of "
+                         f"this run are unaffected; re-run with --debug for the "
+                         f"full traceback")
+            _log.debug("companion view traceback", exc_info=True)
+            continue
+        _log.info(f"[{analysis.source_name}] wrote {path}")
+        written[name] = path
+    return written
