@@ -65,24 +65,54 @@ def test_the_rows_the_join_depends_on_are_present():
             "unnecessary, and the JCL side skips those rows")
 
 
-def test_core_has_an_opinion_about_every_kind_this_package_emits():
-    """core.fetch routes on `kind`, and there are exactly two right answers: retrieve it
-    as some type (_KIND_TYPE), or deliberately never retrieve it and say why
-    (_NEVER_FETCHABLE, which is how `caller` and `spool` are handled).
+def test_the_manifest_conforms_to_the_written_core():
+    """The manifest's row vocabulary is a real cross-package contract, and since
+    mainframe-artifacts wrote it down (upstream ledger batch 10, item 31) a producer can
+    check itself against it rather than against three packages' prose."""
+    from mainframe_artifacts.manifest import validate_manifest
 
-    A kind in NEITHER table is the dangerous case. It is not an error - the row is simply
-    skipped, and reads afterwards as an estate that had nothing.
-    """
-    from mainframe_artifacts.fetch import _KIND_TYPE, _NEVER_FETCHABLE
-
-    kinds = set()
     for name in ("sqlunld.cbl", "mqcall.cbl", "cicsinq.cbl", "banktran.cbl",
                  "db2diag.cbl", "custrpt.cbl"):
         src = (EXAMPLES / name).read_text()
         m = build_artifacts(build_machine(parse_program(src), source_name=name))
-        kinds |= {r.get("kind") for r in m["artifacts"]}
-    unrouted = {k for k in kinds if k not in _KIND_TYPE and k not in _NEVER_FETCHABLE}
+        assert validate_manifest(m) == [], name
+
+
+def test_core_has_an_opinion_about_every_kind_this_package_emits():
+    """core.fetch routes on `kind`. Five arms decide, in this order: never-fetchable
+    (_NEVER_FETCHABLE, which is how `caller` and `spool` are handled), a non-fetchable
+    classification, a dynamic row, a `file` resolved by its ddname, and finally the
+    _KIND_TYPE table.
+
+    A kind that reaches NONE of them is the dangerous case. It is not an error - the row
+    is simply skipped, and reads afterwards as an estate that had nothing.
+
+    The two tables alone are not the test: `db2-dynamic-sql` is in neither and is handled
+    correctly by the `dynamic` arm, so asserting on membership would fail a package that
+    is behaving. Asserting on the ROUTING is the honest form, and it is why this checks
+    `_request_name` rather than the dicts.
+    """
+    from mainframe_artifacts.fetch import _KIND_TYPE, _NEVER_FETCHABLE, _request_name
+
+    rows = {}
+    for name in sorted(p.name for p in EXAMPLES.glob("*.cbl")):
+        src = (EXAMPLES / name).read_text()
+        m = build_artifacts(build_machine(parse_program(src), source_name=name))
+        for row in m["artifacts"]:
+            rows.setdefault(row.get("kind"), row)
+    kinds = set(rows)
+    assert kinds, "no rows at all: the examples stopped producing a manifest"
+
+    unrouted = {k for k, row in rows.items()
+                if _request_name(row) == (None, None)
+                or (_request_name(row)[0] is None and not _request_name(row)[1])}
     assert not unrouted, (
-        f"kinds core.fetch has no opinion about: {sorted(unrouted)} - add them to "
-        f"_KIND_TYPE to retrieve them, or to _NEVER_FETCHABLE with the reason. Left in "
-        f"neither, their rows are silently skipped and read as an estate gap.")
+        f"kinds core.fetch has no opinion about: {sorted(unrouted)} - route them in "
+        f"_request_name: _KIND_TYPE to retrieve them, _NEVER_FETCHABLE with the reason, "
+        f"or an earlier arm. Reaching none, their rows are silently skipped and read as "
+        f"an estate gap.")
+
+    # Recorded so the weaker membership check is not reintroduced: these kinds are in
+    # neither table and are routed correctly by an earlier arm.
+    by_table = {k for k in kinds if k in _KIND_TYPE or k in _NEVER_FETCHABLE}
+    assert kinds - by_table == {"db2-dynamic-sql"}, sorted(kinds - by_table)
