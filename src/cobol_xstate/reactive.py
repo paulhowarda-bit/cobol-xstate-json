@@ -35,6 +35,7 @@ import copy
 import json
 from typing import Dict, List, Optional, Tuple
 
+from . import VIEW_SCHEMA_VERSION
 from . import interface as _iface
 from .errors import ReactiveLoweringError
 from .emitter import (
@@ -633,7 +634,11 @@ def build_reactive_view(machine: Machine) -> dict:
     """
     lo = _lower(machine)
     return {
-        "format": "xstate-v5-config",
+        # See business.py: `format` is a discriminator, so the three views that shared
+        # `xstate-v5-config` no longer do. The bundle keeps that name; it is the one this
+        # renderer-facing shape was named for.
+        "format": "cobol-xstate-reactive",
+        "formatVersion": VIEW_SCHEMA_VERSION,
         "metadata": {
             "program": machine.program_id,
             "source": machine.source_name,

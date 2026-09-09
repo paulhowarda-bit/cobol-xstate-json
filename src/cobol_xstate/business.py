@@ -26,6 +26,7 @@ from __future__ import annotations
 import heapq
 from typing import Dict, List, Optional, Tuple
 
+from . import VIEW_SCHEMA_VERSION
 from . import interface as _iface
 from .emitter import (
     _para_of, _target_owner, edge_target, iter_transitions,
@@ -483,7 +484,12 @@ class _BusinessView:
         config = self._as_machine(business_states, entry, transitions)
 
         return {
-            "format": "xstate-v5-config",
+            # Distinct from the default bundle's `xstate-v5-config`, which this view
+            # and the reactive one both used to declare. Three payloads with different
+            # schemas and one name meant a consumer holding a JSON object could not tell
+            # which it had (upstream ledger batch 10, item 30b).
+            "format": "cobol-xstate-business",
+            "formatVersion": VIEW_SCHEMA_VERSION,
             "metadata": {
                 "program": self.machine.program_id,
                 "source": self.machine.source_name,

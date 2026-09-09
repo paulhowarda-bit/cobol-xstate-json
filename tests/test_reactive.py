@@ -508,7 +508,7 @@ def test_perform_section_and_thru_range_are_inlined(repo_tmp):
 def test_reactive_view_is_a_drawable_machine_view():
     from cobol_xstate.reactive import build_reactive_view
     v = build_reactive_view(_machine("custrpt.cbl"))
-    assert v["format"] == "xstate-v5-config"        # same shape as the other views
+    assert v["format"] == "cobol-xstate-reactive"   # same SHAPE, its own name
     assert v["metadata"]["view"] == "reactive"
     assert v["machine"]["initial"] in v["machine"]["states"]
 

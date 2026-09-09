@@ -47,6 +47,7 @@ import re
 from collections import deque
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
+from . import VIEW_SCHEMA_VERSION
 from . import interface as _iface
 from .semantics import mask_literals
 from .business import _is_control_guard
@@ -1310,7 +1311,9 @@ class _Lineage:
             # every write site; a reader that does not check this would silently see
             # every row as unconditional, so it is stated rather than left to be
             # inferred from a missing key.
-            "formatVersion": 2,
+            # ...and now the distribution-wide VIEW_SCHEMA_VERSION, which starts at 3
+            # precisely so this view's published 2 never goes backwards.
+            "formatVersion": VIEW_SCHEMA_VERSION,
             "program": self.m.program_id,
             "source": self.m.source_name,
             "note": (

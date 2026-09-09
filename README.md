@@ -110,8 +110,11 @@ a different question, plus an account of both retrieval stages:
 | `prog.prefetch.json` | **Could we see the whole program?** Stage 1: the copybooks and control members retrieved *before* the parse, each with the library it came from. Anything absent here is a hole in every view above it — so the holes are named, not counted. |
 | `prog.fetch.json` | **Did we actually get its dependencies?** Stage 2: one row per dependency with the outcome of retrieving it — `fetched` / `prefetched` / `not-found` / `error` / `no-service` / `skipped`. The distinctions are load-bearing: `error` is fixable and is *not* evidence the artifact is absent, and `skipped` carries the reason a row was never fetchable at all. |
 
-Four of the six are things you **read or draw** (all are renderable `xstate-v5-config`, bar
-the lineage, artifact and dynamic-call tables). The **runnable** modules stay behind their own flag:
+Four of the six are things you **read or draw** (all are renderable XState v5 configs, bar
+the lineage, artifact and dynamic-call tables). Each names itself: the default bundle is
+`xstate-v5-config`, and `--target business` / `--target reactive` are
+`cobol-xstate-business` / `cobol-xstate-reactive`, so a consumer handed one JSON object can
+tell which it has. Every view also carries `formatVersion`. The **runnable** modules stay behind their own flag:
 `--target js` for the decimal-exact reference, `--target reactive` for the deployable module.
 
 **Every file a run produces goes into `--outdir`** — the bundle, all six views, both
@@ -162,6 +165,7 @@ The default output is a JSON **bundle**:
 ```jsonc
 {
   "format": "xstate-v5-config",
+  "formatVersion": 3,
   "metadata": { "program": "...", "disclaimer": "..." },
   "machine":  { "id": "...", "initial": "...", "context": { /* typed initial values */ }, "states": { ... } },
   "data":     { "WS-TOTAL": { "type": { "category": "numeric", "usage": "DISPLAY", "digits": 13, "scale": 2, "signed": false }, ... } },

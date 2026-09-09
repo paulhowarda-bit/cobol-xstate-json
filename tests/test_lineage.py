@@ -399,7 +399,8 @@ def test_the_document_declares_its_format_version():
     """A v1 reader doing `bool(row.get("conditions"))` against a v2 document sees every
     row as unconditional - a wrong answer, silently. The version is what lets it fail
     loudly instead."""
-    assert _lin("banktran.cbl")["formatVersion"] == 2
+    from cobol_xstate import VIEW_SCHEMA_VERSION
+    assert _lin("banktran.cbl")["formatVersion"] == VIEW_SCHEMA_VERSION
 
 
 def test_a_write_site_carries_the_condition_it_happens_under():
