@@ -6,6 +6,7 @@ import json
 
 from cobol_xstate.artifacts import build_artifacts
 from mainframe_artifacts.fetch import build_fetch_plan, fetch_dependencies
+from mainframe_artifacts.report import REPORT_SCHEMA_VERSION
 from cobol_xstate.parser import parse_program
 from cobol_xstate.preprocessor import CopybookResolver
 from cobol_xstate.statechart import build_machine
@@ -342,8 +343,14 @@ def test_a_control_member_is_requested_out_of_its_dataset():
 def test_report_shape_is_self_describing():
     rep = fetch_dependencies(
         _manifest("       0000-MAIN.\n           CALL 'DEMOC104'.\n"), _fetcher())
-    assert rep["format"] == "cobol-xstate-fetch"
-    assert rep["program"] == "MAINPGM"
+    # Called directly, with no producer named, it takes the neutral default rather than
+    # claiming to be any one front-end - the defect upstream ledger batch 10, item 30c
+    # reported. `subject` replaced `program`, which was the wrong noun for a job or a
+    # CICS region.
+    assert rep["format"] == "mainframe-artifacts-fetch"
+    assert rep["formatVersion"] == REPORT_SCHEMA_VERSION
+    assert "subject" in rep and "program" not in rep
+    assert rep["subject"] == "MAINPGM"
     assert "note" in rep and "counts" in rep and "errors" in rep
 
 
