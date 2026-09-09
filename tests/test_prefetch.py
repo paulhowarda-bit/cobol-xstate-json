@@ -211,7 +211,10 @@ def test_retrieved_members_are_collected_for_a_later_run(tmp_path):
 
 def test_the_report_is_self_describing():
     rep = prefetch_cobol(CALLER, _mf(), source_name="MAINPGM.cbl").report()
-    assert rep["format"] == "cobol-xstate-prefetch"
+    # No producer named -> the neutral default. This module is shared by five
+    # front-ends, so a hardcoded "cobol-xstate" here had a JCL run filing a report that
+    # claimed to be this package's (upstream ledger batch 10, item 30c).
+    assert rep["format"] == "mainframe-artifacts-prefetch"
     assert rep["source"] == "MAINPGM.cbl"
     assert rep["counts"]["fetched"] == 2
     assert "before the parse" in rep["note"]

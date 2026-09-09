@@ -26,6 +26,7 @@ from mainframe_artifacts.fetch import fetch_dependencies
 from mainframe_artifacts.prefetch import PrefetchResult
 from mainframe_artifacts.profiling import StageTimer
 
+from . import PRODUCER
 from .artifacts import build_artifacts
 from .business import build_business_view
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
@@ -228,7 +229,7 @@ def analyze(source: str, *, source_name: str = "<source>",
     with timer.stage("prefetch"):
         pre = prefetch_cobol(source, fetcher, paths=paths, dest=dest, fmt=fmt,
                              source_name=source_name, unavailable=unavailable,
-                             exts=all_exts, jobs=jobs)
+                             exts=all_exts, jobs=jobs, producer=PRODUCER)
 
     if parse is not None:
         # The replay introduces no new branch downstream: the ONE call that differs is
@@ -285,7 +286,8 @@ def analyze(source: str, *, source_name: str = "<source>",
         analysis.fetch = fetch_dependencies(art, fetcher, dest=dest,
                                             prefetched=pre.store,
                                             unavailable=unavailable,
-                                            dynamic=analysis.dynamic_calls(), jobs=jobs)
+                                            dynamic=analysis.dynamic_calls(), jobs=jobs,
+                                            producer=PRODUCER)
     return analysis
 
 
