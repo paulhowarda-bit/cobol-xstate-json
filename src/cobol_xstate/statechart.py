@@ -36,6 +36,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from mainframe_artifacts.synonyms import FROM_RESOLVER, SynonymLookup
 
+from . import VIEW_SCHEMA_VERSION
 from .analysis import CallAnalysis, analyze_calls
 from .conventions import base_table as _base_table
 from .conventions import load as _load_conventions
@@ -174,6 +175,7 @@ class Machine:
         config, charts = to_harel(self)
         return {
             "format": "xstate-v5-config",
+            "formatVersion": VIEW_SCHEMA_VERSION,
             "metadata": {
                 "program": self.program_id,
                 "source": self.source_name,

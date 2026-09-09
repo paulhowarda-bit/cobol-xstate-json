@@ -61,6 +61,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Dict, List, Optional, Tuple
 
+from . import VIEW_SCHEMA_VERSION
 from .lineage import _UNKNOWN
 from .statechart import Machine
 from .storage import field_position
@@ -491,6 +492,7 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
 
     return {
         "format": "cobol-xstate-dynamic-calls",
+        "formatVersion": VIEW_SCHEMA_VERSION,
         "program": machine.program_id,
         "source": machine.source_name,
         "note": (

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from . import VIEW_SCHEMA_VERSION
 from .classify import CATEGORY_INTERNAL, NON_FETCHABLE, classify_call_target
 from .interface import build_interface
 from .statechart import Machine
@@ -436,6 +437,7 @@ def build_artifacts(machine: Machine) -> dict:
 
     return {
         "format": "cobol-xstate-artifacts",
+        "formatVersion": VIEW_SCHEMA_VERSION,
         "program": machine.program_id,
         "source": machine.source_name,
         "note": (

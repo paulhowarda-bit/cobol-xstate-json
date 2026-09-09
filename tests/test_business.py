@@ -174,7 +174,9 @@ def test_goto_out_of_perform_is_flagged():
 
 def test_business_view_is_a_real_xstate_config():
     v = _view("banktran.cbl")
-    assert v["format"] == "xstate-v5-config"     # the renderer's schema, not a report
+    # Distinct from the bundle since ledger batch 10 item 30b: `format` is a
+    # discriminator, and three views declaring one name defeated that.
+    assert v["format"] == "cobol-xstate-business"
     m = v["machine"]
     assert m["id"] == "BANKTRAN__business"
     assert m["initial"] in m["states"]

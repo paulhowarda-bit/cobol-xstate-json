@@ -303,7 +303,7 @@ def test_the_three_views_are_each_well_formed(tmp_path):
     lineage = json.loads((d / "banktran.lineage.json").read_text(encoding="utf-8"))
     assert faithful["format"] == "xstate-v5-config"
     assert faithful["metadata"].get("view") is None
-    assert business["format"] == "xstate-v5-config"     # both are renderable machines
+    assert business["format"] == "cobol-xstate-business"   # still a renderable machine
     assert business["metadata"]["view"] == "business"
     assert lineage["format"] == "cobol-xstate-lineage"
     # the distillation is smaller than what it distils. Count LEAVES: the faithful

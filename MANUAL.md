@@ -735,8 +735,11 @@ is a deposit.*
   site under it; written inline at each, one estate program spent 2.04 GB encoding 296
   distinct predicates. Both levels are pooled once per document instead. The key is
   **absent, never empty**, so `"conditionSetId" in row` is exactly the older
-  `bool(row.get("conditions"))`; documents carry `"formatVersion": 2` so a reader that
-  predates the pools can fail loudly rather than see every row as unconditional.
+  `bool(row.get("conditions"))`; documents carry a `"formatVersion"` so a reader that
+  predates the pools can fail loudly rather than see every row as unconditional. It was
+  this view's own `2`; since ledger batch 10 it is the distribution-wide
+  `VIEW_SCHEMA_VERSION`, which starts at **3** precisely so this published number never
+  went backwards.
 - **`state` vs `baseState`**: `state` is where the row was emitted, and it can be a
   *synthetic* id — a paragraph whose folded run contains a `PERFORM` is split into
   `p__L1` / `p__L2` / `p__Lend` for this analysis, and **no other view splits that way**.
@@ -927,6 +930,8 @@ so a corpus joined on it can assert that two programs share state when they do n
 ```jsonc
 {
   "format":     "xstate-v5-config",
+  "formatVersion": 3,   // per-distribution; `--target business` and `reactive` carry
+                        // their OWN format names, cobol-xstate-business / -reactive
   "metadata":   { "program": "...", "source": "...", "generator": "...", "disclaimer": "..." },
   "machine":    { "id", "context", "states", "initial" },
   "data":       { /* typed data dictionary */ },
