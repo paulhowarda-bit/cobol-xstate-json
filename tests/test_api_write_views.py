@@ -70,13 +70,17 @@ def test_a_source_named_like_a_companion_still_leaves_a_readable_bundle(tmp_path
 
 
 def test_a_refused_reactive_view_still_leaves_the_other_artifacts(tmp_path, caplog):
-    """Their test 2: `reactive()` refusing is a fact about the program, not a failure."""
+    """Their test 2, as written: a program whose `reactive()` refuses must still leave
+    `bundle`, `lineage` and `artifacts` on disk.
+
+    The refusal is a fact about the program, not a failure of the run.
+    """
     with caplog.at_level(logging.INFO, logger="cobol_xstate.api"):
         written = write_views(_analysis(REFUSED_SOURCE, "cicsinq.cbl"), tmp_path)
     assert "reactive" not in written
     assert not (tmp_path / "cicsinq.reactive.json").exists()
-    assert written["artifacts"].exists()
-    assert written["bundle"].exists()
+    for name in ("bundle", "lineage", "artifacts"):
+        assert written[name].exists(), name
     assert any("no reactive view" in r.message for r in caplog.records)
 
 
