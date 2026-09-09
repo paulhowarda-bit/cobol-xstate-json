@@ -28,7 +28,7 @@ from mainframe_artifacts.profiling import StageTimer
 from mainframe_artifacts.report import report_stages as _report_stages
 
 from . import PACKAGE_LOGGER
-from .api import analyze, gather
+from .api import analyze, artifact_base, gather, write_views
 from .bind import JclSupportMissing
 from .bind import jcl_api as _jcl_api
 from .errors import CobolXstateError
@@ -57,12 +57,11 @@ _TARGET_EXT = {"js": ".mjs", "reactive": ".reactive.mjs",
 def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
     """The shared base name every artifact of this run is built from.
 
-    Derived from the SOURCE stem, never by chopping a written filename at its first dot -
-    a source called ``MY.PROG.cbl`` would otherwise yield companions named ``MY.*``, and
-    one called ``X.business.cbl`` would have its bundle silently overwritten by the
-    business view landing on the same path.
+    One derivation, published as ``api.artifact_base`` so an embedding caller names its
+    files the way a run names them instead of guessing at ``path.stem`` - which differs
+    for exactly the members where it matters (upstream ledger item 35).
     """
-    return default_stem or program_id or "machine"
+    return artifact_base(default_stem, program_id)
 
 
 def _resolve_out_path(args, base: str, run_dir: Path) -> Path:
@@ -394,99 +393,20 @@ def _run(args, timing_sink=None) -> int:
     base = _artifact_base(args, default_stem, machine.program_id)
     out_path = _resolve_out_path(args, base, run_dir)
 
-    # Always write UTF-8 explicitly: the platform default (cp1252 on Windows) cannot
-    # encode the runtime's non-ASCII text, and JSON/JS artifacts must be portable.
-    def _write(path: Path, text: str) -> None:
-        path.write_text(text, encoding="utf-8")
+    # Which companions this run writes. The five are opt-out-able one by one, and
+    # --machine-only takes all of them - the flags decide the TARGET SET, and everything
+    # about how each one is named, ordered and isolated lives in api.write_views, which
+    # an embedding caller reaches too (upstream ledger item 35).
+    opted_out = {"business": args.no_business, "lineage": args.no_lineage,
+                 "reactive": args.no_reactive, "artifacts": args.no_artifacts,
+                 "dynamic-calls": args.no_dynamic_calls}
+    companions = () if args.machine_only else tuple(
+        name for name in ("business", "lineage", "reactive", "artifacts", "dynamic-calls")
+        if not opted_out[name])
 
-    import json as _json
-
-    def _companion_safe(view_name: str, writer, beside: Path) -> None:
-        """Run one companion-view writer behind its own error boundary.
-
-        Once the PRIMARY artifact is on disk the run has usable output, and the exit
-        code must keep saying so: a batch caller reads non-zero as "no usable output"
-        and discards the valid files it already has (the SUMPGM01 false negative - a
-        valid bundle + lineage thrown away over a crash in a later view). A companion
-        that CRASHES - as opposed to refusing, which each writer already handles - is
-        therefore a loud WARNING naming the view and the reason, never a changed exit
-        code. --debug still gets the raw traceback, same contract as the top-level
-        boundary in run()."""
-        try:
-            # Its own timing line: `views` below is the total, and one number over six
-            # view builds, six serializations and six writes could not say which view
-            # a slow run was slow in.
-            with timer.stage(f"view:{view_name}"):
-                writer(beside)
-        except Exception as exc:
-            if args.debug:
-                raise
-            _log.warning(f"[{source_name}] WARNING: {view_name} view failed "
-                         f"({type(exc).__name__}: {exc}) - the other artifacts of "
-                         f"this run are unaffected; re-run with --debug for the "
-                         f"full traceback")
-            _log.debug("companion view traceback", exc_info=True)
-
-    def _companion(beside: Path, suffix: str, obj) -> None:
-        path = beside.with_name(base + suffix)
-        if path == beside:
-            # Refuse to write a companion over the artifact we just wrote. Reachable
-            # only for a source whose own name ends in a companion suffix; losing the
-            # bundle silently is far worse than an odd filename.
-            path = beside.with_name(base + ".view" + suffix)
-            _log.info(f"[{source_name}] note: companion would collide with {beside.name}; "
-                  f"writing {path.name} instead")
-        _write(path, _json.dumps(obj, indent=args.indent) + "\n")
-        _log.info(f"[{source_name}] wrote {path}")
-
-    def _write_lineage_companion(beside: Path) -> None:
-        """The field-lineage table travels with any machine view: the rows reference the
-        machine's events and fields, so the two are read together."""
-        if args.machine_only or args.no_lineage:
-            return
-        _companion(beside, ".lineage.json", analysis.lineage())
-
-    def _write_business_companion(beside: Path) -> None:
-        """The business distillation: the same machine with scaffolding collapsed. It is
-        the view a human reads, so a default run produces it beside the faithful one."""
-        if args.machine_only or args.no_business:
-            return
-        _companion(beside, ".business.json", analysis.business())
-
-    def _write_artifacts_companion(beside: Path) -> None:
-        """The related-artifact manifest: the Db2 tables, files, called programs and
-        queues this program touches, each with the resolution chain its program-local
-        name still needs. A logistics view of the same boundary the interface recovers.
-        With --bind-jcl, file rows carry the dataset their ddname resolves to."""
-        if args.machine_only or args.no_artifacts:
-            return
-        _companion(beside, ".artifacts.json", analysis.artifacts())
-
-    def _write_dynamic_companion(beside: Path) -> None:
-        """The true dynamic calls: targets this program does NOT name, and the artifact
-        that does. Written even when empty - "this program has no unresolvable dynamic
-        calls" is a real and reassuring answer, and its absence would be ambiguous
-        between that and the view not having run."""
-        if args.machine_only or args.no_dynamic_calls:
-            return
-        _companion(beside, ".dynamic-calls.json", analysis.dynamic_calls())
-
-    def _write_reactive_companion(beside: Path) -> None:
-        """The event-driven view: the machine the modernized system is built from.
-
-        The reactive lowering REFUSES some programs (CICS handler regions, recursive
-        PERFORM). On a default run that must not take the other views down with it - the
-        refusal is a fact about this program, not a failure of the run. Say so and carry
-        on; `--target reactive` is where a hard error belongs.
-        """
-        if args.machine_only or args.no_reactive:
-            return
-        try:
-            view = analysis.reactive()
-        except NotImplementedError as exc:
-            _log.info(f"[{source_name}] note: no reactive view - {exc}")
-            return
-        _companion(beside, ".reactive.json", view)
+    def _write_views(targets) -> None:
+        write_views(analysis, run_dir, base=base, targets=targets, indent=args.indent,
+                    machine_only=args.machine_only, timer=timer, debug=args.debug)
 
     # Both retrieval stages already ran, inside analyze(): retrieving what this program
     # depends on is not a mode of the tool, it is what the tool does.
@@ -494,22 +414,24 @@ def _run(args, timing_sink=None) -> int:
     # decides whether the machine is right, so skipping it to save two files would be
     # backwards.
     if not args.machine_only:
-        for suffix, obj in ((".prefetch.json", pre.report()), (".fetch.json", report)):
-            path = out_path.with_name(f"{base}{suffix}")
-            _write(path, _json.dumps(obj, indent=args.indent) + "\n")
-            _log.info(f"[{source_name}] wrote {path}")
+        _write_views(("prefetch", "fetch"))
     _report_stages(_log, source_name, pre, report)
 
     _t_views = timer.start()
     if args.target in ("business", "lineage", "artifacts"):
+        # An explicit --target is the PRODUCT of the run, so it is written here and not
+        # through write_views: a crash building it is the run failing, not one view of
+        # several failing, and it must reach the exit code.
         with timer.stage(f"view:{args.target}"):
             obj = (analysis.lineage() if args.target == "lineage"
                    else analysis.artifacts() if args.target == "artifacts"
                    else analysis.business())
-            _write(out_path, _json.dumps(obj, indent=args.indent) + "\n")
+            write_json(out_path, obj, args.indent)
         _log.info(f"[{source_name}] wrote {out_path}")
-        if args.target == "business":
-            _companion_safe("lineage", _write_lineage_companion, out_path)
+        # The field-lineage table travels with any machine view: the rows reference the
+        # machine's events and fields, so the two are read together.
+        if args.target == "business" and "lineage" in companions:
+            _write_views(("lineage",))
     elif args.target in ("js", "reactive"):
         try:
             with timer.stage(f"view:{args.target}"):
@@ -520,43 +442,34 @@ def _run(args, timing_sink=None) -> int:
             # reason, not a traceback. The refusal is a fact about the program.
             _log.error(f"error: {exc}")
             return 3
-        _write(out_path, text)
+        write_text(out_path, text)
         # The emitted module imports ./cobolRuntime.mjs, so the runtime must land beside
         # it. It ships as package data; a missing asset means a broken install and raises
         # rather than emitting a dangling import.
         runtime_dst = out_path.parent / "cobolRuntime.mjs"
-        _write(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
+        write_text(runtime_dst, read_runtime_asset("cobolRuntime.mjs"))
         _log.info(f"[{source_name}] wrote {out_path}")
         _log.info(f"[{source_name}] wrote {runtime_dst}")
         # The reactive machine is the one you most want to LOOK at - its waits and
         # publishes are the new system's message contract - so it gets a drawable JSON
-        # beside the runnable module, like every other machine view.
+        # beside the runnable module, like every other machine view. Written here rather
+        # than through write_views for the same reason as the primary above: on an
+        # explicit --target reactive it is part of the product.
         if args.target == "reactive":
             view = out_path.with_name(base + ".reactive.json")
-            _write(view, _json.dumps(analysis.reactive(),
-                                     indent=args.indent) + "\n")
+            write_json(view, analysis.reactive(), args.indent)
             _log.info(f"[{source_name}] wrote {view}")
     else:
-        with timer.stage("view:bundle"):
-            text = analysis.machine_json(machine_only=args.machine_only,
-                                         indent=args.indent)
-            _write(out_path, text + "\n")
-        _log.info(f"[{source_name}] wrote {out_path}")
         # A plain run yields the six JSON views of one program, each answering a
         # different question: the faithful machine (what it does), the business
         # distillation (which steps matter), the lineage table (where each field's value
         # came from), the reactive machine (what replaces it), the related artifacts
         # (what else it touches), and the dynamic calls (what it invokes but will not
         # name). All are things you READ or DRAW - the runnable modules stay behind their
-        # own --target. Each is opt-out-able, and each runs behind _companion_safe:
-        # the bundle above is already usable output, so a crash in one view is a
+        # own --target. Each is opt-out-able, and each runs behind write_views' own
+        # boundary: the bundle is already usable output, so a crash in one view is a
         # warning about that view, not a failure of the run.
-        _companion_safe("business", _write_business_companion, out_path)
-        _companion_safe("lineage", _write_lineage_companion, out_path)
-        _companion_safe("reactive", _write_reactive_companion, out_path)
-        _companion_safe("artifacts", _write_artifacts_companion, out_path)
-        _companion_safe("dynamic-calls", _write_dynamic_companion, out_path)
-
+        _write_views(("bundle",) + companions)
     timer.since("views", _t_views)
 
     def _summary() -> None:
