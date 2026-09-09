@@ -64,6 +64,9 @@ class Analysis:
 
     _art: Optional[dict] = field(default=None, repr=False)
     _dyn: Optional[dict] = field(default=None, repr=False)
+    _lin: Optional[dict] = field(default=None, repr=False)
+    _bus: Optional[dict] = field(default=None, repr=False)
+    _rea: Optional[dict] = field(default=None, repr=False)
 
     # -- the views ----------------------------------------------------------
     def _dynamic_from(self, manifest: dict) -> dict:
@@ -95,15 +98,34 @@ class Analysis:
         return self._dynamic_from(self.artifacts())
 
     def lineage(self) -> dict:
-        return build_lineage(self.machine)
+        """Field-level dataflow: (external event, field) -> origin event and guards.
+
+        The fixpoint underneath is already memoized on the Machine, so this guard buys
+        object identity rather than time - which is what a caller holding the view both
+        to write it and to load it back actually needs."""
+        if self._lin is None:
+            self._lin = build_lineage(self.machine)
+        return self._lin
 
     def business(self) -> dict:
-        return build_business_view(self.machine)
+        """Scaffolding collapsed to boundary, decision and calculation states.
+
+        The only one of the three that genuinely recomputed end to end: it builds a fresh
+        _BusinessView every call, over a Machine-cached interface."""
+        if self._bus is None:
+            self._bus = build_business_view(self.machine)
+        return self._bus
 
     def reactive(self) -> dict:
         """May raise ``ReactiveLoweringError`` (a ``NotImplementedError``): the lowering
-        refuses some programs, which is a fact about the program, not a failure."""
-        return build_reactive_view(self.machine)
+        refuses some programs, which is a fact about the program, not a failure.
+
+        Cached on success only. A refusal leaves the field None and so re-raises on every
+        call, which is correct: the refusal is a property of the program, not a failure
+        to be remembered."""
+        if self._rea is None:
+            self._rea = build_reactive_view(self.machine)
+        return self._rea
 
     def machine_json(self, *, machine_only: bool = False, indent: int = 2) -> str:
         return self.machine.to_json(machine_only=machine_only, indent=indent)
