@@ -116,3 +116,19 @@ def test_core_has_an_opinion_about_every_kind_this_package_emits():
     # neither table and are routed correctly by an earlier arm.
     by_table = {k for k in kinds if k in _KIND_TYPE or k in _NEVER_FETCHABLE}
     assert kinds - by_table == {"db2-dynamic-sql"}, sorted(kinds - by_table)
+
+
+def test_every_kind_this_package_emits_is_in_the_shared_vocabulary():
+    """The kind words live in ``mainframe_artifacts.kinds``, and this package assigns them.
+
+    Core has to be able to say which kinds are legal without importing a front-end -
+    ``fetch`` keys its retrieval type on kind, and ``DependentsResolver`` has to refuse a
+    dependents row whose kind has nowhere to attach. That only works while the classifier
+    here and the vocabulary there agree, so the agreement is pinned rather than assumed.
+    """
+    from mainframe_artifacts.kinds import MANIFEST_KINDS
+
+    from cobol_xstate.artifacts import _CLASS
+
+    emitted = {spec["kind"] for spec in _CLASS.values()}
+    assert emitted <= MANIFEST_KINDS, sorted(emitted - MANIFEST_KINDS)
