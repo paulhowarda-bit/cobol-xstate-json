@@ -19,10 +19,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (Any, Callable, Dict, List, Mapping, Optional, Sequence,
+                    Tuple)
 
 from cobol_parser.parse_bundle import ParseBundle, ParseBundleError
-from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
+from mainframe_artifacts.bundle import (EstateBundle, recording_dependents_resolver,
+                                        recording_fetcher, write_bundle)
+from mainframe_artifacts.dependents import DependentsLookup
 from mainframe_artifacts.fetch import fetch_dependencies
 from mainframe_artifacts.output import write_json, write_text
 from mainframe_artifacts.prefetch import PrefetchResult
@@ -31,6 +34,7 @@ from mainframe_artifacts.profiling import StageTimer
 from . import PRODUCER
 from .artifacts import build_artifacts
 from .business import build_business_view
+from .dependents import build_dependents
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
 from .emitter import emit_setup_module
 from .lineage import build_lineage
@@ -65,11 +69,17 @@ class Analysis:
     #: Members the estate could not supply during the parse itself (see CopybookResolver).
     copybook_errors: Sequence[Tuple[str, str]] = ()
 
+    #: What the estate says depends on this program - None when the run opened neither
+    #: door, and then :meth:`dependents` is None too, because "nobody told us" is not
+    #: "nothing calls this program".
+    dependents_lookup: Optional[Any] = None
+
     _art: Optional[dict] = field(default=None, repr=False)
     _dyn: Optional[dict] = field(default=None, repr=False)
     _lin: Optional[dict] = field(default=None, repr=False)
     _bus: Optional[dict] = field(default=None, repr=False)
     _rea: Optional[dict] = field(default=None, repr=False)
+    _dep: Optional[dict] = field(default=None, repr=False)
 
     # -- the views ----------------------------------------------------------
     def _dynamic_from(self, manifest: dict) -> dict:
@@ -130,6 +140,24 @@ class Analysis:
             self._rea = build_reactive_view(self.machine)
         return self._rea
 
+    def dependents(self) -> Optional[dict]:
+        """What the estate says calls this program, or ``None`` if nobody was asked.
+
+        The reverse of every other view here, and the question this package has always
+        had a placeholder for: the ``caller`` row in :meth:`artifacts` says who invokes
+        this program is "not a member that can be retrieved by this name". This is where
+        that answer lands when a host can supply it.
+
+        ``None`` rather than an empty view, and nothing is written at all in that case:
+        an empty answer reads as "nothing in the estate calls this program", which is a
+        claim a run that opened no door has no basis for.
+        """
+        if self.dependents_lookup is None or not self.dependents_lookup.supplied:
+            return None
+        if self._dep is None:
+            self._dep = build_dependents(self.machine, self.dependents_lookup)
+        return self._dep
+
     def machine_json(self, *, machine_only: bool = False, indent: int = 2) -> str:
         return self.machine.to_json(machine_only=machine_only, indent=indent)
 
@@ -171,6 +199,8 @@ def analyze(source: str, *, source_name: str = "<source>",
             jcl: Sequence[Tuple[str, Any]] = (),
             synonyms: Optional[Dict[str, str]] = None,
             synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
+            dependents: Optional[Mapping[str, Sequence[dict]]] = None,
+            dependents_resolver: Optional[Callable[..., Any]] = None,
             timer: Optional[StageTimer] = None) -> Analysis:
     """Retrieve, parse and model one COBOL program.
 
@@ -218,6 +248,8 @@ def analyze(source: str, *, source_name: str = "<source>",
         # report says what the gather run's said rather than claiming a healthy estate
         # the gather run never had.
         fetcher = bundle.fetcher()
+        if dependents_resolver is None and bundle.has_dependents():
+            dependents_resolver = bundle.dependents()
         unavailable = unavailable or bundle.unavailable
     elif not retrieve:
         fetcher = None
@@ -276,9 +308,16 @@ def analyze(source: str, *, source_name: str = "<source>",
             bind_jobs = _bind(jcl, fetcher=fetcher, paths=paths, dest=dest, result=pre,
                               unavailable=unavailable, jobs=jobs)
 
+    reverse = (DependentsLookup(dependents, dependents_resolver)
+               if (dependents or dependents_resolver is not None) else None)
     analysis = Analysis(machine=machine, program=program, prefetch=pre,
                         source_name=source_name, bind_jobs=tuple(bind_jobs),
-                        copybook_errors=copybook_errors)
+                        copybook_errors=copybook_errors, dependents_lookup=reverse)
+    if reverse is not None:
+        # Built here rather than at write time: building it is what ASKS the host, the
+        # point of need is the run, and a gather run has to make the asks to record them.
+        with timer.stage("dependents"):
+            analysis.dependents()
 
     # STAGE 2. Unconditional: retrieving what this program depends on is not a mode of
     # the tool, it is what the tool does.
@@ -299,7 +338,9 @@ def gather(source: str, *, source_name: str = "<source>",
            paths: Sequence[str] = (), exts: Sequence[str] = (),
            dest: str, jobs: int = 1,
            unavailable: Optional[str] = None,
-           timer: Optional[StageTimer] = None) -> str:
+           timer: Optional[StageTimer] = None,
+           dependents: Optional[Mapping[str, Sequence[dict]]] = None,
+           dependents_resolver: Optional[Callable[..., Any]] = None) -> str:
     """Run the retrieval half where the estate is reachable, and keep what came off it.
 
     Both stages run - stage 2's plan needs the parse - but no view is written: the
@@ -307,14 +348,20 @@ def gather(source: str, *, source_name: str = "<source>",
     model from. Returns the path to the bundle manifest.
     """
     recorder, answers = recording_fetcher(fetcher) if fetcher is not None else (None, [])
+    # A dependents lookup is gathered the same way, and for the same reason: the index is
+    # as unreachable from the modelling box as the estate is, so without recording it the
+    # reverse direction would be the one view an offline run could not reproduce.
+    reverse, reverse_answers = (recording_dependents_resolver(dependents_resolver)
+                                if dependents_resolver is not None else (None, []))
     # The timer goes through: a --gather-only --timing run used to report nothing,
     # because the analysis inside built its own disabled timer.
     analysis = analyze(source, source_name=source_name, fmt=fmt, fetcher=recorder,
                        paths=paths, exts=exts, dest=dest, jobs=jobs,
-                       unavailable=unavailable, timer=timer)
+                       unavailable=unavailable, timer=timer, dependents=dependents,
+                       dependents_resolver=reverse)
     return write_bundle(dest, subject_name=source_name, subject_text=source,
                         kind="cobol", prefetch=analysis.prefetch, answers=answers,
-                        fetch=analysis.fetch)
+                        fetch=analysis.fetch, dependents=reverse_answers)
 
 
 # -- the write half -----------------------------------------------------------------
@@ -331,7 +378,7 @@ def gather(source: str, *, source_name: str = "<source>",
 #: whether the machine is right, so a caller reproducing a run's output needs them.
 DEFAULT_TARGETS: Tuple[str, ...] = (
     "prefetch", "fetch", "bundle", "business", "lineage", "reactive", "artifacts",
-    "dynamic-calls",
+    "dynamic-calls", "dependents",
 )
 
 #: The filename suffix each target is written under. Every artifact of one run is built
@@ -346,6 +393,7 @@ _SUFFIX: Dict[str, str] = {
     "reactive": ".reactive.json",
     "artifacts": ".artifacts.json",
     "dynamic-calls": ".dynamic-calls.json",
+    "dependents": ".dependents.json",
 }
 
 #: The two retrieval reports: a record of what the estate was asked for and what came
@@ -362,7 +410,8 @@ _REPORTS = frozenset({"prefetch", "fetch"})
 #: a later view). A companion that CRASHES - as opposed to one the lowering REFUSES, which
 #: is handled a line above it - is therefore a loud warning naming the view and the
 #: reason, never a failure of the run.
-_ISOLATED = frozenset({"business", "lineage", "reactive", "artifacts", "dynamic-calls"})
+_ISOLATED = frozenset({"business", "lineage", "reactive", "artifacts", "dynamic-calls",
+                       "dependents"})
 
 
 def artifact_base(stem: Optional[str], program_id: Optional[str] = None) -> str:
@@ -446,6 +495,12 @@ def write_views(analysis: Analysis, dest, *, base: Optional[str] = None,
                 # A timing line per view: one number over six view builds, six
                 # serializations and six writes could not say which view a slow run was
                 # slow in. `views` (the CLI's total) is the sum of these.
+                if name == "dependents" and analysis.dependents() is None:
+                    # Nobody was asked, so nothing is said - not even an empty file. This
+                    # is the whole point of the dependents contract, and it is also what
+                    # keeps a run that opens no door byte-identical to what it always
+                    # wrote: the target is in DEFAULT_TARGETS, and produces no artifact.
+                    continue
                 with timer.stage(f"view:{name}"):
                     if name == "bundle":
                         write_text(path, analysis.machine_json(machine_only=machine_only,

@@ -14,7 +14,8 @@ from typing import List, Optional
 from mainframe_artifacts.artifact_service import decode_member, load_fetcher
 from mainframe_artifacts.bundle import open_bundle
 from mainframe_artifacts.cliargs import (add_logging_args, add_output_args,
-                                       add_retrieval_args, add_synonym_args,
+                                       add_dependents_args, add_retrieval_args,
+                                       add_synonym_args, dependents_lookup,
                                        jobs as _jobs, synonym_lookup)
 from mainframe_artifacts.detect import looks_like_jcl as _looks_like_jcl
 from cobol_parser import PACKAGE_LOGGER as PARSE_LOGGER
@@ -111,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     # the base table's DECLARE TABLE / DCLGEN column order through it, and its column
     # mappings are then stamped with the BASE table name.
     add_synonym_args(p)
+    add_dependents_args(p)
     p.add_argument("--from-parse", metavar="FILE",
                    help="model from a parse bundle written upfront by cobol-parser, "
                         "skipping the parse entirely. The bundle records the sha256 of "
@@ -318,6 +320,13 @@ def _run(args, timing_sink=None) -> int:
     synonyms = lookup.mapping if lookup is not None else None
     synonym_resolver = lookup.resolver if lookup is not None else None
 
+    reverse, why_dependents = dependents_lookup(args)
+    if why_dependents:
+        _log.error(f"error: {why_dependents}")
+        return 2
+    dependents = reverse.mapping if reverse is not None else None
+    dependents_resolver = reverse.resolver if reverse is not None else None
+
     bundle = None
     if args.from_bundle:
         try:
@@ -361,7 +370,9 @@ def _run(args, timing_sink=None) -> int:
         gathered = gather(source, source_name=source_name, fmt=_format(args.format),
                           fetcher=fetcher, paths=search_paths,
                           exts=tuple(args.copybook_ext), dest=args.gather_only,
-                          unavailable=why, jobs=_jobs(args), timer=timer)
+                          unavailable=why, jobs=_jobs(args), timer=timer,
+                          dependents=dependents,
+                          dependents_resolver=dependents_resolver)
         _log.info(f"[{source_name}] wrote estate bundle {gathered}")
         _log.info(f"[{source_name}] model from it with: --from-bundle "
                   f"{args.gather_only}")
@@ -375,6 +386,8 @@ def _run(args, timing_sink=None) -> int:
                            jobs=_jobs(args), jcl=jcl_sources, timer=timer,
                            bundle=bundle, parse=parse, synonyms=synonyms,
                            synonym_resolver=synonym_resolver,
+                           dependents=dependents,
+                           dependents_resolver=dependents_resolver,
                            retrieve=not args.no_fetch)
     except JclSupportMissing as exc:
         _log.error(f"error: {exc}")
@@ -397,11 +410,16 @@ def _run(args, timing_sink=None) -> int:
     # --machine-only takes all of them - the flags decide the TARGET SET, and everything
     # about how each one is named, ordered and isolated lives in api.write_views, which
     # an embedding caller reaches too (upstream ledger item 35).
+    #
+    # `dependents` has no opt-out flag and needs none: it is written when a dependents
+    # door was opened and not otherwise, so the flag that decides it is the one that
+    # supplied the answer. --machine-only still takes it, like every other companion.
     opted_out = {"business": args.no_business, "lineage": args.no_lineage,
                  "reactive": args.no_reactive, "artifacts": args.no_artifacts,
-                 "dynamic-calls": args.no_dynamic_calls}
+                 "dynamic-calls": args.no_dynamic_calls, "dependents": False}
     companions = () if args.machine_only else tuple(
-        name for name in ("business", "lineage", "reactive", "artifacts", "dynamic-calls")
+        name for name in ("business", "lineage", "reactive", "artifacts",
+                          "dynamic-calls", "dependents")
         if not opted_out[name])
 
     def _write_views(targets) -> None:

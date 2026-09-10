@@ -62,6 +62,7 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 | The business-level story, scaffolding removed | `--target business` |
 | Which event is responsible for each field | `--target lineage` |
 | What other artifacts (tables, files, programs) it touches | `--target artifacts` |
+| What in the estate calls THIS program | `--dependents-map` / `--dependents-resolver` (a host must supply it) |
 
 ---
 
@@ -148,6 +149,7 @@ cobol-xstate [-h] [--outdir DIR]
              [--copybook-fetcher MODULE:FUNC]
              [--gather-only DIR] [--from-bundle DIR] [--from-parse FILE] [--no-fetch]
              [--synonym-map FILE] [--synonym-resolver MODULE:FUNC]
+             [--dependents-map FILE] [--dependents-resolver MODULE:FUNC]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
              [--no-dynamic-calls] [--bind-jcl FILE]
              [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
@@ -399,6 +401,48 @@ file if fetched blindly:
 In Python, `fetch_dependencies(manifest, fetcher, dest=...)` from
 `mainframe_artifacts.fetch`; `build_fetch_plan(manifest)` returns the same plan without
 making any calls, so you can review it before hitting a service.
+
+### `--dependents-map FILE` / `--dependents-resolver MODULE:FUNC`
+
+**The reverse direction, and the only view here whose rows are not a reading of the
+COBOL.** Every other output answers *what does this program name?* — which is what a
+program's own source can support. *What calls this program* cannot be derived from it at
+all: which jobs run it, which modules `CALL` it, which CICS transaction is defined to
+start it are facts about the estate, held in an index only the host can read. So they
+arrive through a door, exactly as Db2 synonym knowledge does, and are never guessed.
+
+`--dependents-map file.json` is a JSON object keyed `"NAME|KIND"` whose values are lists
+of dependents rows:
+
+```json
+{"CUSTRPT|program": [{"name": "RPTJOB", "kind": "JOB", "via": "EXEC PGM=CUSTRPT",
+                      "match_strength": "qualified", "detail": "step RPT runs it"}]}
+```
+
+An entry may be an **empty list**, and that is a deliberate statement — *asked, and
+nothing depends on this*. A name the file does not mention says **nothing at all**. Those
+are different answers and the view keeps them apart, so an exporter must write the empty
+entries rather than omit them.
+
+`--dependents-resolver MODULE:FUNC` names a callable `FUNC(name, kind=...)` asked at the
+point of need, returning the rows the index holds, an empty sequence when it was asked
+and nothing depends on the artifact, or `None` when the artifact is outside what the
+index covers. A lookup that **raises** has failed: it is flagged, not asked again, and
+never read as "nothing depends on it". The map wins when both are given, the same
+precedence as the synonym doors. In Python they are
+`analyze(dependents=, dependents_resolver=)`.
+
+A row is validated against the declared shape — `name`, `kind` (from the shared artifact
+kind vocabulary, or a host spelling that reduces into it), `via`, `match_strength`
+(`qualified` / `schema-unconstrained` / `bare`, its own field), `detail` — and one that
+does not fit is refused with the reason recorded. A field the host invents is dropped
+rather than passed through. A capped answer carries `truncated` with the true `total`.
+
+**Supply neither and nothing changes.** `<base>.dependents.json` is written only when a
+door was opened; there is no empty file and no `null` key anywhere, because an empty
+dependents view would claim nothing in the estate calls this program. A `--gather-only`
+run records what the lookup answered into the bundle and `--from-bundle` replays it, so
+the reverse direction is as reproducible off the network as everything else here.
 
 ### `--no-fetch`
 

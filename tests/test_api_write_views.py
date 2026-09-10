@@ -35,12 +35,27 @@ def _analysis(source: str = SOURCE, name: str = "custrpt.cbl"):
 
 def test_a_default_run_s_artifacts_are_all_written(tmp_path):
     written = write_views(_analysis(), tmp_path)
-    assert tuple(written) == DEFAULT_TARGETS          # a fixed order, not a set's
+    # Every target in its fixed order, not a set's - except `dependents`, which a run
+    # nobody supplied a lookup to does not write AT ALL. That is the contract: an empty
+    # dependents view would claim nothing in the estate calls this program.
+    assert tuple(written) == tuple(t for t in DEFAULT_TARGETS if t != "dependents")
     for name, path in written.items():
         assert path.exists(), name
         json.loads(path.read_text(encoding="utf-8"))  # every one of them is readable
     assert written["bundle"] == tmp_path / "custrpt.json"
     assert written["dynamic-calls"] == tmp_path / "custrpt.dynamic-calls.json"
+    assert not (tmp_path / "custrpt.dependents.json").exists()
+
+
+def test_a_supplied_lookup_writes_the_dependents_view_in_its_place(tmp_path):
+    """...and with a door open it is written, in DEFAULT_TARGETS order."""
+    analysis = analyze(SOURCE, source_name="custrpt.cbl", retrieve=False,
+                       dependents={"CUSTRPT|program": [{"name": "RPTJOB",
+                                                        "kind": "JOB"}]})
+    written = write_views(analysis, tmp_path)
+    assert tuple(written) == DEFAULT_TARGETS
+    view = json.loads(written["dependents"].read_text(encoding="utf-8"))
+    assert view["provides"][0]["dependents"][0]["name"] == "RPTJOB"
 
 
 def test_every_target_has_a_distinct_suffix():

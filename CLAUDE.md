@@ -118,6 +118,7 @@ Source → **`Machine`** (`statechart.build_machine`) via: `normalizer` (fixed/f
 | `business.py` | `--target business` | Scaffolding collapsed to boundary/decision/calculation states |
 | `artifacts.py` / `dynamic_calls.py` | `artifacts` / `dynamic-calls` | Db2 tables, files, called programs it touches; and the dynamic call targets it won't name |
 | `reactive.py` | `--target reactive` | Event-driven push machine: `on` waits + `publish_*` effects = the new system's message contract |
+| `dependents.py` | `dependents` (only when a host supplies one) | The REVERSE direction: what the estate says calls this program. The one view whose rows are not a reading of the COBOL, so it is never merged into another, and absent entirely when no lookup was given |
 
 ### A run has two halves and BOTH are published — `cli.py` owns neither
 
@@ -144,6 +145,24 @@ The flat IR is walked and rewritten the same way by several views, so the shared
 ### Core principle: no invented logic; flag, never guess
 
 Every state/guard/action expression is a faithful translation of the COBOL its `provenance` entry points to. Anything whose behavior rides on runtime data (dynamic `CALL`, `ALTER`, byte-reinterpreting `REDEFINES`, un-parseable conditions → `{op:'raw'}`, opaque `STRING`/`INSPECT` effects) is **drawn if its shape is static, then added to `flags`** — never smoothed over. A raw-condition fallback *always* emits a flag. When editing, preserve this: if a construct can't be pinned statically, flag it rather than emitting something plausibly wrong.
+
+### The reverse direction arrives through a door, or not at all
+
+`--dependents-map` / `--dependents-resolver` (`analyze(dependents=, dependents_resolver=)`)
+carry what the estate says depends on this program — the half its source cannot contain.
+The contract lives in `mainframe_artifacts.dependents` (`DependentsResolver` +
+`DependentsLookup`) and the kind vocabulary rows are validated against lives in
+`mainframe_artifacts.kinds`; `tests/test_manifest_contract.py` pins that every kind
+`artifacts._CLASS` assigns is in it.
+
+**Three answers, and collapsing any two of them is the bug this exists to prevent.**
+`Analysis.dependents()` is `None` when no door was opened — and then `write_views` writes
+NO file, which is what keeps an unsupplied run byte-identical; an empty `dependents` list
+on a name means the index was asked and nothing depends on it; a name under `unanswered`
+means neither. The manifest's `caller` row is deliberately left as it was: it says the
+answer is not a retrievable member, and this view is where the answer lands, kept apart
+because every manifest row traces to the COBOL its provenance names and these rows trace
+to an index.
 
 ### Two-stage dependency retrieval, and the JCL axis
 

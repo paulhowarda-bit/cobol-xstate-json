@@ -657,3 +657,31 @@ def test_jobs_zero_means_do_not_overlap_rather_than_failing(tmp_path, monkeypatc
     _peak_probe(monkeypatch, peak)
     assert run([str(src), "--jobs", "0", "--outdir", str(tmp_path / "zero")]) == 0
     assert peak["all"] == 1
+
+
+# --- the dependents doors -----------------------------------------------------------
+
+def test_a_default_run_writes_no_dependents_view(tmp_path):
+    """Nobody was asked, so nothing is said - not even an empty file."""
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path), "-q", "--no-fetch"]) == 0
+    assert not list(_run_dir(tmp_path).glob("*.dependents.json"))
+
+
+def test_a_dependents_map_is_written_as_its_own_view(tmp_path):
+    dep = tmp_path / "dependents.json"
+    dep.write_text(json.dumps({
+        "BANKTRAN|program": [{"name": "TRANJOB", "kind": "JOB",
+                              "via": "EXEC PGM=BANKTRAN",
+                              "match_strength": "qualified"}]}), encoding="utf-8")
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path), "-q", "--no-fetch",
+                "--dependents-map", str(dep)]) == 0
+    written = list(_run_dir(tmp_path).glob("*.dependents.json"))
+    assert len(written) == 1
+    view = json.loads(written[0].read_text(encoding="utf-8"))
+    assert view["format"] == "cobol-xstate-dependents"
+    assert view["provides"][0]["dependents"][0]["name"] == "TRANJOB"
+
+
+def test_a_dependents_map_that_will_not_open_is_an_operator_error(tmp_path):
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path), "-q", "--no-fetch",
+                "--dependents-map", str(tmp_path / "missing.json")]) == 2
