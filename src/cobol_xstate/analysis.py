@@ -104,9 +104,17 @@ def analyze_calls(program: Program) -> CallAnalysis:
     literal_assigns: Dict[str, Set[str]] = {}
     var_assigns: Set[str] = set()
 
-    # Seed from WORKING-STORAGE VALUE clauses (an initial literal value).
-    for name, lit in program.working_values.items():
-        literal_assigns.setdefault(name.upper(), set()).add(lit)
+    # Seed from DATA DIVISION VALUE clauses (an initial literal value), read from the data
+    # items rather than `working_values`: an item's VALUE is found wherever its entry
+    # carries it (`PIC X(08)` \ `VALUE 'MODNAME'.` split across lines is the same clause),
+    # and walking EVERY declaration - not data_by_name, where the first wins, nor
+    # working_values, where the last does - keeps both literals of a name declared twice
+    # with different values. Collapsed to one, `CALL WS-PGM OF GRP-A` resolved confidently
+    # to GRP-B's literal; kept as two, it stays a flagged candidate list.
+    for item in program.data_items:
+        val = str(getattr(item, "value", None) or "")
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            literal_assigns.setdefault(str(item.name).upper(), set()).add(val[1:-1].rstrip())
 
     # 88-level condition names with string VALUEs: `SET <cond> TO TRUE` stores the
     # condition's (first) VALUE into its parent item - a literal-assignment channel on

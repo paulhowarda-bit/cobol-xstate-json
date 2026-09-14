@@ -139,6 +139,54 @@ def test_dynamic_call_resolved_by_constant_propagation():
     assert any("POSTLOG" in p.get("cobol", "") for p in machine.provenance.values())
 
 
+def _call_actions(machine):
+    return [a for s in machine.config["states"].values() for a in s.get("entry", [])
+            if a.startswith("call_")]
+
+
+def test_a_value_clause_carried_onto_a_later_line_still_resolves_the_call():
+    """A data description entry runs to its terminating period, so `PIC X(08)` \\
+    `VALUE 'PROGB'.` is the same clause as the one-line form. Scanned line by line it
+    was invisible, and the CALL through it read as runtime-determined - a lost edge
+    that looked exactly like a genuine dynamic call."""
+    machine = _machine((EXAMPLES / "valsplit.cbl").read_text())
+    actions = _call_actions(machine)
+    for target in ("PROGA", "PROGB", "PROGC", "PROGD", "PROGE"):
+        assert f"call_{target}" in actions
+    msgs = " ".join(f["message"] for f in machine.flags)
+    for item in ("WS-ONELINE", "WS-VALNEXT", "WS-PICNEXT", "WS-LITNEXT", "WS-ISNEXT"):
+        assert item not in msgs
+
+
+def test_a_name_declared_with_two_literals_stays_flagged_not_resolved():
+    """WS-PGM is declared in GRP-A with 'PROGX' and in GRP-B with 'PROGY'. Seeded one
+    literal per name, `CALL WS-PGM OF GRP-A` resolved confidently to PROGY - the last
+    declaration's value, and the wrong program. Which copy reaches the CALL is not
+    pinned by constant propagation, so both are candidates and the call is flagged."""
+    machine = _machine((EXAMPLES / "valsplit.cbl").read_text())
+    actions = _call_actions(machine)
+    assert "call_PROGX" not in actions and "call_PROGY" not in actions
+    flag = next(f["message"] for f in machine.flags if "WS-PGM" in f["message"])
+    assert "'PROGX'" in flag and "'PROGY'" in flag
+
+
+def test_a_name_declared_twice_with_one_literal_still_resolves():
+    machine = _machine((EXAMPLES / "valsplit.cbl").read_text())
+    assert "call_PROGS" in _call_actions(machine)
+    assert not any("WS-SAME" in f["message"] for f in machine.flags)
+
+
+def test_call_resolution_reads_the_data_items_not_working_values():
+    """A parse bundle written before the entry-based scan carries the short
+    `working_values` map. Resolution must not depend on it: every data item already
+    carries its VALUE, so such a bundle resolves the split layouts too."""
+    program = parse_program((EXAMPLES / "valsplit.cbl").read_text())
+    program.working_values = {}
+    actions = _call_actions(build_machine(program))
+    for target in ("PROGA", "PROGB", "PROGC", "PROGD", "PROGE", "PROGS"):
+        assert f"call_{target}" in actions
+
+
 def test_dynamic_call_from_variable_stays_flagged():
     machine = _machine((EXAMPLES / "altswitch.cbl").read_text())
     msgs = " ".join(f["message"] for f in machine.flags)

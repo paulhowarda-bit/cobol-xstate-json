@@ -1777,6 +1777,7 @@ most are pinned by a test.
 | `custrpt.cbl` | the canonical batch read loop; exact money accumulation (golden master) |
 | `banktran.cbl` | EVALUATE dispatch + dynamic CALL resolved by constant propagation |
 | `altswitch.cbl` | the ALTER first-time-switch idiom + an unresolvable dynamic CALL |
+| `valsplit.cbl` | **a CALL target's `VALUE` carried onto a later line still resolves** (every split layout), and a name declared twice with two literals stays flagged with both candidates |
 | `accum.cbl` | `PERFORM UNTIL` call-return |
 | `nestperf.cbl` | nested PERFORM threading context through two call levels |
 | `varysum.cbl` | `PERFORM VARYING` index init/step |
