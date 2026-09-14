@@ -223,6 +223,86 @@ def test_dynamic_batch_call_resolved_records_the_via_item():
     assert endpoints["POSTLOG"]["via"] == "WS-PGM"
 
 
+# -- a dynamic target publishes what constant propagation found (ledger item 39) --
+# A CALL's provenance label says only "(dynamic)", so the candidates the analysis had
+# were dropped on the way to the interface while a CICS operand over the same item kept
+# them. Each shape below is its own case: one fixture would let two of them regress.
+
+_TARGET_KEYS = ("dynamic", "via", "candidates", "evidence", "hasVariableAssignment")
+_SHAPES = (
+    "       01 WS-ONE      PIC X(08) VALUE 'MODONE01'.\n"
+    "       01 WS-MANY     PIC X(08).\n"
+    "       01 WS-MIXED    PIC X(08) VALUE 'MODMIX01'.\n"
+    "       01 WS-OTHER    PIC X(08).\n"
+    "       01 WS-COND     PIC X(08).\n"
+    "          88 COND-A   VALUE 'MOD88A'.\n"
+    "          88 COND-B   VALUE 'MOD88B'.\n"
+    "       01 WS-VARONLY  PIC X(08).\n"
+)
+_ASSIGNS = (
+    "       0000-MAIN.\n"
+    "           MOVE 'MODTWO01' TO WS-MANY\n"
+    "           MOVE 'MODTWO02' TO WS-MANY\n"
+    "           MOVE WS-OTHER   TO WS-MIXED\n"
+    "           MOVE WS-OTHER   TO WS-VARONLY\n"
+)
+
+
+def _call_target(item: str) -> dict:
+    """The target-status keys of the one CALL event, and of its endpoint."""
+    iface = _iface(_ASSIGNS + f"           CALL {item}\n           GOBACK.\n", _SHAPES)
+    ev = next(e for e in iface["events"] if e["verb"] == "CALL")
+    ep = next(e for e in iface["endpoints"] if e["endpoint"] == ev["endpoint"])
+    event = {k: ev[k] for k in _TARGET_KEYS if k in ev}
+    assert {k: ep[k] for k in _TARGET_KEYS if k in ep} == event, \
+        "the endpoint must carry what its event carries"
+    return {"endpoint": ev["endpoint"], **event}
+
+
+def test_a_call_resolved_to_one_literal_carries_no_candidate_list():
+    assert _call_target("WS-ONE") == {"endpoint": "MODONE01", "via": "WS-ONE"}
+
+
+def test_a_call_several_literals_reach_publishes_them_as_assigned():
+    assert _call_target("WS-MANY") == {
+        "endpoint": "WS-MANY", "dynamic": True,
+        "candidates": ["MODTWO01", "MODTWO02"], "evidence": "assigned"}
+
+
+def test_a_single_literal_beside_a_variable_move_is_not_the_whole_answer():
+    """The shape most likely to be misread: one candidate that is NOT the resolved
+    target, because a variable MOVE reaches the item too."""
+    assert _call_target("WS-MIXED") == {
+        "endpoint": "WS-MIXED", "dynamic": True, "candidates": ["MODMIX01"],
+        "evidence": "assigned", "hasVariableAssignment": True}
+
+
+def test_an_88_level_only_target_is_marked_declared_not_assigned():
+    assert _call_target("WS-COND") == {
+        "endpoint": "WS-COND", "dynamic": True,
+        "candidates": ["MOD88A", "MOD88B"], "evidence": "declared-88"}
+
+
+def test_a_target_set_only_from_variables_publishes_no_list_to_qualify():
+    assert _call_target("WS-VARONLY") == {"endpoint": "WS-VARONLY", "dynamic": True}
+
+
+def test_a_call_and_a_cics_operand_over_one_item_publish_the_same_answer():
+    """The asymmetry was the defect. Compared on the EVENTS: both statements share one
+    endpoint, which takes its keys from whichever arrives first, so an endpoint
+    comparison passed before the fix."""
+    for item in ("WS-MANY", "WS-MIXED", "WS-COND"):
+        iface = _iface(_ASSIGNS
+                       + f"           CALL {item}\n"
+                       + f"           EXEC CICS XCTL PROGRAM({item}) END-EXEC\n"
+                       + "           GOBACK.\n", _SHAPES)
+        by_verb = {e["verb"]: {k: e[k] for k in _TARGET_KEYS if k in e}
+                   for e in iface["events"] if e["endpoint"] == item}
+        assert set(by_verb) == {"CALL", "CICS XCTL"}, by_verb
+        assert by_verb["CALL"] == by_verb["CICS XCTL"], item
+        assert by_verb["CALL"]["candidates"], item
+
+
 def test_dynamic_transid_queue_file_map_operands_resolve():
     # The same resolution PROGRAM gets applies to EVERY resource-name operand.
     iface = _iface(
