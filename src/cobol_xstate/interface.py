@@ -92,6 +92,9 @@ _CALL_DYNAMIC = re.compile(r"CALL\s+\(DYNAMIC\)\s+([A-Z0-9-]+)", re.I)
 _CALL_RESOLVED = re.compile(
     r"CALL\s+([A-Z0-9-]+)\s+->\s+RESOLVED\b(?:\s+'([^']+)')?", re.I)
 _CALL_LITERAL = re.compile(r"CALL\s+'([^']+)'", re.I)
+# The target-status keys a hit carries onto its event and its endpoint, in output order.
+_DYNAMIC_KEYS = ("dynamic", "via", "candidates", "evidence", "hasVariableAssignment",
+                 "internal")
 _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
 _WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -1043,7 +1046,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                     returning: Optional[str] = None,
                     files: Optional[Dict[str, dict]] = None,
                     internal_programs: Optional[set] = None,
-                    sql_cursors: Optional[List[dict]] = None) -> dict:
+                    sql_cursors: Optional[List[dict]] = None,
+                    unresolved_calls: Optional[Dict[str, dict]] = None) -> dict:
     """Return the external-interface overlay: events, per-state get/create, endpoints,
     and the program's own parameter interface.
 
@@ -1062,11 +1066,18 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     cursors declared in the DATA DIVISION or a copybook, which the provenance texts
     (procedure-division statements only) never carry. Without it a FETCH on such a
     cursor lost its real table endpoint and read as ``<cursor X>``.
+
+    ``unresolved_calls`` is Machine.unresolved_calls - what constant propagation found
+    for each data item naming a dynamic target. A CALL's provenance label says only
+    that its target is dynamic, never which literals may reach it, so without this the
+    candidates a batch CALL already had were dropped here while a CICS operand over the
+    same item kept them.
     """
     actions = (semantics or {}).get("actions", {})
     guards = (semantics or {}).get("guards", {})
     files = files or {}
     internal_programs = {str(p).upper() for p in (internal_programs or ())}
+    unresolved_calls = unresolved_calls or {}
     dv = _DataView(data)
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
@@ -1123,8 +1134,9 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                 entry[k] = hit[k]
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
-        # one came through, `candidates` the literals an ambiguous one may be.
-        for k in ("dynamic", "via", "candidates", "internal"):
+        # one came through, `candidates` the literals an ambiguous one may be, with
+        # `evidence` and `hasVariableAssignment` saying how far to trust that list.
+        for k in _DYNAMIC_KEYS:
             if hit.get(k):
                 entry[k] = hit[k]
         events.append(entry)
@@ -1136,7 +1148,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         ep = endpoints.setdefault(hit["endpoint"], {"type": hit["etype"], "directions": []})
         if hit["direction"] not in ep["directions"]:
             ep["directions"].append(hit["direction"])
-        for k in ("dynamic", "via", "candidates", "internal"):
+        for k in _DYNAMIC_KEYS:
             if hit.get(k):
                 ep.setdefault(k, hit[k])
         fc = files.get(hit["endpoint"])
@@ -1162,6 +1174,17 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                             and str(hit.get("endpoint", "")).upper() in internal_programs):
                         hit["internal"] = True
             for hit in hits:
+                # A dynamic target's endpoint is the data item, which is what the
+                # record is keyed on. Filled for CALL and CICS alike so the two paths
+                # cannot publish different answers to the same question. An 88-level
+                # list without its `evidence`, or a list a variable MOVE also reaches
+                # without `hasVariableAssignment`, would read as more than it is.
+                rec = (unresolved_calls.get(str(hit["endpoint"]).upper())
+                       if hit.get("dynamic") else None)
+                if rec and rec.get("candidates"):
+                    hit["candidates"] = rec["candidates"]
+                    hit["evidence"] = rec.get("evidence")
+                    hit["hasVariableAssignment"] = rec.get("hasVariableAssignment")
                 add(state, region, hit, line, cobol)
             if not hits:
                 for hit in _classify_dataflow(spec, linkage_all):

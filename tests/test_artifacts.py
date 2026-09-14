@@ -222,6 +222,28 @@ def test_ambiguous_dynamic_program_target_lists_its_candidates():
     assert "PGMA" in pg["needs"] and "PGMB" in pg["needs"]
 
 
+def test_a_batch_call_row_lists_its_candidates_and_how_far_to_trust_them():
+    """Ledger item 39: the CICS row above always named its literals, a CALL row over the
+    same kind of item did not. The row now also says whether the list is proven stored
+    (`evidence`) and whether a variable MOVE means it is not the whole set."""
+    man = _artifacts_src(
+        "       0000-MAIN.\n"
+        "           MOVE WS-OTHER TO WS-MIXED\n"
+        "           CALL WS-MIXED\n"
+        "           CALL WS-COND.\n",
+        data_body="       01 WS-MIXED PIC X(8) VALUE 'PGMA'.\n"
+                  "       01 WS-OTHER PIC X(8).\n"
+                  "       01 WS-COND  PIC X(8).\n"
+                  "          88 COND-B VALUE 'PGMB'.\n",
+    )
+    mixed, cond = _by_name(man)["WS-MIXED"], _by_name(man)["WS-COND"]
+    assert (mixed["candidates"], mixed["evidence"], mixed["hasVariableAssignment"]) == \
+        (["PGMA"], "assigned", True)
+    assert "PGMA" in mixed["needs"]
+    assert (cond["candidates"], cond["evidence"]) == (["PGMB"], "declared-88")
+    assert "hasVariableAssignment" not in cond
+
+
 # --------------------------------------------------------------------------- #
 # the two structural patterns the example corpus is named for
 # --------------------------------------------------------------------------- #

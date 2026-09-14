@@ -308,8 +308,9 @@ def build_artifacts(machine: Machine) -> dict:
             # still needed.
             row["identity"] = "program-local"
             row["dynamic"] = True
-            if ep.get("candidates"):
-                row["candidates"] = ep["candidates"]
+            for k in ("candidates", "evidence", "hasVariableAssignment"):
+                if ep.get(k):
+                    row[k] = ep[k]
             row["resolvedBy"] = None
             if name == "<dynamic-sql>":
                 row["needs"] = ("the SQL statement text is assembled at run time "

@@ -144,7 +144,7 @@ class Machine:
                 self.config, self.semantics, self.provenance,
                 data=self.data, using=self.using, returning=self.returning,
                 files=self.files, internal_programs=set(self.nested_programs),
-                sql_cursors=self.sql_cursors)
+                sql_cursors=self.sql_cursors, unresolved_calls=self.unresolved_calls)
         return self._iface_cache
 
     def lineage(self, timer=None):
