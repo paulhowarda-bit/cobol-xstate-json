@@ -167,6 +167,32 @@ True when this program **assigns** the field. An input event's own fill (`ACCEPT
 `SELECT ... INTO`) is *not* a change by the program — the value came from outside; the
 program only received it.
 
+### `fills` and `flow` — the chain between the two ends
+
+`rows` gives the ends of every chain: the external event, and the field it fills or is
+filled from. The steps in between are published beside them, recorded during the same
+pass that emits the rows (so only reachable states contribute):
+
+```jsonc
+"fills": [{ "field": "A", "event": "GET.CONSOLE.SYSIN", "endpoint": "SYSIN",
+            "endpointType": "console", "verb": "ACCEPT", "state": "0000-MAIN",
+            "baseState": "0000-MAIN", "line": 10, "cobol": "ACCEPT A", "columns": [] }],
+"flow":  [{ "target": "C", "sources": ["A", "B"], "state": "0000-MAIN",
+            "baseState": "0000-MAIN", "line": 12, "cobol": "COMPUTE C = A + B",
+            "action": "COMPUTE_C_eq_A_B" }]
+```
+
+- **`fills`** — one record per field an input event fills. `columns` is the statement's
+  `{table, column, hostVar}` mapping for a Db2 read, and an empty list otherwise.
+- **`flow`** — one record per write site: `target` was computed from `sources`. `action`
+  resolves in the bundle's `semantics.actions`, whose `kind` (`assign`, `arith`,
+  `compute`, …) tells a copy from a computation, so the record does not repeat it.
+- Both carry `state` and `baseState` for the same reason the rows do.
+
+Walking `flow` backwards from a field until it reaches a `fills` record answers *which
+input field is this computed from*, not only *which event*. It is the walk the
+dynamic-calls view already makes for a call target.
+
 ## Worked example
 
 `examples/lineage.cbl` — the caller passes `LK-CUST`/`LK-QTY`, the program `ACCEPT`s a
