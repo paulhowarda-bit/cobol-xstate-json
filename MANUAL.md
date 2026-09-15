@@ -759,6 +759,12 @@ is a deposit.*
   `reason` separates a gap in this tool (`perform-target-unresolved`,
   `perform-range-inverted`, `cascade`) from dead code in the program
   (`no-static-predecessor`). See [docs/lineage-target.md](docs/lineage-target.md#unreached--statements-this-view-has-no-row-for-and-why).
+- **`fills` and `flow`** carry the chain `rows` gives only the ends of: `fills` is one
+  record per field an input event fills (with its Db2 `columns`, an empty list for any
+  other read), `flow` is one record per write site (`target` computed from `sources`,
+  plus the `action`, whose `kind` in the bundle's `semantics.actions` tells a copy from a
+  computation). Both carry `state`/`baseState`. See
+  [docs/lineage-target.md](docs/lineage-target.md#fills-and-flow--the-chain-between-the-two-ends).
 - **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
   `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
 - **`changedByProgram`** means the program *assigns* it. An input event's own fill

@@ -919,3 +919,81 @@ def test_a_varchar_fetched_inside_a_record_keys_its_row_on_the_varchar_parent():
     row = _row(d, "BE-R-CMT", "input")
     assert row["pic"] == "group" and _origins(row) == {"GET.DB2.T_DEMO_COMMENT"}
     assert _row(d, "BE-R-ACC", "input")["pic"] == "X(9)"
+
+
+# --------------------------------------------------------------------------- #
+# fills / flow: the internal dataflow behind the rows, published beside them
+# --------------------------------------------------------------------------- #
+
+_FLOWDEMO = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. FLOWDEMO.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 A PIC 9(5).\n"
+    "       01 B PIC 9(5).\n"
+    "       01 C PIC 9(6).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           ACCEPT A\n"
+    "           MOVE A TO B\n"
+    "           COMPUTE C = A + B\n"
+    "           DISPLAY C\n"
+    "           STOP RUN.\n"
+)
+
+
+def test_flow_publishes_each_write_site_with_the_operands_it_was_computed_from():
+    m = build_machine(parse_program(_FLOWDEMO), source_name="flowdemo")
+    d = build_lineage(m)
+    by_target = {f["target"]: f for f in d["flow"]}
+    assert set(by_target) == {"B", "C"}
+    assert by_target["B"]["sources"] == ["A"]
+    assert by_target["C"]["sources"] == ["A", "B"]
+    assert by_target["B"]["line"] == 11 and by_target["C"]["line"] == 12
+    # `action` joins to the bundle's semantics, whose kind tells a copy from a
+    # computation - which is why the record does not repeat it.
+    kinds = {t: m.semantics["actions"][f["action"]]["kind"] for t, f in by_target.items()}
+    assert kinds == {"B": "assign", "C": "compute"}
+
+
+def test_fills_publishes_the_boundary_end_of_each_chain():
+    d = _lin_src(_FLOWDEMO)
+    assert [(f["field"], f["event"], f["verb"]) for f in d["fills"]] == [
+        ("A", "GET.CONSOLE.SYSIN", "ACCEPT")]
+    # no columns for a console read - an empty LIST, the same JSON type as a Db2 fill
+    assert d["fills"][0]["columns"] == []
+
+
+def test_a_select_into_fill_carries_the_column_it_came_from():
+    d = _lin("db2diag.cbl")
+    fill = next(f for f in d["fills"] if f["field"] == "W-TEXT")
+    assert fill["event"] == "GET.DB2.TAB1"
+    assert fill["columns"] == [{"table": "TAB1", "column": "COL1", "hostVar": "W-TEXT"}]
+
+
+def test_fills_and_flow_are_present_and_populated_on_the_corpus():
+    """The defect this closes was a list going missing silently, so the test that matters
+    fails when the keys are absent, not only when their contents are wrong."""
+    total_flow = total_fills = 0
+    for path in sorted(EXAMPLES.glob("*.cbl")):
+        d = build_lineage(build_machine(parse_program(path.read_text()),
+                                        source_name=path.name))
+        assert isinstance(d["fills"], list) and isinstance(d["flow"], list), path.name
+        assert all(isinstance(f["columns"], list) for f in d["fills"]), path.name
+        total_flow += len(d["flow"])
+        total_fills += len(d["fills"])
+    assert total_flow and total_fills
+
+
+def test_a_flow_record_on_a_split_segment_names_its_base_state():
+    """The same join hazard the rows carry `baseState` for: `retdisp.cbl`'s MOVE sits in
+    a `_split` segment, whose id no interface event or machine state carries."""
+    src = (EXAMPLES / "retdisp.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="retdisp.cbl")
+    d = build_lineage(m)
+    split = [f for f in d["flow"] if f["state"] != f["baseState"]]
+    assert split, "expected a flow record on a _split segment"
+    states = set(m.config["states"])
+    assert all(f["state"] not in states and f["baseState"] in states for f in split)
+    assert all(r["baseState"] in states for r in d["fills"] + d["flow"])

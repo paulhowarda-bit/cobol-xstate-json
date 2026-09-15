@@ -805,11 +805,15 @@ class _Lineage:
                         self.fills.append({
                             "field": f.upper(), "event": ev, "endpoint": h["endpoint"],
                             "endpointType": h["etype"], "verb": h["verb"],
-                            "state": name, "line": line, "cobol": cobol,
+                            "state": name,
+                            "baseState": self.origin_state.get(name, name),
+                            "line": line, "cobol": cobol,
                             # host variable -> COLUMN. A host-variable name is
                             # program-local; the column is the database's, and it is the
-                            # column a reader has to go and look at.
-                            "columns": h.get("columns") or {},
+                            # column a reader has to go and look at. A list of
+                            # {table, column, hostVar} rows, and an empty LIST when there
+                            # are none: a published key must not change JSON type.
+                            "columns": h.get("columns") or [],
                         })
 
             # 2. data movement: the target inherits its operands' origins.
@@ -833,6 +837,7 @@ class _Lineage:
                     if rows is not None:
                         self.flow.append({
                             "target": base, "sources": list(srcs), "state": name,
+                            "baseState": self.origin_state.get(name, name),
                             "line": line, "cobol": cobol, "action": aname,
                         })
 
@@ -878,10 +883,9 @@ class _Lineage:
                             "state": name,
                             # Same synthetic-id problem as a lineage row: `name` is a
                             # `_split` segment whenever the paragraph had a mid-run
-                            # PERFORM, and no other view splits. Deliberately NOT added
-                            # to the sibling `fills` record, whose dicts `dynamic_calls`
-                            # returns wholesale from `_chain` - a key there would move
-                            # output that has nothing to do with this join.
+                            # PERFORM, and no other view splits. `fills` and `flow` carry
+                            # it too now that the lineage view publishes them;
+                            # `dynamic_calls` reads only named keys off those records.
                             "baseState": self.origin_state.get(name, name),
                             "line": line, "cobol": cobol,
                             "candidates": list(h.get("candidates") or []),
@@ -1344,6 +1348,14 @@ class _Lineage:
             "conditions": {str(i): d for i, d in enumerate(self._cond_defs)},
             "conditionSets": {str(i): s for i, s in enumerate(self._set_defs)},
             "rows": rows,
+            # The internal dataflow behind those rows, recorded during the same pass:
+            # `fills` is a field filled by a boundary crossing, `flow` is one write site
+            # inside the program (target <- the operands it was computed from). Together
+            # they are the chain `rows` gives only the two ends of. A flow record's
+            # `action` resolves in the bundle's semantics, whose `kind` tells a copy
+            # from a computation.
+            "fills": self.fills,
+            "flow": self.flow,
             # Sorted: `_flag` appends in visit order, so the list used to encode the
             # traversal - a scheduling change reordered it with every flag's text
             # unchanged. The answer must not depend on the order it was found in.
