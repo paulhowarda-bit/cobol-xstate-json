@@ -1711,7 +1711,7 @@ raw source
 
 ### Module map
 
-The first six modules are the parse front-end and live in the **`cobol_parser` package**
+The first six modules and `analysis.py` are the parse front-end and live in the **`cobol_parser` package**
 (`cobol-parser/src/cobol_parser/` in the mainframe-common repository, its own distribution);
 `cobol_xstate` re-exports them at the old paths. The rest are `cobol_xstate`'s.
 
@@ -1724,7 +1724,7 @@ The first six modules are the parse front-end and live in the **`cobol_parser` p
 | `model.py` | the IR (statement dataclasses, `Program`, `Paragraph`) |
 | `parser.py` | recursive-descent statement parser + program structure |
 | `semantics.py` | statements → `target := expr`; conditions → Boolean trees |
-| `analysis.py` | constant propagation (dynamic CALL resolution) |
+| `analysis.py` | constant propagation (dynamic CALL resolution) — in `cobol_parser`, re-exported here |
 | `naming.py` | stable name registry + provenance |
 | `statechart.py` | the compiler: IR → XState config + flags |
 | `interface.py` | the perimeter overlay (pure read) |

@@ -3,7 +3,7 @@
 ## The question this changes
 
 A `CALL identifier` whose target this program proves constant is not really a dynamic
-call: `analysis.py` resolves it, and the callee becomes an ordinary dependency that gets
+call: `cobol_parser.analysis` resolves it, and the callee becomes an ordinary dependency that gets
 fetched like any other. What survives that are the **true** dynamic calls — the target is
 genuinely determined at run time.
 
