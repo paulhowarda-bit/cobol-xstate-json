@@ -286,8 +286,9 @@ and flags what rides on runtime data, rather than skipping it:
 
 - **Dynamic `CALL ident`** — `cobol_parser.analysis` (re-exported as
   [analysis.py](src/cobol_xstate/analysis.py)) runs
-  constant propagation: a `VALUE 'POSTLOG'` clause or `MOVE 'POSTLOG' TO ident` with no
-  conflicting assignment resolves the target (`call_POSTLOG`, no flag). If a non-literal
+  constant propagation: a `VALUE 'POSTLOG'` clause, a `MOVE 'POSTLOG' TO ident`, or a
+  `MOVE` from an item that itself carries one (followed transitively), with no
+  conflicting assignment, resolves the target (`call_POSTLOG`, no flag). If a non-literal
   assignment can also reach the call, it stays flagged — genuinely runtime.
 - **`ALTER … TO PROCEED TO`** — the altered one-line `GO TO` becomes a guard set over
   its candidate targets, the initial target is seeded into `context`, and the `ALTER`
