@@ -194,6 +194,35 @@ def test_dynamic_call_from_variable_stays_flagged():
     assert "runtime-determined" in msgs
 
 
+def test_a_call_target_moved_from_another_item_resolves_through_the_chain():
+    """`MOVE WS-SRC TO WS-HOP1` then `CALL WS-HOP1`: recording only that a variable was
+    moved here threw away the one thing that answers the question. The literal WS-SRC
+    carries is the only value the program ever puts in either item, so the call it makes
+    is not runtime-determined - it is a dependency that used to go unreported."""
+    machine = _machine((EXAMPLES / "callchain.cbl").read_text())
+    assert _call_actions(machine).count("call_CHAINA") >= 1
+    msgs = " ".join(f["message"] for f in machine.flags)
+    assert "WS-HOP1" not in msgs and "WS-HOP2" not in msgs
+
+
+def test_a_chain_a_non_literal_also_reaches_stays_flagged_with_its_candidate():
+    """WS-UNSET is declared and nothing assigns it, so what it holds is not a value this
+    analysis can name. Following the chain must not turn the literal into an answer."""
+    machine = _machine((EXAMPLES / "callchain.cbl").read_text())
+    assert "call_WS-MIXED" in _call_actions(machine)
+    rec = machine.unresolved_calls["WS-MIXED"]
+    assert rec["candidates"] == ["CHAINA"] and rec["hasVariableAssignment"]
+
+
+def test_a_cycle_between_two_items_terminates_and_stays_flagged():
+    """WS-RING <- WS-LOOP <- WS-RING. Walking it has to stop, and with no literal
+    anywhere in the ring the target is still runtime-determined."""
+    machine = _machine((EXAMPLES / "callchain.cbl").read_text())
+    rec = machine.unresolved_calls["WS-RING"]
+    assert rec["candidates"] == []
+    assert "set only from variables" in rec["reason"]
+
+
 def test_keywords_inside_moved_literals_are_data_not_syntax():
     """The words inside a quoted literal must never be read as the MOVE's own TO.
 
