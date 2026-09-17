@@ -18,8 +18,11 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 | *(sibling repo)* | [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies) | JCL → dataflow + dependencies (`jcl-dependencies`) | mainframe-artifacts only |
 
 `cobol_parser` carries no modelling engine: `parse_program(source, fmt, resolver) ->
-Program` is its whole surface, and `cobol_xstate` keeps thin re-export shims at the old
-module paths (`cobol_xstate.parser`, `.model`, …) so existing imports work unchanged.
+Program` is its surface, beside `analysis.analyze_calls(program) -> CallAnalysis` (the
+dynamic-CALL constant propagation, pure over that AST and therefore usable by any parse
+consumer — batch-17 item 47), and `cobol_xstate` keeps thin re-export shims at the old
+module paths (`cobol_xstate.parser`, `.model`, `.analysis`, …) so existing imports work
+unchanged.
 The boundary is enforced by `tests/test_package_boundaries.py` and
 `tools/prove_separation.py`, like the others.
 

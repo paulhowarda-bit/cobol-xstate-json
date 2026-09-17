@@ -17,16 +17,18 @@ float - are captured as annotations on the operation, not silently dropped.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 # data_division.DataItem, but we only touch a few attributes - keep it duck-typed.
 
 _NUM = re.compile(r"^[+-]?\d+(\.\d+)?$")
 
 # The literal-masking rule moved to the parse front-end distribution (the parser tears
-# statements with it and must not import this modelling module) - re-imported here, so
-# every existing `from .semantics import mask_literals` keeps working unchanged.
-from cobol_parser.textutil import _QUOTED, mask_literals  # noqa: E402,F401
+# statements with it and must not import this modelling module), and the split built on
+# it followed the dynamic-CALL resolver there - re-imported here, so every existing
+# `from .semantics import mask_literals` keeps working unchanged.
+from cobol_parser.textutil import (_QUOTED, mask_literals,  # noqa: E402,F401
+                                   split_outside_literals)
 
 
 def sub_outside_literals(pattern, repl: str, text: str) -> str:
@@ -45,18 +47,6 @@ def sub_outside_literals(pattern, repl: str, text: str) -> str:
     out.append(text[pos:])
     return "".join(out)
 
-
-def split_outside_literals(text: str, keyword: str) -> Optional[Tuple[str, str]]:
-    """Split ``text`` at the first whitespace-delimited ``keyword`` OUTSIDE any quoted
-    literal; ``None`` when no such keyword exists.
-
-    The scan runs over the masked copy; the split then slices the ORIGINAL text,
-    literals intact.
-    """
-    m = re.search(rf"\s+{re.escape(keyword)}\s+", mask_literals(text), flags=re.I)
-    if m is None:
-        return None
-    return text[:m.start()], text[m.end():]
 
 # A subscripted / reference-modified reference: collapse the space between the name and
 # its `(` so `NAME ( ... )` survives downstream whitespace splitting as one token. The

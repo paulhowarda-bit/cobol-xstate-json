@@ -148,6 +148,32 @@ def test_the_parse_front_end_needs_no_modelling_engine():
     assert "OK" in proc.stdout
 
 
+def test_a_dynamic_call_resolves_with_no_modelling_engine():
+    """The constant propagation that resolves `CALL WS-PGM` is pure over the parse, so a
+    consumer that parses COBOL and models nothing resolves the same target the statechart
+    does - rather than writing a second propagator that disagrees with this one."""
+    proc = _run_isolated(["cobol_xstate", "jcl_dependencies"], """
+        from cobol_parser import parse_program
+        from cobol_parser.analysis import analyze_calls
+        prog = parse_program(
+            "       IDENTIFICATION DIVISION.\\n"
+            "       PROGRAM-ID. DYNCALL.\\n"
+            "       DATA DIVISION.\\n"
+            "       WORKING-STORAGE SECTION.\\n"
+            "       01 WS-PGM PIC X(8) VALUE 'PGMVALUE'.\\n"
+            "       PROCEDURE DIVISION.\\n"
+            "       0000-MAIN.\\n"
+            "           CALL WS-PGM\\n"
+            "           GOBACK.\\n"
+        )
+        res = analyze_calls(prog).resolve("WS-PGM")
+        assert (res.confident, res.resolved) == (True, "PGMVALUE"), res
+        print("OK")
+    """)
+    assert proc.returncode == 0, proc.stderr
+    assert "OK" in proc.stdout
+
+
 def test_importing_the_parse_package_does_not_pull_in_the_modelling_one():
     """The dependency points one way. If cobol_parser ever imported cobol_xstate - even
     lazily, even for one helper - every third-party parser consumer would silently carry

@@ -284,7 +284,8 @@ Most constructs that a naive pass would drop are actually *mappable*; the real
 question is whether a **static** parse can pin the behavior. This tool draws the shape
 and flags what rides on runtime data, rather than skipping it:
 
-- **Dynamic `CALL ident`** — [analysis.py](src/cobol_xstate/analysis.py) runs
+- **Dynamic `CALL ident`** — `cobol_parser.analysis` (re-exported as
+  [analysis.py](src/cobol_xstate/analysis.py)) runs
   constant propagation: a `VALUE 'POSTLOG'` clause or `MOVE 'POSTLOG' TO ident` with no
   conflicting assignment resolves the target (`call_POSTLOG`, no flag). If a non-literal
   assignment can also reach the call, it stays flagged — genuinely runtime.

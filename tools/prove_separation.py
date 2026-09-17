@@ -9,7 +9,8 @@ shows that, so this builds throwaway venvs and checks:
     artifacts + parser + cobol + jcl   both console scripts work
     artifacts + jcl                    `import cobol_xstate` raises (and cobol_parser is not
                                   even findable); the JCL CLI still works
-    artifacts + parser                 parse_program works with NO modelling engine installed
+    artifacts + parser                 parse_program works with NO modelling engine
+                                  installed, and a dynamic CALL still resolves
     artifacts + parser + cobol         a full COBOL run works; --bind-jcl fails with the
                                   exact pip line
 
@@ -164,6 +165,23 @@ def main() -> int:
                 "print('PARAS', len(prog.paragraphs), 'ID', prog.program_id)")
         check("parse_program recovers a real example with no modelling engine",
               r.returncode == 0 and "ID" in r.stdout and "PARAS 0" not in r.stdout,
+              "" if r.returncode == 0 else r.stderr.strip().splitlines()[-1][:100])
+        r = run(v, "-c",
+                "from cobol_parser import parse_program\n"
+                "from cobol_parser.analysis import analyze_calls\n"
+                "src = ('       IDENTIFICATION DIVISION.\\n'\n"
+                "       '       PROGRAM-ID. SEPCALL.\\n'\n"
+                "       '       DATA DIVISION.\\n'\n"
+                "       '       WORKING-STORAGE SECTION.\\n'\n"
+                "       \"       01 WS-PGM PIC X(8) VALUE 'PGMVALUE'.\\n\"\n"
+                "       '       PROCEDURE DIVISION.\\n'\n"
+                "       '       0000-MAIN.\\n'\n"
+                "       '           CALL WS-PGM\\n'\n"
+                "       '           GOBACK.\\n')\n"
+                "res = analyze_calls(parse_program(src)).resolve('WS-PGM')\n"
+                "print('RESOLVED', res.confident, res.resolved)")
+        check("a dynamic CALL resolves with no modelling engine",
+              r.returncode == 0 and "RESOLVED True PGMVALUE" in r.stdout,
               "" if r.returncode == 0 else r.stderr.strip().splitlines()[-1][:100])
         r = run(v, "-m", "cobol_parser", "examples/accum.cbl",
                 "-o", str(out / "parse-box.parse.json"), "-q")
