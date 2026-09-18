@@ -7,7 +7,7 @@ Parse IBM Enterprise COBOL and recover its behavior as an **XState v5 JSON Harel
 ## Commands
 
 **One distribution ships from this repo**; its two dependencies ship from the sibling
-**mainframe-common repository** (one repo, two distributions, each with its own
+**mainframe-common repository** (one repo, several distributions, each with its own
 `pyproject.toml`), and the JCL front-end is its **own repository**:
 
 | Where | Distribution | What it is | Depends on |

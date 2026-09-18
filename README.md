@@ -25,7 +25,7 @@ on runtime data is *flagged*, never smoothed over.
 **One distribution ships from this repository** — the statechart modelling engine. Its
 two dependencies, the shared retrieval core and the COBOL parse front-end, ship from
 [`mainframe-common`](https://github.com/paulhowarda-bit/mainframe-common) (one repo,
-two distributions). The JCL front-end,
+several distributions). The JCL front-end,
 [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies),
 lives in its own repository and depends only on mainframe-artifacts. The two estate front-ends are
 peers: neither imports the other, and a JCL install carries no COBOL modelling engine.
