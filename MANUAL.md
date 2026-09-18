@@ -70,7 +70,7 @@ the source."* It does not mean "skipped." Treat every flag as a spot that needs 
 
 **One distribution ships from this repository**; its two dependencies ship from the
 [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) repository (one
-repo, two distributions), and the JCL front-end is its **own repository**. Each is a
+repo, several distributions), and the JCL front-end is its **own repository**. Each is a
 normal Python package. Pure standard library — **no runtime dependencies**, no build
 step. Python ≥ 3.9. `pytest` only for the tests.
 
