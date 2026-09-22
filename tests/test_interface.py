@@ -1034,3 +1034,149 @@ def test_a_subselect_set_maps_its_value_variable_but_not_its_row_selector():
     assert entry.get("derived") is True
     assert entry.get("derivedFrom") == ["BAL"]
     assert "column" not in entry or entry["column"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Ledger item 50: a literal that cannot be the name is never a candidate
+# --------------------------------------------------------------------------- #
+
+def _callfilter():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "examples" / "callfilter.cbl").read_text()
+    return build_machine(parse_program(src)).bundle()["interface"]
+
+
+def test_a_rejected_literal_is_published_apart_from_the_candidates():
+    """Event and endpoint alike: the message, the template and the filler are kept -
+    under `rejectedCandidates`, with the reason - and never in `candidates`."""
+    iface = _callfilter()
+    eps = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert eps["WS-TO-PGM"]["candidates"] == ["PGMTO001", "PGMTO002"]
+    assert eps["WS-TO-PGM"]["rejectedCandidates"] == [
+        {"literal": "RUN COMPLETED NORMALLY OK", "reason": "length"}]
+    assert eps["WS-DSP-PGM"]["candidates"] == ["PGMDSP0A", "PGMDSP0B"]
+    assert eps["WS-DSP-PGM"]["rejectedCandidates"] == [
+        {"literal": "ZZZZZZZZ", "reason": "filler"}]
+    assert (eps["WS-TMPL-PGM"]["candidates"], eps["WS-TMPL-PGM"]["evidence"]) == (
+        ["ABCDE200", "ABCDE300"], "declared-88")
+    for ev in iface["events"]:
+        if ev.get("endpoint") in ("WS-TO-PGM", "WS-DSP-PGM", "WS-TMPL-PGM"):
+            assert ev["rejectedCandidates"] == eps[ev["endpoint"]]["rejectedCandidates"]
+
+
+def test_nothing_admissible_is_not_the_same_answer_as_nothing_found():
+    """WS-PH-PGM is assigned a template and nothing else that could be a name: no
+    candidate list, but the row still says a literal was seen and why it was refused."""
+    ep = {e["endpoint"]: e for e in _callfilter()["endpoints"]}["WS-PH-PGM"]
+    assert ep["dynamic"] is True and "candidates" not in ep
+    assert ep["rejectedCandidates"] == [{"literal": "ABCD??X", "reason": "wildcard"}]
+
+
+def test_a_cics_program_operand_is_the_first_eight_characters_of_its_item():
+    """PIC X(9) VALUE 'ABC40001C' under LINK PROGRAM(): CICS passes 8 characters, so
+    the program LINKed to is ABC40001 - resolved, through the item."""
+    eps = {e["endpoint"]: e for e in _callfilter()["endpoints"]}
+    assert eps["ABC40001"]["via"] == "WS-LNK-TARGET"
+    assert "ABC40001C" not in eps and "WS-LNK-TARGET" not in eps
+
+
+# --------------------------------------------------------------------------- #
+# Ledger item 51: an endpoint that is not the resource's name says so
+# --------------------------------------------------------------------------- #
+
+def _example_iface(name: str) -> dict:
+    from pathlib import Path
+    from cobol_xstate.preprocessor import CopybookResolver
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    return build_machine(parse_program(
+        (examples / name).read_text(),
+        resolver=CopybookResolver(paths=[str(examples)]))).bundle()["interface"]
+
+
+def test_a_cics_write_naming_no_file_is_marked_not_named():
+    """No FILE()/DATASET() operand could be read: the endpoint is a placeholder, and the
+    token - not the angle brackets - is what says so, on the endpoint and every event."""
+    iface = _example_iface("cicsnofile.cbl")
+    ep = {e["endpoint"]: e for e in iface["endpoints"]}["<file>"]
+    assert ep["endpointUnresolved"] == "no-operand"
+    evs = [e for e in iface["events"] if e["endpoint"] == "<file>"]
+    assert sorted(e["verb"] for e in evs) == ["CICS REWRITE", "CICS WRITE"]
+    assert all(e["endpointUnresolved"] == "no-operand" for e in evs)
+    named = [e for e in iface["endpoints"] if not e["endpoint"].startswith("<")]
+    assert not any("endpointUnresolved" in e for e in named)
+
+
+def test_write_operator_is_the_console_and_a_deleted_container_is_no_file():
+    """WRITE OPERATOR shares a verb with the file WRITE and writes to the console; a
+    DELETE of a container or a counter shares one with the file DELETE and touches no
+    file - GET/PUT CONTAINER were never crossings either."""
+    iface = _example_iface("cicsnofile.cbl")
+    ops = {(e["direction"], tuple(e["fields"])) for e in iface["events"]
+           if e["endpoint"] == "OPERATOR"}
+    assert ops == {("create", ("WS-MSG",)), ("get", ("WS-ANSWER",))}
+    assert {e["type"] for e in iface["endpoints"] if e["endpoint"] == "OPERATOR"} == \
+        {"console"}
+    assert not [e for e in iface["events"] if e["verb"] == "CICS DELETE"]
+
+
+def test_qname_names_the_queue_literal_or_through_its_item():
+    eps = {e["endpoint"]: e for e in _example_iface("cicsnofile.cbl")["endpoints"]}
+    assert eps["APPLSTATEQUEUE01"]["directions"] == ["get"]
+    assert eps["APPLAUDITQUEUE01"]["via"] == "WS-QNAME"
+    assert "<queue>" not in eps
+
+
+def test_a_written_record_is_published_under_its_file():
+    """`WRITE F-REC` names the record; the endpoint is the FD that declares it, carrying
+    the ASSIGN - and F-REC is no endpoint at all."""
+    iface = _iface_of(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. FW.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT F ASSIGN TO DDF.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  F.\n"
+        "       01  F-REC PIC X(80).\n"
+        "       PROCEDURE DIVISION.\n"
+        "           WRITE F-REC.\n")
+    eps = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert eps["F"]["assign"] == "DDF" and "F-REC" not in eps
+
+
+def test_a_record_whose_01_did_not_arrive_finds_its_file_through_data_record():
+    eps = {e["endpoint"]: e for e in _example_iface("fdrecord.cbl")["endpoints"]}
+    assert eps["B-FILE"]["assign"] == "DDBOUT" and "B-REC" not in eps
+    assert "endpointUnresolved" not in eps["B-FILE"]
+
+
+def test_a_record_nothing_traces_to_an_fd_is_marked_not_dropped():
+    """The regression that matters: when the FD cannot be found the crossing must stay
+    - under the record's name, marked - never silently vanish."""
+    iface = _example_iface("fdrecord.cbl")
+    eps = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert eps["C-REC"]["endpointUnresolved"] == "record"
+    assert [e["verb"] for e in iface["events"] if e["endpoint"] == "C-REC"] == ["WRITE"]
+
+
+def test_a_record_two_fds_both_list_is_not_given_to_either():
+    iface = _iface_of(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. FW2.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  F1 DATA RECORD IS SHARED-REC.\n"
+        "           COPY NOSUCH1.\n"
+        "       FD  F2 DATA RECORD IS SHARED-REC.\n"
+        "           COPY NOSUCH2.\n"
+        "       SD  S1.\n"
+        "           COPY NOSUCH3.\n"
+        "       PROCEDURE DIVISION.\n"
+        "           WRITE SHARED-REC\n"
+        "           RELEASE S1-REC.\n")
+    eps = {e["endpoint"]: e for e in iface["endpoints"]}
+    assert eps["SHARED-REC"]["endpointUnresolved"] == "record"
+    assert eps["S1-REC"]["endpointUnresolved"] == "record"
+    assert "F1" not in eps and "F2" not in eps

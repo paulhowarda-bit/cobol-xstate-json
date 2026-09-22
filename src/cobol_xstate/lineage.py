@@ -207,7 +207,7 @@ class _Lineage:
         self.ordered = machine.paragraph_order
         self.sections = getattr(machine, "sections", {}) or {}
         self.files = getattr(machine, "files", {}) or {}
-        self.dv = _iface._DataView(self.data)
+        self.dv = _iface._DataView(self.data, machine.fd_records)
         self.cursors = _iface._cursor_tables(self.provenance)
         # A FETCH's host-variable <-> Db2 COLUMN correlation, recovered from the cursor's
         # DECLARE. Only the interface build passed this to `_classify`, so every FETCH row

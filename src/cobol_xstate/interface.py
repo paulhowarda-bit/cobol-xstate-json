@@ -48,8 +48,16 @@ _DB2_PROC = "db2_proc"
 _DYNAMIC_SQL = "dynamic_sql"
 
 _CICS_RESOURCE = re.compile(
-    r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|TSQUEUE|TDQUEUE)\s*\(\s*'?"
+    r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|QNAME|TSQUEUE|TDQUEUE)\s*\(\s*'?"
     r"([A-Z0-9_.$#@-]+)\s*'?\s*\)", re.I)
+# CICS commands that share a verb with the file commands and touch no file: WRITE
+# OPERATOR writes to the console, and DELETE with one of these operands removes a
+# channel container, a named counter, a timer, an event or a BTS activity.
+_CICS_OPERATOR = re.compile(r"\bOPERATOR\b")
+_CICS_DELETE_NOT_A_FILE = re.compile(
+    r"\b(?:ACTIVITY|CONTAINER|COUNTER|DCOUNTER|EVENT|TIMER)\s*\(")
+_CICS_TEXT = re.compile(r"\bTEXT\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+_CICS_REPLY = re.compile(r"\bREPLY\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
 _CICS_COMMAREA = re.compile(r"\bCOMMAREA\s*\(\s*([A-Z0-9_.$#@-]+)\s*\)", re.I)
 _CICS_OPT = re.compile(r"\b(INTO|FROM|RIDFLD|TRANSID|QUEUE|ABCODE|SET)\s*\(\s*'?"
                        r"([A-Z0-9_.$#@-]+)\s*'?\s*\)", re.I)
@@ -93,8 +101,16 @@ _CALL_RESOLVED = re.compile(
     r"CALL\s+([A-Z0-9-]+)\s+->\s+RESOLVED\b(?:\s+'([^']+)')?", re.I)
 _CALL_LITERAL = re.compile(r"CALL\s+'([^']+)'", re.I)
 # The target-status keys a hit carries onto its event and its endpoint, in output order.
-_DYNAMIC_KEYS = ("dynamic", "via", "candidates", "evidence", "hasVariableAssignment",
-                 "internal")
+_DYNAMIC_KEYS = ("dynamic", "via", "candidates", "rejectedCandidates", "evidence",
+                 "hasVariableAssignment", "internal", "endpointUnresolved")
+# Why an endpoint is not the resource's own name, as a token a consumer can branch on
+# rather than a spelling it has to recognise. `no-operand`: the statement names no
+# resource this tool could read, so the endpoint is a placeholder (`<file>`, `<queue>`
+# ...). `record`: a WRITE/REWRITE/RELEASE names a record whose FD is not in sight.
+_UNRESOLVED_NO_OPERAND = "no-operand"
+_UNRESOLVED_RECORD = "record"
+_PLACEHOLDERS = frozenset(("<program>", "<file>", "<queue>", "<transid>", "<table>",
+                           "<procedure>"))
 _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
 _WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -179,6 +195,12 @@ def _resource(rs: dict, opt: str, fallback: str) -> str:
     return (r.get("name") or fallback) if r else fallback
 
 
+def _queue(rs: dict, endpoint: str, opts: dict) -> str:
+    """A TS/TD queue's name: QUEUE(), or QNAME() - the 16-character TS queue name."""
+    return _resource(rs, "QUEUE", _resource(rs, "QNAME",
+                                            endpoint or opts.get("QUEUE", "<queue>")))
+
+
 def _mark_dynamic(hit: dict, rs: dict, *opts: str) -> dict:
     """Attach the dynamic-target status of the first present resource operand to the
     hit: `dynamic` marks an unresolved runtime name (with `candidates` when several
@@ -189,8 +211,9 @@ def _mark_dynamic(hit: dict, rs: dict, *opts: str) -> dict:
             continue
         if r.get("dynamic"):
             hit["dynamic"] = True
-            if r.get("candidates"):
-                hit["candidates"] = r["candidates"]
+            for k in ("candidates", "rejectedCandidates"):
+                if r.get(k):
+                    hit[k] = r[k]
         elif r.get("via"):
             hit["via"] = r["via"]
         break
@@ -202,8 +225,18 @@ def _mark_dynamic(hit: dict, rs: dict, *opts: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 class _DataView:
-    def __init__(self, data: Optional[dict]):
+    def __init__(self, data: Optional[dict],
+                 fd_records: Optional[Dict[str, List[str]]] = None):
         self.data = data or {}
+        # record -> file from the FDs' DATA RECORD clauses: the only route back to the
+        # file when the record's 01 is not in the visible source. A record two FDs both
+        # claim maps to None - naming either one would be a guess.
+        self.fd_files = set(fd_records or {})
+        self.data_record_file: Dict[str, Optional[str]] = {}
+        for fd, recs in sorted((fd_records or {}).items()):
+            for rec in recs:
+                known = self.data_record_file.get(rec, fd)
+                self.data_record_file[rec] = fd if known == fd else None
         self.children: Dict[str, List[str]] = {}
         # file -> its top-level record names, indexed in the SAME pass as children.
         # Answering this by re-filtering the whole data dictionary per I/O statement
@@ -228,7 +261,12 @@ class _DataView:
 
     def file_of(self, name: str) -> Optional[str]:
         it = self.data.get((name or "").upper())
-        return it.get("file") if isinstance(it, dict) else None
+        return ((it.get("file") if isinstance(it, dict) else None)
+                or self.data_record_file.get((name or "").upper()))
+
+    def is_file(self, name: str) -> bool:
+        """An FD/SD this DATA DIVISION declares, whether or not its records are visible."""
+        return name in self.records or name in self.fd_files
 
     def records_of(self, file_name: str) -> List[str]:
         return self.records.get(file_name, [])
@@ -636,6 +674,18 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
             return [_mark_dynamic(_hit("get", _TERMINAL, ep, "CICS RECEIVE", into),
                                   rs, "MAP", "MAPSET")]
+        if verb == "WRITE" and _CICS_OPERATOR.search(mup):
+            # WRITE OPERATOR: a message to the system console operator, not a record to
+            # a file. REPLY brings the operator's answer back.
+            text, reply = _CICS_TEXT.search(mup), _CICS_REPLY.search(mup)
+            hits = [_hit("create", _CONSOLE, "OPERATOR", "CICS WRITE OPERATOR",
+                         [text.group(1)] if text else [])]
+            if reply:
+                hits.append(_hit("get", _CONSOLE, "OPERATOR", "CICS WRITE OPERATOR",
+                                 [reply.group(1)]))
+            return hits
+        if verb == "DELETE" and _CICS_DELETE_NOT_A_FILE.search(mup):
+            return []  # a container, counter, timer, event or activity - like GET/PUT
         if verb in ("READ", "READNEXT", "READPREV"):
             f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
             return [_mark_dynamic(
@@ -653,19 +703,19 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 _hit("create", _FILE, f, "CICS " + verb, from_, ridfld),
                 rs, "FILE", "DATASET")]
         if verb in ("READQ",):
-            q = _resource(rs, "QUEUE", endpoint or opts.get("QUEUE", "<queue>"))
+            q = _queue(rs, endpoint, opts)
             qtype = "TD" if re.search(r"\bREADQ\s+TD\b", up) else "TS"
             return [_mark_dynamic(_hit("get", _QUEUE, q, f"CICS READQ {qtype}", into),
-                                  rs, "QUEUE")]
+                                  rs, "QUEUE", "QNAME")]
         if verb in ("WRITEQ",):
-            q = _resource(rs, "QUEUE", endpoint or opts.get("QUEUE", "<queue>"))
+            q = _queue(rs, endpoint, opts)
             qtype = "TD" if re.search(r"\bWRITEQ\s+TD\b", up) else "TS"
             return [_mark_dynamic(_hit("create", _QUEUE, q, f"CICS WRITEQ {qtype}", from_),
-                                  rs, "QUEUE")]
+                                  rs, "QUEUE", "QNAME")]
         if verb == "DELETEQ":
-            q = _resource(rs, "QUEUE", endpoint or opts.get("QUEUE", "<queue>"))
+            q = _queue(rs, endpoint, opts)
             return [_mark_dynamic(_hit("create", _QUEUE, q, "CICS DELETEQ", []),
-                                  rs, "QUEUE")]
+                                  rs, "QUEUE", "QNAME")]
         if verb == "START":
             t = _resource(rs, "TRANSID", opts.get("TRANSID", "<transid>"))
             return [_mark_dynamic(_hit("create", _TRANSACTION, t, "CICS START", from_),
@@ -724,6 +774,9 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             if (spec or {}).get(key):
                 for h in hits:
                     h[key] = spec[key]
+        for h in hits:
+            if h["endpoint"] in _PLACEHOLDERS:
+                h["endpointUnresolved"] = _UNRESOLVED_NO_OPERAND
         return hits
 
     io = spec if (spec or {}).get("kind") == "io" else {}
@@ -743,11 +796,16 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         return [_hit("get", _FILE, f, verb, fields)]
     if verb in ("WRITE", "REWRITE", "DELETE"):
         rec = io.get("file") or _name_suffix(name)
-        f = dv.file_of(rec) or (rec if rec in files else rec)
-        fields = dv.record_fields(rec) if dv.file_of(rec) else ([rec] if rec else [])
+        f = dv.file_of(rec)
+        fields = dv.record_fields(rec) if f else ([rec] if rec else [])
         if io.get("from"):
             fields = fields + [io["from"]]
-        return [_hit("create", _FILE, f, verb, fields)]
+        hit = _hit("create", _FILE, f or rec, verb, fields)
+        # WRITE / REWRITE name a RECORD, DELETE names the file. A record no FD in sight
+        # declares or lists is published under its own name - so it says it is one.
+        if not f and verb != "DELETE" and rec not in files and not dv.is_file(rec):
+            hit["endpointUnresolved"] = _UNRESOLVED_RECORD
+        return [hit]
     if verb == "RETURN":  # sort OUTPUT PROCEDURE: RETURN sort-file [INTO x]
         f = io.get("file") or _name_suffix(name)
         fields = [io["into"]] if io.get("into") else []
@@ -756,7 +814,10 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         m = re.match(r"RELEASE\s+([A-Z0-9-]+)(?:\s+FROM\s+([A-Z0-9-]+))?", up)
         rec = m.group(1) if m else _name_suffix(name)
         fields = [rec] + ([m.group(2)] if m and m.group(2) else [])
-        return [_hit("create", _FILE, dv.file_of(rec) or rec, "RELEASE (sort)", fields)]
+        hit = _hit("create", _FILE, dv.file_of(rec) or rec, "RELEASE (sort)", fields)
+        if not dv.file_of(rec):
+            hit["endpointUnresolved"] = _UNRESOLVED_RECORD
+        return [hit]
     if verb in ("SORT", "MERGE"):
         hits = []
         um = re.search(r"\bUSING((?:\s+[A-Z0-9-]+)+?)(?=\s+(?:GIVING|OUTPUT|$))",
@@ -1047,7 +1108,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                     files: Optional[Dict[str, dict]] = None,
                     internal_programs: Optional[set] = None,
                     sql_cursors: Optional[List[dict]] = None,
-                    unresolved_calls: Optional[Dict[str, dict]] = None) -> dict:
+                    unresolved_calls: Optional[Dict[str, dict]] = None,
+                    fd_records: Optional[Dict[str, List[str]]] = None) -> dict:
     """Return the external-interface overlay: events, per-state get/create, endpoints,
     and the program's own parameter interface.
 
@@ -1078,7 +1140,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     files = files or {}
     internal_programs = {str(p).upper() for p in (internal_programs or ())}
     unresolved_calls = unresolved_calls or {}
-    dv = _DataView(data)
+    dv = _DataView(data, fd_records)
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
     cursor_derivs = _cursor_derivations(semantics)
@@ -1185,6 +1247,10 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                     hit["candidates"] = rec["candidates"]
                     hit["evidence"] = rec.get("evidence")
                     hit["hasVariableAssignment"] = rec.get("hasVariableAssignment")
+                # Carried with or without admissible candidates: "none could be a name"
+                # is a different answer from "none was found".
+                if rec and rec.get("rejectedCandidates"):
+                    hit["rejectedCandidates"] = rec["rejectedCandidates"]
                 add(state, region, hit, line, cobol)
             if not hits:
                 for hit in _classify_dataflow(spec, linkage_all):

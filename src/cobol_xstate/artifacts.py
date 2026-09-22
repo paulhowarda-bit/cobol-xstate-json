@@ -308,7 +308,8 @@ def build_artifacts(machine: Machine) -> dict:
             # still needed.
             row["identity"] = "program-local"
             row["dynamic"] = True
-            for k in ("candidates", "evidence", "hasVariableAssignment"):
+            for k in ("candidates", "rejectedCandidates", "evidence",
+                      "hasVariableAssignment"):
                 if ep.get(k):
                     row[k] = ep[k]
             row["resolvedBy"] = None
@@ -340,6 +341,29 @@ def build_artifacts(machine: Machine) -> dict:
                 flags.append(f"{kind} {name}: dynamic target - {name} is a data item "
                              f"whose run-time value names the {kind}; not resolvable "
                              f"from this program alone")
+        elif ep.get("endpointUnresolved"):
+            # Not the resource's name at all: a placeholder the statement left, or a
+            # record whose FD is out of sight. Joining on either is the false join this
+            # manifest exists to prevent, so the row says which one it is.
+            kind = cls["kind"]
+            row["identity"] = "program-local"
+            row["endpointUnresolved"] = ep["endpointUnresolved"]
+            row["resolvedBy"] = None
+            if ep["endpointUnresolved"] == "record":
+                row["needs"] = (
+                    f"{name} is a record name, not a {kind}: no FD in the visible source "
+                    f"declares it or lists it in DATA RECORD, so its file - and the "
+                    f"ddname behind it - is unknown"
+                    + (f"; missing copybook(s) {', '.join(missing_cbs)} may declare it "
+                       f"under its FD" if missing_cbs else ""))
+                flags.append(f"{kind} {name}: a record name whose FD is not in the "
+                             f"visible source - the file it is written to is unknown")
+            else:
+                row["needs"] = (f"the statement names no {kind} this tool could read, so "
+                                f"{name} is a placeholder, not a name - the statement at "
+                                f"the lines listed is the only lead")
+                flags.append(f"{kind} {name}: placeholder - the statement names no "
+                             f"{kind} that could be read")
         elif etype == "file":
             ddname = ep.get("assign")
             if ddname:
@@ -381,7 +405,8 @@ def build_artifacts(machine: Machine) -> dict:
         # Classify a called program (static). A dynamic target is a data item, not a
         # program name, so it is not classified by name. `fetch` may later refine an
         # `unresolved` static result to cobol-program / assembler-program.
-        if etype == "program" and not ep.get("dynamic"):
+        if (etype == "program" and not ep.get("dynamic")
+                and not ep.get("endpointUnresolved")):
             info = classify_call_target(
                 name, internal_programs=internal_programs,
                 copybooks=prog_copybooks, uses_sql=uses_sql)

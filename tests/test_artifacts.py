@@ -411,3 +411,28 @@ def test_no_name_shaped_sentinel_reaches_the_manifest_for_a_padded_operand():
     assert names["CALLA000"]["kind"] == "program"
     assert names["CALLA099"]["kind"] == "program"
     assert names["CUSTFIL"]["kind"] == "file"
+
+
+def test_a_manifest_row_keeps_the_literals_it_refused_as_names():
+    """Ledger item 50: the row a consumer joins on carries `rejectedCandidates` too, and
+    its `needs` names only the literals that can be a program."""
+    rows = _by_name(_artifacts_example("callfilter.cbl"))
+    nxt, mm = rows["WS-TO-PGM"], rows["WS-PH-PGM"]
+    assert nxt["candidates"] == ["PGMTO001", "PGMTO002"]
+    assert nxt["rejectedCandidates"] == [
+        {"literal": "RUN COMPLETED NORMALLY OK", "reason": "length"}]
+    assert "RUN COMPLETED" not in nxt["needs"]
+    assert "candidates" not in mm and mm["rejectedCandidates"][0]["reason"] == "wildcard"
+
+
+def test_a_placeholder_and_an_untraced_record_are_rows_that_say_what_they_are():
+    """Ledger item 51: neither row may read as a file a ddname could be joined on. The
+    old rows said "no SELECT/ASSIGN found for this file" - a diagnosis of a file that
+    does not exist."""
+    rec = _by_name(_artifacts_example("fdrecord.cbl"))["C-REC"]
+    assert (rec["endpointUnresolved"], rec["identity"], rec["resolvedBy"]) == \
+        ("record", "program-local", None)
+    assert "record name, not a file" in rec["needs"] and "FDCRECX" in rec["needs"]
+    ph = _by_name(_artifacts_example("cicsnofile.cbl"))["<file>"]
+    assert ph["endpointUnresolved"] == "no-operand"
+    assert "placeholder" in ph["needs"] and "SELECT" not in ph["needs"]

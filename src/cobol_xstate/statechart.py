@@ -104,6 +104,9 @@ class Machine:
     returning: Optional[str] = None                      # PROCEDURE DIVISION RETURNING
     # FILE-CONTROL SELECT entries (file -> assign/organization/statusField/...).
     files: Dict[str, dict] = field(default_factory=dict)
+    # FD/SD file -> the records its DATA RECORD clause lists: how a WRITE of a record whose
+    # 01 never arrived (a COPY that did not resolve) still finds its file.
+    fd_records: Dict[str, List[str]] = field(default_factory=dict)
     # COPY / EXEC SQL INCLUDE dependencies (member/status/via/replacing) - a compile-time
     # source dependency the related-artifact manifest lists.
     copybooks: List[dict] = field(default_factory=list)
@@ -144,7 +147,8 @@ class Machine:
                 self.config, self.semantics, self.provenance,
                 data=self.data, using=self.using, returning=self.returning,
                 files=self.files, internal_programs=set(self.nested_programs),
-                sql_cursors=self.sql_cursors, unresolved_calls=self.unresolved_calls)
+                sql_cursors=self.sql_cursors, unresolved_calls=self.unresolved_calls,
+                fd_records=self.fd_records)
         return self._iface_cache
 
     def lineage(self, timer=None):
@@ -356,8 +360,10 @@ class _BuildCtx:
 # command (INTO/FROM/RIDFLD/LENGTH/COMMAREA...) legitimately names a data area and is
 # not a resolution candidate.
 _CICS_RES_OPT = re.compile(
-    r"\b(PROGRAM|TRANSID|QUEUE|FILE|DATASET|MAP|MAPSET)\s*\(\s*(['\"]?)"
+    r"\b(PROGRAM|TRANSID|QUEUE|QNAME|FILE|DATASET|MAP|MAPSET)\s*\(\s*(['\"]?)"
     r"([A-Z0-9$#@._-]+)\s*['\"]?\s*\)", re.I)
+# CICS passes exactly this many characters of a PROGRAM() operand, whatever the item.
+_CICS_PROGRAM_LEN = 8
 
 
 def _call_args_suffix(st: CallStmt) -> str:
@@ -390,6 +396,7 @@ def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
         "candidates": list(res.candidates or []),
         "hasVariableAssignment": bool(res.has_variable_assignment),
         "evidence": res.evidence,
+        **({"rejectedCandidates": res.rejected} if res.rejected else {}),
     })
     return reg.action_named("call_" + st.target, f"CALL (dynamic) {st.target}{args}", st.line)
 
@@ -666,7 +673,8 @@ class _ParaCompiler:
                               f"dynamic CICS {st.verb} {opt}({operand}) - {operand} is "
                               f"a CICS-supplied EIB field; value runtime-determined")
             else:
-                res = self.ctx.calls.resolve(operand)
+                res = self.ctx.calls.resolve(
+                    operand, operand_limit=_CICS_PROGRAM_LEN if opt == "PROGRAM" else None)
                 if res.confident and res.resolved:
                     out[opt] = {"name": res.resolved, "via": operand,
                                 "reason": res.reason}
@@ -674,6 +682,8 @@ class _ParaCompiler:
                     entry: dict = {"name": operand, "dynamic": True}
                     if res.candidates:
                         entry["candidates"] = res.candidates
+                    if res.rejected:
+                        entry["rejectedCandidates"] = res.rejected
                     out[opt] = entry
                     self.ctx.flag(self.pname, st.line,
                                   f"dynamic CICS {st.verb} {opt}({operand}) - "
@@ -683,6 +693,7 @@ class _ParaCompiler:
                         "candidates": list(res.candidates or []),
                         "hasVariableAssignment": bool(res.has_variable_assignment),
                         "evidence": res.evidence,
+                        **({"rejectedCandidates": res.rejected} if res.rejected else {}),
                     })
         return out
 
@@ -2023,6 +2034,7 @@ def build_machine(program: Program, source_name: str = "<source>",
         using=program.using,
         returning=program.returning,
         files=program.files,
+        fd_records=program.fd_data_records,
         copybooks=program.copybooks,
         nested_programs=program.nested_programs,
         unresolved_calls=ctx.unresolved_calls,

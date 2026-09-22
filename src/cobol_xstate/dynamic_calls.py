@@ -420,6 +420,13 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
             row["candidatesNote"] = (
                 "literals a MOVE or VALUE clause provably stores into this item - the "
                 "set the target is drawn from if nothing external writes it")
+        rejected = unresolved.get("rejectedCandidates") or []
+        if rejected:
+            row["rejectedCandidates"] = rejected
+            row["rejectedCandidatesNote"] = (
+                "literals that reach this item but cannot be the name it invokes - "
+                "longer than the item, or holding a blank, a wildcard or a fill "
+                "pattern - so they are never counted as candidates")
         if unresolved.get("hasVariableAssignment"):
             row["variableAssignment"] = True
             row["variableAssignmentNote"] = (
@@ -472,6 +479,13 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
                 row["sourcesNote"] = base + (
                     f"{item} is not declared in the visible source either - see "
                     f"'provisionalNote'")
+            elif rejected:
+                row["sourcesNote"] = base + (
+                    "The literals this program stores into it cannot be a name (see "
+                    "'rejectedCandidates'), so "
+                    + ("only an 88-level declares the names it may hold (see "
+                       "'declaredCandidates')" if row.get("declaredCandidates") else
+                       "the source names no target for it"))
             else:
                 ends = _dead_ends(item, flow_by_target)
                 if ends:
