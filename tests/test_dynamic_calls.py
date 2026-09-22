@@ -460,3 +460,25 @@ def test_a_dynamic_call_row_carries_the_unsplit_state_too():
     assert row["baseState"] == "2000-CYCLE"
     assert row["baseState"] in m.config["states"]
     assert row["state"] not in m.config["states"]
+
+
+def test_a_rejected_literal_is_never_fetched_as_a_candidate():
+    """Ledger item 50: a candidate is fetched from the estate. A 25-byte message or a
+    fill pattern is not a member anyone can have, so it must not be asked for."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "examples" / "callfilter.cbl").read_text()
+    m, art, view = _view(src)
+    rows = {r["item"]: r for r in view["dynamicCalls"]}
+    assert rows["WS-DSP-PGM"]["rejectedCandidates"] == [
+        {"literal": "ZZZZZZZZ", "reason": "filler"}]
+    assert "declaredCandidates" in rows["WS-TMPL-PGM"]
+    assert "88-level declares" in rows["WS-TMPL-PGM"]["sourcesNote"]
+    got = []
+
+    def mf(name, type=None, copy=None):
+        got.append(name)
+        return {"artifact_name": name, "found": False}
+
+    fetch_dependencies(annotate_artifacts(art, view), mf, dynamic=view)
+    assert {"PGMDSP0A", "PGMDSP0B", "PGMTO001", "PGMTO002"} <= set(got)
+    assert not {"ZZZZZZZZ", "RUN COMPLETED NORMALLY OK", "ABCD??X", "ABCDE***"} & set(got)
