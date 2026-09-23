@@ -72,7 +72,18 @@ _EIB_INPUTS = {"EIBCALEN", "EIBAID", "EIBTRNID", "EIBDATE", "EIBTIME", "EIBCPOSN
 # TABLE - matching only the first word would name the schema as the endpoint, and two
 # programs reading the same table would then look like they read different ones.
 _QUALIFIED = r"(?:[A-Z0-9_$#@-]+\s*\.\s*)?([A-Z0-9_$#@-]+)"
-_SQL_FROM = re.compile(r"\bFROM\s+" + _QUALIFIED, re.I)
+# `SELECT ... FROM FINAL TABLE (UPDATE t SET ...)` - a data-change table reference.
+# FINAL / OLD / NEW TABLE is grammar that says WHICH VERSION of the rows the SELECT sees;
+# the table is the target of the statement inside the parentheses. Reading the word
+# after FROM published a Db2 table called FINAL, which the estate was then asked for.
+# A head whose inner statement is not one of the four is never captured as the table.
+_DATA_CHANGE_HEAD = r"(?:FINAL|OLD|NEW)\s+TABLE\s*\("
+_FROM_TABLE = (r"\bFROM\s+(?:" + _DATA_CHANGE_HEAD
+               + r"\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+"
+               + r"|(?!" + _DATA_CHANGE_HEAD + r"))")
+_SQL_FROM = re.compile(_FROM_TABLE + _QUALIFIED, re.I)
+_SQL_DATA_CHANGE = re.compile(
+    r"\bFROM\s+" + _DATA_CHANGE_HEAD + r"\s*(INSERT|UPDATE|DELETE|MERGE)\b", re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+" + _QUALIFIED, re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+" + _QUALIFIED, re.I)
 # `:GFAC . AC-ACC-N` is a QUALIFIED host variable - the field AC-ACC-N inside group
@@ -84,7 +95,8 @@ _SQL_UPDATE = re.compile(r"\bUPDATE\s+" + _QUALIFIED, re.I)
 _SQL_HOSTVAR = re.compile(r":\s*([A-Z0-9-]+)(?:\s*\.\s*([A-Z0-9-]+))?", re.I)
 _SQL_CALL = re.compile(r"\bCALL\s+(?:[A-Z0-9_$#@-]+\s*\.\s*)?([A-Z0-9_$#@-]+)", re.I)
 _DECLARE_CURSOR = re.compile(
-    r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?\bFROM\s+([A-Z0-9_.$#@-]+)", re.I | re.S)
+    r"\bDECLARE\s+([A-Z0-9_-]+)\s+CURSOR\b.*?" + _FROM_TABLE + r"([A-Z0-9_.$#@-]+)",
+    re.I | re.S)
 _CALL_USING = re.compile(r"\bUSING\b(.*?)(?:\bRETURNING\b|$)", re.I | re.S)
 _CALL_RETURNING = re.compile(r"\bRETURNING\s+([A-Z0-9-]+)", re.I)
 # The three CALL provenance spellings statechart._call_action produces, and the program
@@ -590,8 +602,16 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
             params = _dedup([h for h in host_vars if h not in into_fields])
-            return [_note(_hit("get", _DB2, endpoint, verb, into_fields, params,
+            hits = [_note(_hit("get", _DB2, endpoint, verb, into_fields, params,
                                _qualify(columns, endpoint)), note, unresolved)]
+            change = _SQL_DATA_CHANGE.search(mup)
+            if change:
+                # The inner statement WRITES the table the SELECT reads back: one
+                # statement, both directions on the same endpoint.
+                fields, wparams = _dml_split(params, where_vars, None)
+                hits.append(_hit("create", _DB2, endpoint, change.group(1).upper(),
+                                 fields, wparams))
+            return hits
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
             ep = m.group(1) if m else "<table>"

@@ -1105,3 +1105,38 @@ def test_a_pre_version_5_parse_bundle_degrades_rather_than_guessing():
                and s.get("verb") == "FETCH")
     assert [(c["column"], c["hostVar"]) for c in sta["columns"]] == [
         ("FUND_A", "WS-FUND"), ("BALANCE_A", "WS-BAL")]
+
+
+# --------------------------------------------------------------------------- #
+# sqlchange: a data-change table reference (batch-21 item 53)
+# --------------------------------------------------------------------------- #
+
+def test_a_data_change_reference_publishes_its_inner_table_read_and_written():
+    """`FROM FINAL TABLE (UPDATE t ...)`: FINAL / OLD / NEW are grammar. The endpoint
+    is the inner statement's target, and the one statement both reads and writes it."""
+    db2 = _dirs(_iface("sqlchange.cbl"), "db2")
+    for table in ("ACCT_ANAL", "ACCT_HIST", "ACCT_LOG"):
+        assert db2[table] == ["create", "get"], table
+    assert not {"OLD", "NEW"} & set(db2)
+
+
+def test_the_write_half_carries_the_inner_verb_and_its_host_variables():
+    iface = _iface("sqlchange.cbl")
+    writes = {(e["endpoint"], e["verb"]) for e in iface["events"]
+              if e["endpointType"] == "db2" and e["direction"] == "create"}
+    assert writes == {("ACCT_ANAL", "UPDATE"), ("ACCT_HIST", "DELETE"),
+                      ("ACCT_LOG", "INSERT")}
+    upd = next(e for e in iface["events"] if e["verb"] == "UPDATE")
+    assert "WS-AMT" in upd["fields"]
+
+
+def test_a_table_genuinely_called_final_is_still_published():
+    """Not a keyword blocklist: `FROM FINAL WHERE ...` reads a table named FINAL."""
+    iface = _iface("sqlchange.cbl")
+    assert _dirs(iface, "db2")["FINAL"] == ["get"]
+    reads = [e for e in iface["events"] if e["endpoint"] == "FINAL"]
+    assert [e["fields"] for e in reads] == [["WS-AMT"]]
+
+
+def test_a_cursor_over_a_data_change_reference_fetches_from_the_inner_table():
+    assert "ACCT_QUE" in _dirs(_iface("sqlchange.cbl"), "db2")
