@@ -1125,7 +1125,7 @@ def test_the_write_half_carries_the_inner_verb_and_its_host_variables():
     writes = {(e["endpoint"], e["verb"]) for e in iface["events"]
               if e["endpointType"] == "db2" and e["direction"] == "create"}
     assert writes == {("ACCT_ANAL", "UPDATE"), ("ACCT_HIST", "DELETE"),
-                      ("ACCT_LOG", "INSERT")}
+                      ("ACCT_LOG", "INSERT"), ("ACCT_QUE", "INSERT")}   # last: OPEN C1
     upd = next(e for e in iface["events"] if e["verb"] == "UPDATE")
     assert "WS-AMT" in upd["fields"]
 
@@ -1140,3 +1140,22 @@ def test_a_table_genuinely_called_final_is_still_published():
 
 def test_a_cursor_over_a_data_change_reference_fetches_from_the_inner_table():
     assert "ACCT_QUE" in _dirs(_iface("sqlchange.cbl"), "db2")
+
+
+def test_opening_a_cursor_over_a_data_change_reference_publishes_its_write():
+    """Db2 runs `FINAL TABLE (INSERT INTO ACCT_QUE ...)` when the cursor is OPENed; the
+    FETCH only reads back what it produced. The OPEN used to publish nothing, so the
+    program's write to ACCT_QUE was missing with no flag."""
+    iface = _iface("sqlchange.cbl")
+    assert _dirs(iface, "db2")["ACCT_QUE"] == ["create", "get"]
+    que = [(e["verb"], e["direction"], e["fields"]) for e in iface["events"]
+           if e["endpoint"] == "ACCT_QUE"]
+    assert ("INSERT", "create", ["WS-ID"]) in que
+    assert ("FETCH", "get", ["WS-ID"]) in que
+
+
+def test_opening_an_ordinary_cursor_still_crosses_nothing():
+    iface = _iface("sqlunld.cbl")
+    assert not [e for e in iface["events"] if e["verb"] == "OPEN"]
+    assert all(e["verb"] != "INSERT" or e["endpointType"] != "db2"
+               for e in iface["events"])

@@ -1543,6 +1543,33 @@ def _conventions_recover(ctx: "_BuildCtx", spec: dict, verb: str, para: str, lin
     return True
 
 
+_SQL_OPEN = re.compile(r"\bOPEN\s+([A-Z0-9_-]+)", re.I)
+
+
+def _mark_data_change_opens(ctx: "_BuildCtx", program: Program) -> None:
+    """Stamp `dataChange` {table, verb, hostVars} onto the OPEN of a cursor declared over
+    a data-change table reference (`SELECT ... FROM FINAL TABLE (INSERT INTO t ...)`).
+
+    Db2 runs the inner statement when the cursor is OPENed; the FETCHes only read back
+    what it produced. Without this the OPEN - an ordinary no-crossing statement for any
+    other cursor - published nothing, and the program's write to `t` was missing from
+    the interface with no flag. Like FETCH correlation it is a whole-program join (the
+    DECLARE may sit anywhere), so it runs once the program is compiled.
+    """
+    changes = {str(d["cursor"]).upper(): d for d in program.sql_cursors
+               if d.get("dataChange") and d.get("table")}
+    if not changes:
+        return
+    for spec in ctx.action_sem.values():
+        if spec.get("kind") != "exec-sql" or spec.get("verb") != "OPEN":
+            continue
+        m = _SQL_OPEN.search(str(spec.get("raw") or ""))
+        decl = changes.get(m.group(1).upper()) if m else None
+        if decl:
+            spec["dataChange"] = {"table": str(decl["table"]).upper(),
+                                  **decl["dataChange"]}
+
+
 def _correlate_fetches(ctx: "_BuildCtx", program: Program,
                        program_tables: FrozenSet[str] = frozenset()) -> None:
     """Zip every FETCH's host variables against its cursor's DECLARE, once the whole
@@ -1986,6 +2013,7 @@ def build_machine(program: Program, source_name: str = "<source>",
     tables = (_program_tables(ctx, program) if ctx.conventions is not None
               else frozenset())
     _correlate_fetches(ctx, program, tables)
+    _mark_data_change_opens(ctx, program)
     _correlate_selects(ctx, tables)
     _correlate_inserts(ctx, program, lookup, tables)
     # A catalog resolver that ERRORED is not the same as one that answered "not a

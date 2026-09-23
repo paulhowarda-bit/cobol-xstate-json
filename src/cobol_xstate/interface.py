@@ -660,6 +660,15 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                     "source")
             return [_note(_hit(d, _DB2_PROC, proc, verb, host_vars), note)
                     for d in ("get", "create")]
+        change = (spec or {}).get("dataChange") if verb == "OPEN" else None
+        if change:
+            # A cursor over `FROM FINAL TABLE (INSERT ...)`: opening it runs the inner
+            # write (statechart._mark_data_change_opens). A DELETE's host variables
+            # only pick rows, as in the DELETE arm above; otherwise nothing is split.
+            hv = list(change.get("hostVars") or [])
+            dele = change["verb"] == "DELETE"
+            return [_hit("create", _DB2, change["table"], change["verb"],
+                         [] if dele else hv, params=hv if dele else None)]
         return []  # OPEN/CLOSE cursor, DECLARE, COMMIT, WHENEVER - not a data crossing
 
     if is_cics:
