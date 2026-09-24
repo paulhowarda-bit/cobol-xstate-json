@@ -16,12 +16,12 @@ the record area on READ).
 
 import json
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
 
+import node_session
 from cobol_xstate.emitter import emit_setup_module
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
@@ -62,8 +62,7 @@ def _run(tmp_dir, example, files):
         "const r = drive(m, { files });\n"
         "process.stdout.write(JSON.stringify(r));\n"
     )
-    proc = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                          cwd=str(tmp_dir), timeout=30)
+    proc = node_session.run(driver)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return json.loads(proc.stdout)
 

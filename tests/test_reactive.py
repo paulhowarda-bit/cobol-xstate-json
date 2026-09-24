@@ -9,11 +9,11 @@ end-to-end proof of the push / response-event model. It skips when node / xstate
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+import node_session
 from cobol_xstate.parser import parse_program
 from cobol_xstate.reactive import _event_slug, build_reactive_view, emit_reactive_module
 from cobol_xstate.statechart import build_machine
@@ -196,7 +196,7 @@ def repo_tmp():
 def test_reactive_module_passes_node_syntax_check(tmp_path):
     mod_path = tmp_path / "machine.mjs"
     mod_path.write_text(emit_reactive_module(_machine("sqlsel.cbl")))
-    r = subprocess.run([NODE, "--check", str(mod_path)], capture_output=True, text=True)
+    r = node_session.check(mod_path)
     assert r.returncode == 0, r.stderr
 
 
@@ -236,8 +236,7 @@ def test_reactive_slice_runs_by_sending_events(repo_tmp):
         "{ console.error('missing', JSON.stringify(missing.context['WS-STATUS'])); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(repo_tmp), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -301,8 +300,7 @@ def test_read_process_write_derives_from_the_arriving_record(repo_tmp):
         "{ console.error('OUT-DBL', JSON.stringify(s.context['OUT-DBL'])); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(repo_tmp), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -431,8 +429,7 @@ def test_perform_structured_batch_runs_on_events_alone(repo_tmp):
         "{ console.error('empty', e.status, e.context['WS-TOTAL']); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(repo_tmp / "drive.mjs")], capture_output=True,
-                       text=True, cwd=str(repo_tmp), timeout=30)
+    r = node_session.run(repo_tmp / "drive.mjs")
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -455,8 +452,7 @@ def test_not_at_end_body_runs_per_record_on_events(repo_tmp):
         "{ console.error(k, s.context[k], 'want', want[k]); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(repo_tmp / "drive.mjs")], capture_output=True,
-                       text=True, cwd=str(repo_tmp), timeout=30)
+    r = node_session.run(repo_tmp / "drive.mjs")
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -467,8 +463,7 @@ def _run_reactive(tmp, name, driver_body):
         "import { createActor } from 'xstate';\n"
         "import machine from './machine.mjs';\n"
         "const a = createActor(machine); a.start();\n" + driver_body)
-    return subprocess.run([NODE, str(tmp / "drive.mjs")], capture_output=True,
-                          text=True, cwd=str(tmp), timeout=30)
+    return node_session.run(tmp / "drive.mjs")
 
 
 def _expect(want):
