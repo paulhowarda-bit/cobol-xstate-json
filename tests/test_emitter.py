@@ -8,11 +8,11 @@ not available.
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+import node_session
 from cobol_xstate.emitter import (
     _emit_guard,
     _emit_numeric_expr,
@@ -338,7 +338,7 @@ def _emit_to(tmp_dir, name):
 @pytest.mark.skipif(not NODE, reason="node not available")
 def test_emitted_module_passes_node_syntax_check(tmp_path):
     mod_path = _emit_to(tmp_path, "banktran.cbl")
-    r = subprocess.run([NODE, "--check", str(mod_path)], capture_output=True, text=True)
+    r = node_session.check(mod_path)
     assert r.returncode == 0, r.stderr
 
 
@@ -362,8 +362,7 @@ def test_emitted_machine_runs_and_computes_decimal(repo_tmp):
         "if (actor.getSnapshot().status !== 'done') { console.error('not done'); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(tmp_path), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -381,8 +380,7 @@ def test_emitted_money_accumulation_is_exact_decimal(repo_tmp):
         "if (ctx['WS-TOTAL'] !== '113.20') { console.error(ctx['WS-TOTAL']); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(tmp_path), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -413,8 +411,7 @@ def test_a_tiny_fractional_value_seeds_exactly_under_xstate(repo_tmp):
         "if (v !== '0.00000001') { console.error('WS-RATE', v); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(tmp_path), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -434,8 +431,7 @@ def _run_to_done(tmp_path, name, expect):
         "{ console.error(k, 'got', s.context[k], 'want', want[k]); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(tmp_path), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -530,8 +526,7 @@ def test_declarative_handler_fires_on_its_event(repo_tmp):
         "{ console.error(a.getSnapshot().context); process.exit(1); }\n"
         "process.exit(0);\n"
     )
-    r = subprocess.run([NODE, str(driver)], capture_output=True, text=True,
-                       cwd=str(repo_tmp), timeout=30)
+    r = node_session.run(driver)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
