@@ -1237,6 +1237,11 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         if ev not in bucket:
             bucket.append(ev)
         ep = endpoints.setdefault(hit["endpoint"], {"type": hit["etype"], "directions": []})
+        if hit["etype"] == _FILE and ep["type"] == _RESPONSE:
+            # A FILE STATUS branch names the file too. Reached before the file's own I/O
+            # (a `PERFORM UNTIL status` around a READ NEXT), it published the file as a
+            # response endpoint and the file endpoint never appeared at all.
+            ep["type"] = _FILE
         if hit["direction"] not in ep["directions"]:
             ep["directions"].append(hit["direction"])
         for k in _DYNAMIC_KEYS:
