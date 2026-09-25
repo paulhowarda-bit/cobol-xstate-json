@@ -1180,3 +1180,87 @@ def test_a_record_two_fds_both_list_is_not_given_to_either():
     assert eps["SHARED-REC"]["endpointUnresolved"] == "record"
     assert eps["S1-REC"]["endpointUnresolved"] == "record"
     assert "F1" not in eps and "F2" not in eps
+
+
+# --------------------------------------------------------------------------- #
+# Batch-23 ledger item 56: a file whose FILE STATUS is branched on is still a file
+# --------------------------------------------------------------------------- #
+
+_KEYED_SELECT = (
+    "           SELECT KEYED-FILE     ASSIGN TO KEYDFILE\n"
+    "                  ORGANIZATION IS INDEXED\n"
+    "                  ACCESS MODE IS DYNAMIC\n"
+    "                  RECORD KEY   IS FD-KEYED-FILE-KEY\n"
+    "                  FILE STATUS  IS WS-KEY-STATUS.\n"
+)
+_KEYED_SELECT_FOLDED = (
+    "           SELECT KEYED-FILE ASSIGN TO KEYDFILE ORGANIZATION INDEXED\n"
+    "               ACCESS DYNAMIC RECORD KEY FD-KEYED-FILE-KEY\n"
+    "               FILE STATUS WS-KEY-STATUS.\n"
+)
+
+
+def _keyed_file_program(select: str, proc: str) -> str:
+    return (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. KEYED.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n" + select +
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  KEYED-FILE.\n"
+        "       01  FD-KEYED-REC.\n"
+        "           05 FD-KEYED-FILE-KEY  PIC X(8).\n"
+        "           05 FD-KEYED-DATA      PIC X(72).\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-KEY-STATUS           PIC XX.\n"
+        "       01  WS-OUT                  PIC X.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n" + proc +
+        "           GOBACK.\n"
+    )
+
+
+_READ_THEN_TEST = (
+    "           MOVE 'K' TO FD-KEYED-FILE-KEY\n"
+    "           READ KEYED-FILE KEY IS FD-KEYED-FILE-KEY\n"
+    "           IF WS-KEY-STATUS = '00'\n"
+    "               MOVE 'Y' TO WS-OUT\n"
+    "           END-IF\n"
+)
+
+
+def _file_endpoints(iface):
+    return [(e["endpoint"], e.get("assign")) for e in iface["endpoints"]
+            if e["type"] == "file"]
+
+
+def test_a_keyed_read_whose_status_is_tested_publishes_its_file_endpoint():
+    iface = _iface_of(_keyed_file_program(_KEYED_SELECT, _READ_THEN_TEST))
+    assert _file_endpoints(iface) == [("KEYED-FILE", "KEYDFILE")]
+    # The branch is still the program reacting to the file's response: its event stays.
+    assert any(ev["endpointType"] == "response" and ev["endpoint"] == "KEYED-FILE"
+               for ev in iface["events"])
+
+
+def test_the_select_folded_onto_fewer_lines_gives_the_same_endpoint():
+    assert (_iface_of(_keyed_file_program(_KEYED_SELECT, _READ_THEN_TEST))["endpoints"]
+            == _iface_of(_keyed_file_program(_KEYED_SELECT_FOLDED,
+                                             _READ_THEN_TEST))["endpoints"])
+
+
+def test_a_browse_under_a_status_loop_publishes_its_file_endpoint():
+    iface = _iface_of(_keyed_file_program(_KEYED_SELECT, (
+        "           START KEYED-FILE KEY NOT LESS THAN FD-KEYED-FILE-KEY\n"
+        "           PERFORM UNTIL WS-KEY-STATUS NOT = '00'\n"
+        "               READ KEYED-FILE NEXT RECORD\n"
+        "           END-PERFORM\n")))
+    assert _file_endpoints(iface) == [("KEYED-FILE", "KEYDFILE")]
+    verbs = {ev["verb"] for ev in iface["events"] if ev["endpointType"] == "file"}
+    assert {"START", "READ"} <= verbs
+
+
+def test_a_declared_file_nothing_reads_publishes_no_endpoint():
+    iface = _iface_of(_keyed_file_program(_KEYED_SELECT, "           MOVE 'Y' TO WS-OUT\n"))
+    assert not any(e["endpoint"] == "KEYED-FILE" for e in iface["endpoints"])
