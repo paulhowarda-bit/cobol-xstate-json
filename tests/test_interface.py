@@ -1264,3 +1264,32 @@ def test_a_browse_under_a_status_loop_publishes_its_file_endpoint():
 def test_a_declared_file_nothing_reads_publishes_no_endpoint():
     iface = _iface_of(_keyed_file_program(_KEYED_SELECT, "           MOVE 'Y' TO WS-OUT\n"))
     assert not any(e["endpoint"] == "KEYED-FILE" for e in iface["endpoints"])
+
+
+def test_a_copied_linkage_section_puts_nothing_on_the_caller_perimeter():
+    """A copybook carrying LINKAGE SECTION + PROCEDURE DIVISION USING, copied into
+    WORKING-STORAGE: the copier's later declarations are not the caller's parameters,
+    in the interface or in lineage (ledger item 59)."""
+    from cobol_xstate.lineage import build_lineage
+    from cobol_xstate.preprocessor import CopybookResolver
+    members = {"LINKCPY": ("       LINKAGE SECTION.\n"
+                           "       01  LK-PARM  PIC X(10).\n"
+                           "       PROCEDURE DIVISION USING LK-PARM.\n")}
+    src = ("       IDENTIFICATION DIVISION.\n"
+           "       PROGRAM-ID. COPIER.\n"
+           "       DATA DIVISION.\n"
+           "       WORKING-STORAGE SECTION.\n"
+           "       01  WS-BEFORE  PIC X(01) VALUE 'B'.\n"
+           "       COPY LINKCPY.\n"
+           "       01  WS-TARGET  PIC X(07) VALUE 'PGM'.\n"
+           "       PROCEDURE DIVISION.\n"
+           "       0000-MAIN.\n"
+           "           DISPLAY WS-TARGET\n"
+           "           CALL WS-TARGET\n"
+           "           GOBACK.\n")
+    machine = build_machine(parse_program(
+        src, resolver=CopybookResolver(paths=[], fetcher=members.get)))
+    iface = machine.bundle()["interface"]
+    assert [e for e in iface["events"] if e["endpointType"] == "caller"] == []
+    rows = [r for r in build_lineage(machine)["rows"] if r["field"] == "WS-TARGET"]
+    assert rows and all(r["origins"] == [] for r in rows)
