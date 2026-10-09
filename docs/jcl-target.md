@@ -30,9 +30,11 @@ cobol-xstate acctunld.jcl -o -            # both views as one bundle on stdout
 
 Cataloged PROCs, `INCLUDE` members, and control-card datasets
 (`//SYSIN DD DSN=PARM.LIB(SORTCRD)`) live outside the JCL file. This module does **not**
-fetch them - you pass ``resolver``, a function ``resolver(name) -> text | None``, and it
-substitutes what you return. Anything the resolver cannot return is **flagged, never
-guessed** - the same rule the COBOL side follows for a missing copybook.
+fetch them - you pass ``resolver``, a function ``resolver(name, kind=...) -> text | None``
+(``kind`` is ``proc``, ``include-member`` or ``control-card``; a resolver that takes only
+the name is called with only the name), and it substitutes what you return. Anything the
+resolver cannot return is **flagged, never guessed** - the same rule the COBOL side
+follows for a missing copybook.
 
 The CLI supplies this resolver from the prefetch stage, which retrieves those members
 through the estate's artifact service *before* the parse and re-parses until the job stops
