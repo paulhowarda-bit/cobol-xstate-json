@@ -94,7 +94,13 @@ For each step, its **inputs** and **outputs** - the DDs, resolved to datasets - 
   `SELECT OUT-FILE ASSIGN OUTDD`; its artifact manifest could only say *"OUTDD, DSN in the
   JCL"*. This says `OUTDD -> PROD.ACCT.UNLOAD` - the dataset that program was missing. Join
   a COBOL `file` artifact's `ddname` to a JCL `ddBindings` row on `(program, ddname)` and the
-  program-local name becomes the estate-wide identity.
+  program-local name becomes the estate-wide identity. A **concatenated** DD (a named DD
+  followed by unnamed ones) is one ddname reading several datasets, so it has one row per
+  dataset, each carrying `concatIndex` - its 1-based position among the DD's statements. A
+  row is therefore keyed on `(step, ddname, concatIndex)`; `(step, ddname)` alone no longer
+  names one row (`formatVersion` 4). A DD of one statement carries no `concatIndex`. A
+  dataset at position 2 or later is always read, whatever its `DISP`; a statement naming
+  no dataset (`DD *`, `DUMMY`) has no row.
 
 ## What the artifact manifest lists
 
@@ -133,7 +139,8 @@ are the specification. This first version handles the common cases and flags the
   `ELSE`/`ENDIF` (or an `IF` left open at end-of-member) is flagged because every condition
   after it may be wrong. An unrecognized `COND=` form is kept raw and marked, never guessed.
 - **Not statically knowable** - dynamic allocation (SVC 99, `BPXWDYN`), scheduler-set
-  symbolics, `DDNAME=` referbacks - is out of scope by nature; flagged where seen.
+  symbolics - is out of scope by nature; flagged where seen. A `DDNAME=` reference is
+  followed to the later DD of the step that defines it, and flagged where none does.
 - **Utility grammars** beyond `SORT`/`IDCAMS` `REPRO`/`IEBGENER` are summarized, not fully
   parsed; an unrecognized control deck is recorded as `utility: "unknown"` with a card
   count, never invented.
@@ -164,7 +171,11 @@ Matching on `(program, ddname)`, each file row the JCL resolves gains:
                  "generation": "+1" } ] }                  // + the step's run conditions, if any
 ```
 
-and its `needs` is dropped - the identity chain `OUT-FILE -> OUTDD -> PROD.ACCT.UNLOAD` is
+A ddname the step concatenates is one file read from several datasets in turn: the row
+gains `datasets` - the list in read order - in place of `dataset`, and each `boundBy`
+entry carries its `concatIndex`. That is one answer, not the `datasetCandidates` case.
+
+Either way its `needs` is dropped - the identity chain `OUT-FILE -> OUTDD -> PROD.ACCT.UNLOAD` is
 closed, which is exactly what [state-graph-plan.md](state-graph-plan.md) needs to stop two
 programs reading one dataset under different local names from looking unrelated.
 
