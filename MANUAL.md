@@ -938,14 +938,16 @@ byte-field lineage from utility control cards (`fieldLineage`: `SORT OUTREC BUIL
 `INCLUDE COND`, `IDCAMS REPRO`), per-step **run conditions** (`IF/THEN/ELSE` nesting
 recovered; `COND=` parsed with its back-to-front bypass sense spelt out as `runsWhen`), and
 **`ddBindings`** — the `ddname → dataset` join that supplies the DSN a COBOL program's
-`file` artifact was missing. The **artifacts** view is the related-artifact manifest in the
+`file` artifact was missing (a concatenated DD has one row per dataset, each with its
+1-based `concatIndex`, so a row is keyed on step + ddname + `concatIndex`). The **artifacts** view is the related-artifact manifest in the
 same shape as the COBOL one (datasets / programs / PROCs / INCLUDE / control-card members;
 `dependency` runtime vs compile-time; GDGs keyed on the base).
 
 **Closing the loop**: pass the JCL to a COBOL run with `--bind-jcl job.jcl` (repeatable) and
 the program's artifacts view resolves each file's ddname to its dataset — the row gains
 `dataset` and `boundBy` (job/step, with the step's run conditions), and its `needs` is
-satisfied. Conflicting bindings across jobs are listed as `datasetCandidates` and flagged,
+satisfied. A ddname the step concatenates gains `datasets` — the list in read order — in
+place of `dataset`. Conflicting bindings across jobs are listed as `datasetCandidates` and flagged,
 never collapsed. `--bind-jcl` needs the JCL front-end installed (`pip install
 cobol-xstate[jcl]`); without it the run exits with that exact command. Python:
 `bind_cobol_artifacts(manifest, jobs)` in `jcl_dependencies.views`.
