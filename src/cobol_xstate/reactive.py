@@ -68,10 +68,12 @@ _NON_WAIT_GET_VERBS = ("OPEN", "STARTBR", "RESETBR", "ENDBR")
 
 def _is_wait_hit(hit: dict) -> bool:
     """True if this boundary crossing is an inbound *record delivery* - the thing PUSH
-    replaces with an `on` wait."""
+    replaces with an `on` wait. A further table a statement reads inside Db2
+    (`secondaryTable`) delivers no record of its own."""
     return (hit["direction"] == "get"
             and hit["etype"] in _DATA_GET_TYPES
-            and not hit["verb"].upper().startswith(_NON_WAIT_GET_VERBS))
+            and not hit["verb"].upper().startswith(_NON_WAIT_GET_VERBS)
+            and not hit.get("secondaryTable"))
 
 
 def _is_read_verb(verb: str) -> bool:
@@ -389,13 +391,16 @@ class _Rewriter:
         data_gets = [e for e in evs
                      if _is_wait_hit({"direction": e["direction"],
                                       "etype": e["endpointType"],
-                                      "verb": e["verb"]})]
+                                      "verb": e["verb"],
+                                      "secondaryTable": e.get("secondaryTable")})]
         responses = [e for e in evs if e["endpointType"] == "response"]
         creates = [e for e in evs if e["direction"] == "create"]
         # A channel verb (OPEN/STARTBR) is a get that delivers no record: correctly left
-        # as an effect, so it is handled - not "unhandled".
+        # as an effect, so it is handled - not "unhandled". So is a further table a
+        # statement reads inside Db2: the statement's own event carries what arrives.
         channel = [e for e in evs if e["direction"] == "get"
-                   and e["verb"].upper().startswith(_NON_WAIT_GET_VERBS)]
+                   and (e["verb"].upper().startswith(_NON_WAIT_GET_VERBS)
+                        or e.get("secondaryTable"))]
         others = [e for e in evs if e not in data_gets and e not in responses
                   and e not in creates and e not in channel]
         if others:

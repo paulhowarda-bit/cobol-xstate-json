@@ -131,6 +131,9 @@ _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
 # DISPLAY message literals carry English and colons, and every keyword scan below that
 # runs over raw statement text must not see into them.
 from .semantics import mask_literals  # noqa: E402
+# Every table a statement names. Lives with the parser, which needs it for a cursor
+# DECLAREd outside the procedure division and must not import this modelling module.
+from cobol_parser.parser import _sql_table_refs  # noqa: E402
 
 
 def _parse_call_args(cobol: str) -> List[str]:
@@ -432,6 +435,29 @@ def _dml_split(host_vars: List[str], where_vars: Set[str],
     return fields, params
 
 
+def _read_tables(hits: List[dict], tables: Sequence[str], verb: str) -> List[dict]:
+    """One `get` per further table a statement names, after its primary hits.
+
+    The primary endpoint is the first table after FROM (or the INSERT/UPDATE/DELETE
+    target), and until this every joined, comma-listed or subquery table was absent
+    from every view. Each further table is READ - no fields and no columns, because
+    which of its columns reach which host variable is a separate question. A table
+    already an endpoint of the statement is not repeated (a qualified cursor table
+    counts by its last part, the way `_sql_table_refs` names it).
+
+    `secondaryTable` says the table is read inside Db2 and no row of it arrives as this
+    hit's own delivery: without it a DELETE with a subquery read as a record delivery,
+    and the reactive view waited for an event that never comes."""
+    seen = {str(h["endpoint"]).split(".")[-1] for h in hits}
+    for table in tables:
+        if table not in seen:
+            seen.add(table)
+            hit = _hit("get", _DB2, table, verb, [])
+            hit["secondaryTable"] = True
+            hits.append(hit)
+    return hits
+
+
 def _note(hit: dict, note: Optional[str], unresolved: Optional[str] = None) -> dict:
     """Attach the why-no-mapping note to a hit, so the EVENT carries it.
 
@@ -535,9 +561,13 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
 def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                    cursors: Dict[str, str],
                    cursor_cols: Optional[Dict[str, List[str]]] = None,
-                   cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None
+                   cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None,
+                   cursor_refs: Optional[Dict[str, List[str]]] = None
                    ) -> List[dict]:
-    """Classify an EXEC SQL / CICS / DLI action -> list of boundary hits."""
+    """Classify an EXEC SQL / CICS / DLI action -> list of boundary hits.
+
+    ``cursor_refs`` is cursor -> every table its DECLARE names (`_cursor_table_refs`):
+    a FETCH's text names only the cursor, so its further tables come from there."""
     up = cobol.upper()
     verb = (spec or {}).get("verb", "")
     if not verb:
@@ -575,6 +605,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     if is_sql:
         if verb in ("SELECT", "FETCH"):
             endpoint = None
+            tables = _sql_table_refs(mup) if verb == "SELECT" else []
             if verb == "FETCH":
                 cname = _fetch_cursor_name(spec, up)
                 if (spec or {}).get("cursorDynamic"):
@@ -594,6 +625,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                     return [_note(hit, note)]
                 if cname:
                     endpoint = cursors.get(cname) or f"<cursor {cname}>"
+                    tables = (cursor_refs or {}).get(cname) or []
                 if columns is None and note is None:
                     # Spec-less overlay (reactive's rewritten config): correlate here.
                     columns, note, unresolved = _fetch_columns(
@@ -611,29 +643,32 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 fields, wparams = _dml_split(params, where_vars, None)
                 hits.append(_hit("create", _DB2, endpoint, change.group(1).upper(),
                                  fields, wparams))
-            return hits
+            return _read_tables(hits, tables, verb)
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
             ep = m.group(1) if m else "<table>"
             # A plain VALUES insert has no WHERE and splits into nothing; an
             # `INSERT ... SELECT ... WHERE` filters the rows it copies.
             fields, params = _dml_split(host_vars, where_vars, columns)
-            return [_note(_hit("create", _DB2, ep, verb, fields, params,
-                               columns=_qualify(columns, ep)), note, unresolved)]
+            return _read_tables([_note(_hit("create", _DB2, ep, verb, fields, params,
+                                             columns=_qualify(columns, ep)),
+                                       note, unresolved)], _sql_table_refs(mup), verb)
         if verb == "UPDATE":
             m = _SQL_UPDATE.search(up)
             ep = m.group(1) if m else "<table>"
             fields, params = _dml_split(host_vars, where_vars, columns)
-            return [_note(_hit("create", _DB2, ep, verb, fields, params,
-                               columns=_qualify(columns, ep)), note, unresolved)]
+            return _read_tables([_note(_hit("create", _DB2, ep, verb, fields, params,
+                                             columns=_qualify(columns, ep)),
+                                       note, unresolved)], _sql_table_refs(mup), verb)
         if verb == "DELETE":
             m = _SQL_FROM.search(mup)
             # EVERY host variable in a DELETE is a filter. The statement has no SET and
             # no VALUES clause, so it writes no field's value anywhere - it only picks
             # which row goes. That holds structurally, which is why this needs no
             # `whereVars` to be sure of it: a spec-less overlay splits the same way.
-            return [_hit("create", _DB2, m.group(1) if m else "<table>", verb,
-                         [], params=_dedup(host_vars))]
+            return _read_tables([_hit("create", _DB2, m.group(1) if m else "<table>", verb,
+                                      [], params=_dedup(host_vars))],
+                                _sql_table_refs(mup), verb)
         if verb in ("PREPARE", "EXECUTE"):
             # Dynamic SQL: the statement text is a run-time value, so the operation and
             # table(s) are not statically knowable. One endpoint, both directions (the
@@ -779,7 +814,8 @@ _OPEN_MODES = re.compile(
 def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
               files: Dict[str, dict], cursors: Dict[str, str],
               cursor_cols: Optional[Dict[str, List[str]]] = None,
-              cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None
+              cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None,
+              cursor_refs: Optional[Dict[str, List[str]]] = None
               ) -> List[dict]:
     """Classify one entry action -> list of boundary hits (empty if internal).
 
@@ -792,7 +828,7 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
 
     if verb == "EXEC" or name.startswith(("exec_sql", "exec_cics", "exec_dli")):
         hits = _classify_exec(name, up, spec, dv, cursors, cursor_cols,
-                              cursor_derivations)
+                              cursor_derivations, cursor_refs)
         # What the Db2 precompiler rewrote on the way, stamped on every hit of the
         # statement rather than at each of the SQL branch's return sites: both are facts
         # about the STATEMENT, not about one crossing it makes. `fields` holds elementary
@@ -1039,7 +1075,8 @@ def _linkage_records(data: Optional[dict]) -> List[str]:
 def seed_cursor_maps(cursors: Dict[str, str],
                      cursor_cols: Dict[str, List[Optional[str]]],
                      cursor_derivs: Dict[str, List[Optional[dict]]],
-                     sql_cursors: Optional[Sequence[dict]]) -> None:
+                     sql_cursors: Optional[Sequence[dict]],
+                     cursor_refs: Optional[Dict[str, List[str]]] = None) -> None:
     """Fold the whole-stream cursor-DECLARE scan into the three provenance-built maps.
 
     `_cursor_tables` / `_cursor_columns` / `_cursor_derivations` read provenance and
@@ -1068,6 +1105,8 @@ def seed_cursor_maps(cursors: Dict[str, str],
             cursor_cols.setdefault(cname, decl["selectList"])
         if decl.get("selectDerivations"):
             cursor_derivs.setdefault(cname, decl["selectDerivations"])
+        if cursor_refs is not None and decl.get("tables"):
+            cursor_refs.setdefault(cname, decl["tables"])
 
 
 def _cursor_tables(provenance: dict) -> Dict[str, str]:
@@ -1079,6 +1118,19 @@ def _cursor_tables(provenance: dict) -> Dict[str, str]:
         m = _DECLARE_CURSOR.search(mask_literals((prov or {}).get("cobol", "") or ""))
         if m:
             out[m.group(1).upper()] = m.group(2).upper()
+    return out
+
+
+def _cursor_table_refs(provenance: dict) -> Dict[str, List[str]]:
+    """cursor-name -> EVERY table its DECLARE names, from the same texts as
+    `_cursor_tables`. Its own map because three call sites depend on that one's values
+    being one plain table name; a cursor over a join reads them all."""
+    out: Dict[str, List[str]] = {}
+    for prov in (provenance or {}).values():
+        text = mask_literals((prov or {}).get("cobol", "") or "").upper()
+        m = _DECLARE_CURSOR.search(text)
+        if m:
+            out[m.group(1)] = _sql_table_refs(text)
     return out
 
 
@@ -1173,7 +1225,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
     cursor_derivs = _cursor_derivations(semantics)
-    seed_cursor_maps(cursors, cursor_cols, cursor_derivs, sql_cursors)
+    cursor_refs = _cursor_table_refs(provenance)
+    seed_cursor_maps(cursors, cursor_cols, cursor_derivs, sql_cursors, cursor_refs)
     linkage_all = {n.upper() for n, it in (data or {}).items()
                    if isinstance(it, dict) and it.get("section") == "LINKAGE"}
     # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and
@@ -1223,6 +1276,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
         for k in ("cursor", "preparedStatement"):
             if hit.get(k):
                 entry[k] = hit[k]
+        if hit.get("secondaryTable"):
+            entry["secondaryTable"] = True
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
         # one came through, `candidates` the literals an ambiguous one may be, with
@@ -1260,7 +1315,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             line = prov.get("line", 0)
             spec = actions.get(aname)
             hits = _classify(aname, cobol, spec, dv, files, cursors, cursor_cols,
-                             cursor_derivs)
+                             cursor_derivs, cursor_refs)
             if internal_programs:
                 # A CALL / LINK / XCTL to a program contained in this source is internal:
                 # tag its program endpoint so downstream views list it as an internal call,

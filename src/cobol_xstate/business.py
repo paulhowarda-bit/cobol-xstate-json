@@ -137,9 +137,10 @@ class _BusinessView:
         # boundary action carried no columns (only the interface build passed this).
         self._cursor_cols = _iface._cursor_columns(machine.semantics, machine.provenance)
         self._cursor_derivs = _iface._cursor_derivations(machine.semantics)
+        self._cursor_refs = _iface._cursor_table_refs(machine.provenance)
         # ...and the whole-stream scan, for a DECLARE that never became an action.
         _iface.seed_cursor_maps(self._cursors, self._cursor_cols, self._cursor_derivs,
-                                getattr(machine, "sql_cursors", None))
+                                getattr(machine, "sql_cursors", None), self._cursor_refs)
         self.ordered: List[str] = machine.paragraph_order
         self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
@@ -411,7 +412,7 @@ class _BusinessView:
             hits = _iface._classify(aname, prov.get("cobol", ""),
                                     self.actions.get(aname), self._dv,
                                     self.files, self._cursors, self._cursor_cols,
-                                    self._cursor_derivs)
+                                    self._cursor_derivs, self._cursor_refs)
             if hits:
                 for hit in hits:
                     # The FIELDS crossing here are the point of a boundary state: an
