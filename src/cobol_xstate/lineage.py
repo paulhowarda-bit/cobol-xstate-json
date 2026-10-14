@@ -215,11 +215,12 @@ class _Lineage:
         # say a value comes from `TABLE.COLUMN`, lost that entirely for cursor programs.
         self.cursor_cols = _iface._cursor_columns(machine.semantics, self.provenance)
         self.cursor_derivs = _iface._cursor_derivations(machine.semantics)
+        self.cursor_refs = _iface._cursor_table_refs(self.provenance)
         # ...and the DECLAREs that never became actions at all (data division /
         # copybook), which provenance and semantics cannot see. Without this the row's
         # endpoint is a phantom `<cursor X>` while the bundle event names the table.
         _iface.seed_cursor_maps(self.cursors, self.cursor_cols, self.cursor_derivs,
-                                getattr(machine, "sql_cursors", None))
+                                getattr(machine, "sql_cursors", None), self.cursor_refs)
         # action name -> its classification. Every argument `_apply` passes to
         # `_classify` other than the name is fixed for this instance's lifetime, so the
         # result is invariant across visits - but the worklist calls `_apply` once per
@@ -770,7 +771,7 @@ class _Lineage:
             if hits is None:
                 hits = _iface._classify(aname, cobol, spec, self.dv, self.files,
                                         self.cursors, self.cursor_cols,
-                                        self.cursor_derivs)
+                                        self.cursor_derivs, self.cursor_refs)
                 self._classify_memo[aname] = hits
             got = [h for h in hits if h["direction"] == "get"]
             made = [h for h in hits if h["direction"] == "create"]
@@ -1112,7 +1113,7 @@ class _Lineage:
             if hits is None:
                 hits = _iface._classify(aname, prov.get("cobol", ""), spec, self.dv,
                                         self.files, self.cursors, self.cursor_cols,
-                                        self.cursor_derivs)
+                                        self.cursor_derivs, self.cursor_refs)
                 self._classify_memo[aname] = hits
             # Same fallback `_apply` makes: a write into a LINKAGE item is a
             # caller-visible output the event classifier does not recognize on its own.

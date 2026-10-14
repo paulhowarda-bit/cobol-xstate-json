@@ -1159,3 +1159,197 @@ def test_opening_an_ordinary_cursor_still_crosses_nothing():
     assert not [e for e in iface["events"] if e["verb"] == "OPEN"]
     assert all(e["verb"] != "INSERT" or e["endpointType"] != "db2"
                for e in iface["events"])
+
+
+# --------------------------------------------------------------------------- #
+# jointest: every table a statement names, not only the first after FROM
+# (upstream ledger item 65)
+#
+# A joined, comma-listed or subquery table got no boundary hit, and every view re-projects
+# those hits, so it was absent from the manifest, the interface and the bundle alike.
+# --------------------------------------------------------------------------- #
+
+# (verb, primary endpoint, its direction, the further table the statement reads)
+_JOINTEST = [
+    ("SELECT", "T_COMMA_FIRST", "get", "T_COMMA_SECOND"),
+    ("SELECT", "T_JOIN_FIRST", "get", "T_JOIN_SECOND"),
+    ("SELECT", "T_SUB_OUTER", "get", "T_SUB_INNER"),
+    ("DELETE", "T_DEL_TARGET", "create", "T_DEL_SUB"),
+    ("INSERT", "T_INS_TARGET", "create", "T_INS_SOURCE"),
+    ("UPDATE", "T_UPD_TARGET", "create", "T_UPD_SUB"),
+    ("FETCH", "T_CUR_FIRST", "get", "T_CUR_JOINED"),
+]
+
+
+def _db2_by_statement(iface):
+    by_line = {}
+    for e in iface["events"]:
+        if e["endpointType"] == "db2":
+            by_line.setdefault(e["line"], []).append(e)
+    return [by_line[k] for k in sorted(by_line)]
+
+
+def _inline_machine(data_body, proc_body):
+    src = ("       IDENTIFICATION DIVISION.\n"
+           "       PROGRAM-ID. T.\n"
+           "       DATA DIVISION.\n"
+           "       WORKING-STORAGE SECTION.\n"
+           "       01  WS-A            PIC X(10).\n"
+           "       01  WS-B            PIC X(10).\n" + data_body +
+           "       PROCEDURE DIVISION.\n"
+           "       0000-MAIN.\n" + proc_body +
+           "           GOBACK.\n")
+    return build_machine(parse_program(src))
+
+
+def _db2_endpoints(proc_body, data_body=""):
+    return set(_dirs(_inline_machine(data_body, proc_body).bundle()["interface"], "db2"))
+
+
+def test_every_table_each_statement_names_is_published():
+    """JOINTEST.cbl: the item's seven shapes, fourteen tables, seven of them in no view
+    before."""
+    iface = _iface("jointest.cbl")
+    assert set(_dirs(iface, "db2")) == {t for row in _JOINTEST for t in row[1::2]}
+
+
+def test_the_first_table_keeps_its_hit_and_each_further_table_is_a_bare_read():
+    stmts = _db2_by_statement(_iface("jointest.cbl"))
+    assert [len(evs) for evs in stmts] == [2] * len(_JOINTEST)
+    assert [(evs[0]["verb"], evs[0]["endpoint"], evs[0]["direction"], evs[1]["endpoint"])
+            for evs in stmts] == _JOINTEST
+    for first, further in stmts:
+        assert "secondaryTable" not in first
+        assert (further["direction"], further["verb"]) == ("get", first["verb"])
+        assert further["fields"] == []
+        assert "columns" not in further and "params" not in further
+        assert further["secondaryTable"] is True
+    # The primary hit is untouched: its column mapping is exactly what it was.
+    cols = {evs[0]["endpoint"]: [(c["table"], c["column"], c["hostVar"])
+                                 for c in evs[0].get("columns") or []] for evs in stmts}
+    assert cols["T_COMMA_FIRST"] == [("T_COMMA_FIRST", "COL1", "WS-A"),
+                                     ("T_COMMA_FIRST", "COL2", "WS-B")]
+    assert cols["T_UPD_TARGET"] == [("T_UPD_TARGET", "COL1", "WS-A")]
+    assert cols["T_CUR_FIRST"] == [("T_CUR_FIRST", "COL1", "WS-A"),
+                                   ("T_CUR_FIRST", "COL2", "WS-B")]
+
+
+def test_the_manifest_lists_every_table_and_the_further_ones_as_read():
+    from cobol_xstate.artifacts import build_artifacts
+    m = build_machine(parse_program((EXAMPLES / "jointest.cbl").read_text()),
+                      source_name="jointest.cbl")
+    io = {a["artifact"]: a["io"] for a in build_artifacts(m)["artifacts"]
+          if a["kind"] == "db2-table"}
+    assert len(io) == 14
+    for verb, primary, direction, further in _JOINTEST:
+        assert io[primary] == ("read" if direction == "get" else "write"), primary
+        assert io[further] == "read", further
+
+
+def test_a_fetch_on_a_procedure_division_cursor_over_a_join_reads_both_tables():
+    """JOINTEST's cursor is DECLAREd in WORKING-STORAGE (the whole-stream scan's
+    `tables`); this one is DECLAREd where provenance sees it (`_cursor_table_refs`)."""
+    from cobol_xstate.interface import _cursor_table_refs
+    m = _inline_machine("", (
+        "           EXEC SQL DECLARE CPD CURSOR FOR\n"
+        "               SELECT A.COL1, B.COL2 FROM T_PD_FIRST A\n"
+        "               INNER JOIN T_PD_JOINED B ON A.K = B.K\n"
+        "           END-EXEC\n"
+        "           EXEC SQL OPEN CPD END-EXEC\n"
+        "           EXEC SQL FETCH CPD INTO :WS-A, :WS-B END-EXEC\n"))
+    assert _cursor_table_refs(m.provenance) == {"CPD": ["T_PD_FIRST", "T_PD_JOINED"]}
+    fetch = [(e["endpoint"], bool(e.get("columns")), e.get("secondaryTable"))
+             for e in m.bundle()["interface"]["events"] if e["verb"] == "FETCH"]
+    assert fetch == [("T_PD_FIRST", True, None), ("T_PD_JOINED", False, True)]
+
+
+def test_a_parse_bundle_without_cursor_tables_publishes_only_the_cursor_table():
+    """A v<=10 parse bundle never recorded `tables`: unknown, so a FETCH on a
+    WORKING-STORAGE cursor publishes its `table` alone, exactly as before."""
+    from cobol_parser.parse_bundle import program_from_dict, program_to_dict
+    doc = program_to_dict(parse_program((EXAMPLES / "jointest.cbl").read_text()))
+    for c in doc["sql_cursors"]:
+        del c["tables"]
+    m = build_machine(program_from_dict(doc), source_name="jointest.cbl")
+    assert [e["endpoint"] for e in m.bundle()["interface"]["events"]
+            if e["verb"] == "FETCH"] == ["T_CUR_FIRST"]
+
+
+def test_a_from_inside_a_function_publishes_no_table():
+    assert _db2_endpoints(
+        "           EXEC SQL SELECT COL1 INTO :WS-A FROM T_FN\n"
+        "                WHERE YR = EXTRACT(YEAR FROM D_DATE)\n"
+        "                  AND CD = TRIM(LEADING '0' FROM C_CODE)\n"
+        "                  AND NM = SUBSTRING(C_NAME FROM 1 FOR 3)\n"
+        "           END-EXEC\n") == {"T_FN"}
+
+
+def test_a_common_table_expression_is_not_a_table_but_what_it_reads_is():
+    assert _db2_endpoints(
+        "           EXEC SQL INSERT INTO T_CTE_TGT (K)\n"
+        "                WITH X AS (SELECT K FROM T_CTE_BASE)\n"
+        "                SELECT K FROM X, T_CTE_OTHER\n"
+        "           END-EXEC\n") == {"T_CTE_TGT", "T_CTE_BASE", "T_CTE_OTHER"}
+
+
+def test_a_data_change_reference_still_publishes_its_table_once():
+    """`FROM FINAL TABLE (INSERT INTO t ...)` reads and writes t - one get, one create,
+    and no further read of the same table."""
+    iface = _iface("sqlchange.cbl")
+    assert not [e for e in iface["events"] if e.get("secondaryTable")]
+    log = [(e["direction"], e["verb"]) for e in iface["events"]
+           if e["endpoint"] == "ACCT_LOG"]
+    assert sorted(log) == [("create", "INSERT"), ("get", "SELECT")]
+
+
+def test_a_table_function_or_lateral_publishes_only_the_base_tables_it_reads():
+    assert _db2_endpoints(
+        "           EXEC SQL SELECT Q.K INTO :WS-A\n"
+        "                FROM T_TF_BASE B, TABLE (F_TBL(B.K)) AS Q\n"
+        "           END-EXEC\n"
+        "           EXEC SQL SELECT L.M INTO :WS-B\n"
+        "                FROM T_LAT_BASE B,\n"
+        "                     LATERAL (SELECT MAX(V) AS M FROM T_LAT_INNER I\n"
+        "                              WHERE I.K = B.K) AS L\n"
+        "           END-EXEC\n") == {"T_TF_BASE", "T_LAT_BASE", "T_LAT_INNER"}
+
+
+def test_a_correlation_name_is_never_published():
+    assert _db2_endpoints(
+        "           EXEC SQL SELECT A.COL1 INTO :WS-A\n"
+        "                FROM T_COR_A A, T_COR_B AS B WHERE A.K = B.K\n"
+        "           END-EXEC\n") == {"T_COR_A", "T_COR_B"}
+
+
+def test_a_string_constant_naming_a_table_publishes_nothing():
+    assert _db2_endpoints(
+        "           EXEC SQL SELECT COL1 INTO :WS-A FROM T_STR\n"
+        "                WHERE N = 'FROM T_GHOST' OR N = 'JOIN T_SPOOK'\n"
+        "           END-EXEC\n") == {"T_STR"}
+
+
+def _waits(node):
+    """Every event some state of a reactive machine waits on."""
+    out = set()
+    if isinstance(node, dict):
+        out |= set((node.get("on") or {}) if isinstance(node.get("on"), dict) else ())
+        for v in node.values():
+            out |= _waits(v)
+    elif isinstance(node, list):
+        for v in node:
+            out |= _waits(v)
+    return out
+
+
+def test_the_reactive_view_waits_on_no_further_table():
+    """A further table is read inside Db2: the statement's own event carries what
+    arrives. Lowered to a wait, a DELETE with a subquery blocked for an event that never
+    comes, and every join added a 'multiple inbound gets' flag."""
+    m = build_machine(parse_program((EXAMPLES / "jointest.cbl").read_text()),
+                      source_name="jointest.cbl")
+    view = build_reactive_view(m)
+    waits = _waits(view["machine"])
+    assert not {f"GET.DB2.{row[3]}" for row in _JOINTEST} & waits
+    assert {"GET.DB2.T_COMMA_FIRST", "GET.DB2.T_CUR_FIRST"} <= waits
+    assert not [f for f in view["flags"] if "multiple inbound gets" in str(f)
+                or "unhandled perimeter" in str(f)]
