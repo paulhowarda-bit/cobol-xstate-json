@@ -91,8 +91,10 @@ For each step, its **inputs** and **outputs** - the DDs, resolved to datasets - 
     "runsWhen": "runs unless 4 LT the RC of any preceding step" } } }
 ```
 
-- **`ddBindings`** - the join that closes the loop with the COBOL side. For each step
-  running a program, the `ddname -> dataset` binding. A COBOL program's interface knows only
+- **`ddBindings`** - the join that closes the loop with the COBOL side. For each step,
+  the `ddname -> dataset` binding; a step whose PROC the estate does not hold binds its
+  DDs with `program: null` (`formatVersion` 5) - its program is unknown, the datasets it
+  reads are not. A COBOL program's interface knows only
   `SELECT OUT-FILE ASSIGN OUTDD`; its artifact manifest could only say *"OUTDD, DSN in the
   JCL"*. This says `OUTDD -> PROD.ACCT.UNLOAD` - the dataset that program was missing. Join
   a COBOL `file` artifact's `ddname` to a JCL `ddBindings` row on `(program, ddname)` and the

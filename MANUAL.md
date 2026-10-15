@@ -939,7 +939,8 @@ byte-field lineage from utility control cards (`fieldLineage`: `SORT OUTREC BUIL
 recovered; `COND=` parsed with its back-to-front bypass sense spelt out as `runsWhen`), and
 **`ddBindings`** — the `ddname → dataset` join that supplies the DSN a COBOL program's
 `file` artifact was missing (a concatenated DD has one row per dataset, each with its
-1-based `concatIndex`, so a row is keyed on step + ddname + `concatIndex`). The **artifacts** view is the related-artifact manifest in the
+1-based `concatIndex`, so a row is keyed on step + ddname + `concatIndex`; a step whose PROC
+the estate does not hold binds its DDs with `program: null`). The **artifacts** view is the related-artifact manifest in the
 same shape as the COBOL one (datasets / programs / PROCs / INCLUDE / control-card members;
 `dependency` runtime vs compile-time; GDGs keyed on the base).
 
