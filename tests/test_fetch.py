@@ -170,17 +170,32 @@ def test_only_immediate_dependencies_are_fetched():
 
 
 def test_one_member_is_one_round_trip_however_many_rows_reach_it():
-    """A JCL job that both EXECs PAYPROC and names it as a called program produces two
-    rows for one member. Asking the estate twice for the same thing is waste that scales
-    with the estate, so the second row reports what happened instead of repeating it."""
+    """An INCLUDE member and a control card of one name are both asked for as `cntl` -
+    one member as far as the estate can tell. Asking twice for the same thing is waste
+    that scales with the estate, so the second row reports what happened instead."""
+    calls = []
+    man = {"program": "PAYJOB", "artifacts": [
+        {"artifact": "AUDITLOG", "kind": "include-member", "dependency": "compile-time"},
+        {"artifact": "LIB(AUDITLOG)", "kind": "control-card", "dependency": "runtime"},
+    ]}
+    rep = fetch_dependencies(man, _fetcher(log=calls))
+    assert calls == [("AUDITLOG", "cntl")]
+    assert [r["status"] for r in rep["artifacts"]] == ["fetched", "already-fetched"]
+
+
+def test_a_name_reached_as_two_kinds_is_two_retrievals():
+    """A JCL job that both EXECs PAYPROC and names it as a called program reaches two
+    members that share a name: the PROC, and the program's source. Collapsing them
+    reported the second `already-fetched` when it had never been asked for (upstream
+    ledger item 66: one row per (name, kind))."""
     calls = []
     man = {"program": "PAYJOB", "artifacts": [
         {"artifact": "AUDITLOG", "kind": "program", "dependency": "runtime"},
         {"artifact": "AUDITLOG", "kind": "proc", "dependency": "compile-time"},
     ]}
     rep = fetch_dependencies(man, _fetcher(log=calls))
-    assert [n for n, _ in calls].count("AUDITLOG") == 1
-    assert [r["status"] for r in rep["artifacts"]] == ["fetched", "already-fetched"]
+    assert calls == [("AUDITLOG", "cobol"), ("AUDITLOG", "proc")]
+    assert [r["status"] for r in rep["artifacts"]] == ["fetched", "fetched"]
 
 
 def test_a_prefetched_member_is_reported_but_not_requested_again():
@@ -191,7 +206,8 @@ def test_a_prefetched_member_is_reported_but_not_requested_again():
         "       0000-MAIN.\n"
         "           CALL 'DEMOC104'.\n")
     rep = fetch_dependencies(man, _fetcher(log=calls),
-                             prefetched={"DEMOC104": ("...text...", "PROD.SRCLIB")})
+                             prefetched={("DEMOC104", "cobol"): ("...text...",
+                                                                 "PROD.SRCLIB")})
     row = _by(rep, "DEMOC104")
     assert row["status"] == "prefetched"
     assert row["source"] == "PROD.SRCLIB"
@@ -463,20 +479,22 @@ def _slow_fetcher(peak, log=None):
 
 
 # Every branch the recording pass can take, in one plan: two fetchable programs, a table,
-# a member the estate lacks, one whose request fails outright, a duplicate name, the
-# subject itself, a row that was never fetchable, and one stage 1 already paid for.
+# a member the estate lacks, one whose request fails outright, a duplicate row, a copybook
+# sharing a program's name (its own retrieval), the subject itself, a row that was never
+# fetchable, and one stage 1 already paid for.
 MIXED = {"program": "MAINPGM", "artifacts": [
     {"artifact": "DEMOC104", "kind": "program", "dependency": "runtime"},
     {"artifact": "ACCOUNT", "kind": "db2-table", "dependency": "runtime"},
     {"artifact": "GONE", "kind": "program", "dependency": "runtime"},
     {"artifact": "BOOM", "kind": "program", "dependency": "runtime"},
     {"artifact": "AUDITLOG", "kind": "program", "dependency": "runtime"},
+    {"artifact": "DEMOC104", "kind": "program", "dependency": "runtime"},
     {"artifact": "DEMOC104", "kind": "copybook", "dependency": "compile-time"},
     {"artifact": "MAINPGM", "kind": "program", "dependency": "runtime"},
     {"artifact": "CALLER", "kind": "caller", "dependency": "runtime"},
     {"artifact": "CUSTCPY", "kind": "copybook", "dependency": "compile-time"},
 ]}
-PRE = {"CUSTCPY": ("       01 CUST-REC PIC X(80).\n", "PROD.COPYLIB")}
+PRE = {("CUSTCPY", "copybook"): ("       01 CUST-REC PIC X(80).\n", "PROD.COPYLIB")}
 
 
 def test_the_plan_is_fetched_concurrently_and_still_reported_in_plan_order():
@@ -493,7 +511,7 @@ def test_the_plan_is_fetched_concurrently_and_still_reported_in_plan_order():
 
     assert [r["status"] for r in seq["artifacts"]] == [
         "fetched", "fetched", "not-found", "error", "fetched",
-        "already-fetched", "skipped", "skipped", "prefetched"]
+        "already-fetched", "fetched", "skipped", "skipped", "prefetched"]
 
 
 def test_a_duplicate_name_is_still_one_round_trip_when_requests_overlap():
@@ -502,9 +520,10 @@ def test_a_duplicate_name_is_still_one_round_trip_when_requests_overlap():
     collapse when the plan is read, before anything is dispatched."""
     calls = []
     rep = fetch_dependencies(MIXED, _slow_fetcher([0], log=calls), prefetched=PRE, jobs=8)
-    assert [n for n, _ in calls].count("DEMOC104") == 1
+    assert calls.count(("DEMOC104", "cobol")) == 1
+    assert calls.count(("DEMOC104", "copybook")) == 1      # another member of that name
     # ...and the row that did NOT cause the round-trip is still the second one
     dup = [r for r in rep["artifacts"] if r["artifact"] == "DEMOC104"]
-    assert [r["status"] for r in dup] == ["fetched", "already-fetched"]
+    assert [r["status"] for r in dup] == ["fetched", "already-fetched", "fetched"]
     # the member stage 1 paid for is never requested at all
     assert "CUSTCPY" not in [n for n, _ in calls]

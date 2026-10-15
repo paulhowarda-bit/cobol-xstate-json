@@ -12,9 +12,10 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 from cobol_parser.prefetch import prefetch_cobol  # noqa: F401  (re-export)
+from mainframe_artifacts.prefetch import lookup
 
 
-def attribute_resolution(manifest: dict, program, store: Dict[str, Tuple[str, str]]
+def attribute_resolution(manifest: dict, program, store: Dict[tuple, Tuple[str, str]]
                          ) -> dict:
     """Mark the manifest rows that owe their resolution to stage 1.
 
@@ -38,7 +39,7 @@ def attribute_resolution(manifest: dict, program, store: Dict[str, Tuple[str, st
         if not via:
             continue
         member = origins.get(str(via).upper())
-        if member and member in store:
+        if member and lookup(store, member, "copybook") is not None:
             row["resolvedBy"] = {
                 "stage": "prefetch", "member": member,
                 "note": (f"{via} is declared in {member}, retrieved before the parse; "
