@@ -73,6 +73,7 @@ _NAMES = {
     "queue": "queue",
     "file": "file",
     "map": "BMS map",
+    "db2_proc": "stored procedure",
 }
 # The caller event, which is not an artifact on the estate but a fact about who invokes
 # this program - a different answer, and a different place to go looking.
@@ -368,7 +369,9 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
             "program": machine.program_id,
             "item": item,
             "names": kind,
-            "verb": site["verb"],
+            # `EXEC SQL CALL :X` and `CALL X` are both verb CALL on the interface; the
+            # endpoint type is what tells them apart there, and this row says it.
+            "verb": ("SQL " if site["endpointType"] == "db2_proc" else "") + site["verb"],
             "line": site["line"],
             "statement": site["cobol"],
             "state": site["state"],
@@ -397,7 +400,7 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
         unresolved = (machine.unresolved_calls or {}).get(item, {})
         row["why"] = (
             f"{item} is a data item, not a {kind} name: the target is whatever value it "
-            f"holds when the {site['verb']} runs, and this program does not fix it - "
+            f"holds when the {row['verb']} runs, and this program does not fix it - "
             + (unresolved.get("reason") or
                "constant propagation could not prove a single literal reaches here"))
 

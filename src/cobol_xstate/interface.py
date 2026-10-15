@@ -686,14 +686,24 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             # the event stops downstream tooling from hunting for them. Both
             # directions, because which parameters are IN and which are OUT is the
             # procedure's signature, which is not in this source.
-            proc = (spec or {}).get("target")
+            # `CALL :X` names it through a host variable: statechart._exec_resources
+            # resolved X (PROCEDURE) or kept it as the item, marked dynamic - the same
+            # answer a dynamic COBOL CALL publishes. X is the procedure's NAME, not a
+            # parameter: as a field, the procedure would fill the item that names it.
+            rs = (spec or {}).get("resources") or {}
+            proc = _resource(rs, "PROCEDURE", (spec or {}).get("target"))
+            params = list(host_vars)
+            r = rs.get("PROCEDURE")
+            if r and (r.get("via") or r["name"]) in params:
+                params.remove(r.get("via") or r["name"])
             if not proc:
                 m = _SQL_CALL.search(mup)
                 proc = m.group(1).upper() if m else "<procedure>"
             note = ("stored-procedure parameters, not table columns; their IN/OUT "
                     "direction is the procedure's signature, which is not in this "
                     "source")
-            return [_note(_hit(d, _DB2_PROC, proc, verb, host_vars), note)
+            return [_mark_dynamic(_note(_hit(d, _DB2_PROC, proc, verb, params), note),
+                                  rs, "PROCEDURE")
                     for d in ("get", "create")]
         change = (spec or {}).get("dataChange") if verb == "OPEN" else None
         if change:

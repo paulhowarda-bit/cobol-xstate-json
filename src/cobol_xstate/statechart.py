@@ -657,7 +657,14 @@ class _ParaCompiler:
         text still carries: ``PROGRAM('X')`` IS the resource name; ``PROGRAM(data-name)``
         is a data item holding it, resolved by the same constant propagation as a
         dynamic batch CALL - resolve where provable, flag (don't guess) otherwise.
-        Returns {OPTION: {name, via?, reason?, dynamic?, candidates?}}."""
+        Returns {OPTION: {name, via?, reason?, dynamic?, candidates?}}.
+
+        ``EXEC SQL CALL :X`` is the same situation with one operand, PROCEDURE: X holds
+        the procedure name, so it is resolved and flagged exactly like ``CALL X``."""
+        if st.lang == "SQL" and st.target_item:
+            item = st.target_item.upper()
+            return {"PROCEDURE": self._resolve_operand(
+                st, item, None, f"dynamic SQL CALL :{item}")}
         if st.lang != "CICS":
             return {}
         out: dict = {}
@@ -673,29 +680,32 @@ class _ParaCompiler:
                               f"dynamic CICS {st.verb} {opt}({operand}) - {operand} is "
                               f"a CICS-supplied EIB field; value runtime-determined")
             else:
-                res = self.ctx.calls.resolve(
-                    operand, operand_limit=_CICS_PROGRAM_LEN if opt == "PROGRAM" else None)
-                if res.confident and res.resolved:
-                    out[opt] = {"name": res.resolved, "via": operand,
-                                "reason": res.reason}
-                else:
-                    entry: dict = {"name": operand, "dynamic": True}
-                    if res.candidates:
-                        entry["candidates"] = res.candidates
-                    if res.rejected:
-                        entry["rejectedCandidates"] = res.rejected
-                    out[opt] = entry
-                    self.ctx.flag(self.pname, st.line,
-                                  f"dynamic CICS {st.verb} {opt}({operand}) - "
-                                  f"{res.reason}")
-                    self.ctx.unresolved_calls.setdefault(operand.upper(), {
-                        "reason": res.reason,
-                        "candidates": list(res.candidates or []),
-                        "hasVariableAssignment": bool(res.has_variable_assignment),
-                        "evidence": res.evidence,
-                        **({"rejectedCandidates": res.rejected} if res.rejected else {}),
-                    })
+                out[opt] = self._resolve_operand(
+                    st, operand, _CICS_PROGRAM_LEN if opt == "PROGRAM" else None,
+                    f"dynamic CICS {st.verb} {opt}({operand})")
         return out
+
+    def _resolve_operand(self, st: ExecStmt, operand: str, limit: Optional[int],
+                         site: str) -> dict:
+        """A resource-name operand that is a data item: its proven literal, else the
+        item itself marked dynamic, flagged as ``site``."""
+        res = self.ctx.calls.resolve(operand, operand_limit=limit)
+        if res.confident and res.resolved:
+            return {"name": res.resolved, "via": operand, "reason": res.reason}
+        entry: dict = {"name": operand, "dynamic": True}
+        if res.candidates:
+            entry["candidates"] = res.candidates
+        if res.rejected:
+            entry["rejectedCandidates"] = res.rejected
+        self.ctx.flag(self.pname, st.line, f"{site} - {res.reason}")
+        self.ctx.unresolved_calls.setdefault(operand.upper(), {
+            "reason": res.reason,
+            "candidates": list(res.candidates or []),
+            "hasVariableAssignment": bool(res.has_variable_assignment),
+            "evidence": res.evidence,
+            **({"rejectedCandidates": res.rejected} if res.rejected else {}),
+        })
+        return entry
 
     def _exec_action(self, st: ExecStmt) -> str:
         resources = self._exec_resources(st)
@@ -705,6 +715,10 @@ class _ParaCompiler:
         if prog.get("via"):
             note = (f" [PROGRAM({prog['via']}) -> resolved '{prog['name']}': "
                     f"{prog['reason']}]")
+        proc = resources.get("PROCEDURE", {})
+        if proc.get("via"):
+            note = (f" [CALL :{proc['via']} -> resolved '{proc['name']}': "
+                    f"{proc['reason']}]")
         if st.lang == "SQL" and st.verb in ("PREPARE", "EXECUTE"):
             self.ctx.flag(self.pname, st.line,
                           f"dynamic SQL: EXEC SQL {st.verb} - the statement text is "
