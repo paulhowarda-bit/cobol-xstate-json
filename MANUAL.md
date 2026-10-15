@@ -1276,7 +1276,9 @@ flag**, so a reviewer scanning only `flags` cannot miss it.
 ### Preprocessor
 
 - `COPY member [OF lib] [REPLACING ==a== BY ==b==]` — recursive with a cycle guard;
-  expanded lines carry their `origin` member for provenance.
+  expanded lines carry their `origin` member for provenance. The statement ends at the
+  first period outside pseudo-text and outside a literal, so `REPLACING ==05 :X:.==`
+  spread over several lines is one COPY (the same holds for `REPLACE`).
 - **Code preceding a `COPY` in the same sentence is preserved.**
 - `EXEC SQL INCLUDE member END-EXEC` — behaves like COPY.
 - Standalone `REPLACE ==a== BY ==b==` … `REPLACE OFF`.
@@ -1520,6 +1522,15 @@ procedure's signature, not in this source) whose fields are the procedure's
 *parameters*, never `columns`. In the artifact manifest it is a
 `db2-stored-procedure` row. Classified as a table, downstream tooling would hunt for
 column identities that cannot exist.
+
+**`EXEC SQL CALL :WS-PROC` names its procedure through a host variable**, which is the
+same situation as a dynamic `CALL WS-PGM` and is resolved by the same constant
+propagation. A single literal reaching the item (a `VALUE`, a `MOVE`, an 88-level
+`SET ... TO TRUE`) becomes the endpoint, qualified names kept as written
+(`SCH.PROCB`), with `via` naming the item. Anything else keeps the item as the endpoint,
+marked `dynamic` with its `candidates`, is flagged, and gets a `dynamic-calls` row with
+`"verb": "SQL CALL"`. The item is the procedure's name, never one of its parameters, so
+it is not among the event's `fields`.
 
 ### Field-level fidelity — what lands in `fields`
 
@@ -1828,6 +1839,7 @@ most are pinned by a test.
 | `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` or `--synonym-resolver` |
 | `sqlvarchar.cbl` | **VARCHAR host structures anchor on the parent** — `SELECT INTO` the level-49 pair's group, a `FETCH INTO` a record containing one, a column-list-less INSERT of such a record, and `MOVE`s out of the text child that keep the SELECT's origin |
 | `sqlproc.cbl` | **`EXEC SQL CALL` as a `db2_proc` endpoint** — parameters, not columns |
+| `sqlcallvar.cbl` | **`EXEC SQL CALL :host-variable`** — resolved from a `VALUE`, from a `MOVE`d qualified name, flagged with two candidates, and runtime-determined from an `ACCEPT` |
 | `custrec.cpy` | a copybook (COPY expansion + `member` provenance) |
 
 ---

@@ -482,3 +482,88 @@ def test_a_rejected_literal_is_never_fetched_as_a_candidate():
     fetch_dependencies(annotate_artifacts(art, view), mf, dynamic=view)
     assert {"PGMDSP0A", "PGMDSP0B", "PGMTO001", "PGMTO002"} <= set(got)
     assert not {"ZZZZZZZZ", "RUN COMPLETED NORMALLY OK", "ABCD??X", "ABCDE***"} & set(got)
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 72: EXEC SQL CALL :host-variable is a dynamic call like CALL X
+# --------------------------------------------------------------------------- #
+
+def _sql_call(ws: str, proc: str = "", call: str = "CALL :WS-P (:WS-IN)"):
+    return _view(f"""\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SQLDYN.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+{ws}
+       01  WS-IN         PIC X(10).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+{proc}           EXEC SQL
+               {call}
+           END-EXEC
+           GOBACK.
+""")
+
+
+def _proc_events(m):
+    return [e for e in m.interface()["events"] if e["endpointType"] == "db2_proc"]
+
+
+def _proc_rows(art):
+    return [r for r in art["artifacts"] if r["kind"] == "db2-stored-procedure"]
+
+
+def test_a_value_clause_names_the_procedure_a_host_variable_calls():
+    m, art, view = _sql_call("       01  WS-P          PIC X(8) VALUE 'PROCA'.")
+    assert {(e["endpoint"], e.get("via")) for e in _proc_events(m)} == {("PROCA", "WS-P")}
+    # The item names the procedure; it is not one of its parameters.
+    assert {tuple(e["fields"]) for e in _proc_events(m)} == {("WS-IN",)}
+    assert [(r["artifact"], r.get("via"), r.get("dynamic")) for r in _proc_rows(art)] \
+        == [("PROCA", "WS-P", None)]
+    # Resolved, so - exactly like a resolved `CALL WS-PGM` - not a dynamic call.
+    assert view["dynamicCalls"] == []
+    assert not [f for f in m.flags if "SQL CALL" in f["message"]]
+
+
+def test_a_moved_qualified_literal_is_published_as_written():
+    m, art, _view_ = _sql_call("       01  WS-P          PIC X(18).",
+                               "           MOVE 'SCH.PROCB' TO WS-P\n")
+    assert {e["endpoint"] for e in _proc_events(m)} == {"SCH.PROCB"}
+    assert [r["artifact"] for r in _proc_rows(art)] == ["SCH.PROCB"]
+
+
+def test_two_literals_reaching_the_item_stay_a_flagged_dynamic_call():
+    m, art, view = _sql_call("       01  WS-P          PIC X(8) VALUE 'PROCA'.",
+                             "           IF WS-IN = 'X'\n"
+                             "               MOVE 'PROCB' TO WS-P\n"
+                             "           END-IF\n")
+    assert {(e["endpoint"], e.get("dynamic")) for e in _proc_events(m)} == {("WS-P", True)}
+    [row] = _proc_rows(art)
+    assert (row["artifact"], row["dynamic"], row["candidates"]) == (
+        "WS-P", True, ["PROCA", "PROCB"])
+    dyn = _only(view)
+    assert (dyn["item"], dyn["verb"], dyn["names"], dyn["candidates"]) == (
+        "WS-P", "SQL CALL", "stored procedure", ["PROCA", "PROCB"])
+    assert dyn["sources"] == []          # the procedure does not supply its own name
+    assert [f["message"] for f in m.flags if "SQL CALL" in f["message"]] == [
+        "dynamic SQL CALL :WS-P - WS-P may be one of ['PROCA', 'PROCB']; "
+        "verify reaching definition"]
+
+
+def test_a_host_variable_set_only_from_a_variable_is_runtime_determined():
+    m, art, view = _sql_call("       01  WS-P          PIC X(8).\n"
+                             "       01  WS-Q          PIC X(8).",
+                             "           MOVE WS-Q TO WS-P\n")
+    assert {e["endpoint"] for e in _proc_events(m)} == {"WS-P"}
+    dyn = _only(view)
+    assert dyn["variableAssignment"] is True
+    assert dyn["deadEnds"] == ["WS-Q"]
+    assert "runtime-determined" in dyn["why"]
+
+
+def test_a_literal_procedure_name_is_unchanged():
+    m, art, view = _sql_call("       01  WS-P          PIC X(8) VALUE 'PROCA'.",
+                             call="CALL PROCC (:WS-P, :WS-IN)")
+    assert {(e["endpoint"], tuple(e["fields"]), e.get("via")) for e in _proc_events(m)} \
+        == {("PROCC", ("WS-P", "WS-IN"), None)}
+    assert view["dynamicCalls"] == []
