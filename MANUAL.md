@@ -1275,10 +1275,11 @@ flag**, so a reviewer scanning only `flags` cannot miss it.
 
 ### Preprocessor
 
-- `COPY member [OF lib] [REPLACING ==a== BY ==b==]` — recursive with a cycle guard;
+- `COPY member [OF lib] [SUPPRESS] [REPLACING ==a== BY ==b==]` — recursive with a cycle guard;
   expanded lines carry their `origin` member for provenance. The statement ends at the
   first period outside pseudo-text and outside a literal, so `REPLACING ==05 :X:.==`
-  spread over several lines is one COPY (the same holds for `REPLACE`).
+  spread over several lines is one COPY (the same holds for `REPLACE`). `SUPPRESS` only
+  keeps the copied text out of the compiler listing: the member is copied all the same.
 - **Code preceding a `COPY` in the same sentence is preserved.**
 - `EXEC SQL INCLUDE member END-EXEC` — behaves like COPY.
 - Standalone `REPLACE ==a== BY ==b==` … `REPLACE OFF`.
@@ -1290,7 +1291,13 @@ flag**, so a reviewer scanning only `flags` cannot miss it.
 ### Embedded sub-languages
 
 `EXEC SQL` / `EXEC CICS` / `EXEC DLI` are extracted with host variables preserved.
-`SELECT`/`FETCH … INTO :hv` becomes a real input assignment to each host variable.
+`SELECT`/`FETCH … INTO :hv` becomes a real input assignment to each host variable, and so
+does the `INTO` of a statement that begins `WITH`. An SQL comment (`--` to the end of the
+line) is dropped before a statement is read, so a table or `:host-variable` that a comment
+only mentions is not taken as one the statement names. Every table a statement names is
+found, including those inside a parenthesised join group (`FROM (T1 A JOIN T2 B ON ...)
+JOIN T3 ...`). A common table expression is not a table, with or without a column list
+(`WITH X (A, B) AS (...)`).
 `LINK`/`XCTL`/`RETURN`/`HANDLE` map to call/transfer/terminate/handler-region. The rest
 of the sub-language is **not interpreted** — it stays an opaque effect.
 
@@ -1304,12 +1311,23 @@ direction, to which external actor, and **which fields cross**.
 
 Two directions:
 
-- **`get`** — the state receives external data/events: file `READ`, SQL `SELECT`/`FETCH`,
-  `ACCEPT`, CICS `RECEIVE`/`READQ`, a handled error condition, end-of-file, a response
-  code (`SQLCODE`, `EIBRESP`, a `FILE STATUS` field).
+- **`get`** — the state receives external data/events: file `READ`, SQL `SELECT`/`FETCH`
+  (and a statement that begins `WITH`, which is the `SELECT` behind its common table
+  expressions), `ACCEPT`, CICS `RECEIVE`/`READQ`, a handled error condition, end-of-file,
+  a response code (`SQLCODE`, `EIBRESP`, a `FILE STATUS` field).
 - **`create`** — the state produces external data/events: file `WRITE`/`REWRITE`/`DELETE`,
-  SQL `INSERT`/`UPDATE`/`DELETE`, `DISPLAY`, CICS `SEND`/`WRITEQ`, `CALL`/`LINK`/`XCTL`,
-  CICS `RETURN`.
+  SQL `INSERT`/`UPDATE`/`DELETE`/`MERGE`, `DISPLAY`, CICS `SEND`/`WRITEQ`,
+  `CALL`/`LINK`/`XCTL`, CICS `RETURN`.
+
+An SQL `OPEN` crosses the boundary in two cases. A cursor over a data-change table
+reference (`FROM FINAL TABLE (INSERT ...)`) publishes the inner write, which Db2 runs at
+`OPEN`. A cursor that **no `FETCH` in the program reads** publishes its tables as reads,
+because Db2 runs the cursor's query at `OPEN`. This is a stored procedure's
+`CURSOR WITH RETURN`: it is opened and handed to the caller, which does the fetching. Those
+reads carry the `cursor` name, no `fields` and no `columns`, and every table is
+`secondaryTable` (no row arrives at `OPEN`). A cursor the program does fetch is published
+at its `FETCH`, and its `OPEN` still publishes nothing. So does a cursor that is declared
+and never opened, and one over a `PREPARE`d statement.
 
 ### `endpoints` — the external actors
 
@@ -1342,11 +1360,11 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) — on **every** Db2 verb, not just `SELECT`: an `UPDATE`'s `WHERE` variable picks the row rather than writing a column, and a `DELETE` writes nothing at all, so all of its host variables are parameters |
 | `columns` | for Db2 events, **which column fills which host variable** — see below |
 | `columnNote` | why `columns` is absent or partial — distinguishes "nothing to map here" (a literal slot, `SELECT *`, a missing DECLARE) from a recovery failure, which an absent key alone cannot |
-| `columnsUnresolved` | the same answer as a **stable token** to branch on, present only on a real recovery failure: `cursor-unidentified`, `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`, `insert-from-fullselect`, `values-unparseable`, `set-expression-unmapped`. An unrecognised token is still a token: a consumer reports it verbatim rather than gating on a known list, so this set can grow without breaking one. A consumer skips the whole event on this instead of reporting each of its fields as separately unmapped — and a *residual* note (a derived slot, a literal-written column) carries no token, because those events did correlate. A cursor DECLAREd **FOR a PREPAREd statement** also carries no token: its select list is assembled at run time, so there is nothing to recover — an inherent unknown rather than a failure. It says so with `endpointType: "dynamic_sql"` and `dynamic: true`, the same shape the `PREPARE` end of the same statement already uses. **Reading a pre-VERSION-5 parse bundle:** it carries no FOR-form evidence at all, so a dynamic cursor in one degrades to `cursor-declare-missing` — absent means UNKNOWN, never "static". Re-parse to classify it; do not infer it |
-| `cursor` / `preparedStatement` | on a FETCH whose cursor was DECLAREd **FOR a PREPAREd statement**: which cursor, and which statement it reads. The endpoint is `<dynamic-sql>`, shared by every dynamic crossing in the program, so the identifying detail lives on the event |
+| `columnsUnresolved` | the same answer as a **stable token** to branch on, present only on a real recovery failure: `cursor-unidentified`, `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`, `insert-from-fullselect`, `values-unparseable`, `set-expression-unmapped`, `common-table-expression` (a statement that begins `WITH`: its select list names the CTEs' columns, and which base column each one is is not traced through them, so the mapping is refused and flagged rather than stamped onto a base table). An unrecognised token is still a token: a consumer reports it verbatim rather than gating on a known list, so this set can grow without breaking one. A consumer skips the whole event on this instead of reporting each of its fields as separately unmapped — and a *residual* note (a derived slot, a literal-written column) carries no token, because those events did correlate. A cursor DECLAREd **FOR a PREPAREd statement** also carries no token: its select list is assembled at run time, so there is nothing to recover — an inherent unknown rather than a failure. It says so with `endpointType: "dynamic_sql"` and `dynamic: true`, the same shape the `PREPARE` end of the same statement already uses. **Reading a pre-VERSION-5 parse bundle:** it carries no FOR-form evidence at all, so a dynamic cursor in one degrades to `cursor-declare-missing` — absent means UNKNOWN, never "static". Re-parse to classify it; do not infer it |
+| `cursor` / `preparedStatement` | on a FETCH whose cursor was DECLAREd **FOR a PREPAREd statement**: which cursor, and which statement it reads. The endpoint is `<dynamic-sql>`, shared by every dynamic crossing in the program, so the identifying detail lives on the event. `cursor` is also on the first read an `OPEN` publishes for a cursor no `FETCH` reads (see above) |
 | `via` / `dynamic` / `candidates` / `evidence` / `hasVariableAssignment` | on a `CALL` or a CICS operand (`PROGRAM`, `TRANSID`, `QUEUE`, …) whose target is a **data item**. `via` names the item a resolved target was proved through (the endpoint is then the literal). `dynamic: true` means unresolved, and the endpoint is the item itself. When literals reach it, `candidates` lists them and two keys say how far to trust that list: `evidence` is `assigned` (a `MOVE` or `VALUE` provably stores each) or `declared-88` (only 88-level `VALUE`s name them — nothing visible stores one, so they are what the program allows, not what it does), and `hasVariableAssignment: true` means a variable `MOVE` reaches the item too, so the list is **not the whole set**. The endpoint and its artifact-manifest row carry the same keys, and a batch `CALL` and a CICS operand over one item publish the same answer. A CICS `PROGRAM()` operand is 8 characters whatever the item's PIC, so a longer literal names its first 8 (`PIC X(9) VALUE 'ABC40001C'` LINKs to `ABC40001`) |
 | `rejectedCandidates` | literals that reach such an item but **cannot be the name it invokes**, each `{literal, reason}` with `reason` one of `length` (longer than the item's PIC), `space` (holds a blank), `wildcard` (holds `*` or `?`: a template or a placeholder) or `filler` (four or more of one character: an initialiser). Never counted in `candidates`, and never promotes one: a call a rejected literal also reaches stays flagged. Present with or without `candidates`, so "no literal could be a name" is not read as "no literal was found". When the rejections empty the list, 88-level values the item declares become the `candidates`, at `evidence: "declared-88"`. An undeclared item (its copybook missing) or a group has no length to test, so no literal is rejected for `length` |
-| `secondaryTable` | on a Db2 `get`: a **further table the statement names** — a joined or comma-listed table, a subquery's, an `INSERT ... SELECT` source, or the second table of a cursor over a join. The statement's first table after `FROM` (or its `INSERT`/`UPDATE`/`DELETE` target) keeps its own event unchanged; each further table is read inside Db2, so its event carries no `fields` and no `columns` — which of its columns reach which host variable is not recovered. The reactive view never waits on one: no row of it arrives as a delivery of its own |
+| `secondaryTable` | on a Db2 `get`: a **further table the statement names** — a joined or comma-listed table, a subquery's, an `INSERT ... SELECT` source, a `MERGE`'s `USING` source, or the second table of a cursor over a join. Every table an `OPEN` publishes for a cursor no `FETCH` reads is one too, the first included. The statement's first table after `FROM` (or its `INSERT`/`UPDATE`/`DELETE` target) keeps its own event unchanged; each further table is read inside Db2, so its event carries no `fields` and no `columns` — which of its columns reach which host variable is not recovered. The reactive view never waits on one: no row of it arrives as a delivery of its own |
 | `endpointUnresolved` | the endpoint is **not the resource's name**, as a token: `no-operand` — the statement names no resource this tool could read, and the endpoint is a placeholder (`<file>`, `<queue>`, `<program>`, `<table>` …; a CICS `WRITE JOURNALNAME` is one, having no type of its own); `record` — a `WRITE` / `REWRITE` / `RELEASE` names a record that no FD in the visible source declares or lists in its `DATA RECORD` clause, so its file is unknown. The endpoint and its manifest row carry it too; branch on it, never on the angle brackets |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |
@@ -1839,6 +1857,8 @@ most are pinned by a test.
 | `sqldclgen.cbl` | **`DECLARE TABLE` (DCLGEN) resolving a column-list-less INSERT**, and the synonym case that needs `--synonym-map` or `--synonym-resolver` |
 | `sqlvarchar.cbl` | **VARCHAR host structures anchor on the parent** — `SELECT INTO` the level-49 pair's group, a `FETCH INTO` a record containing one, a column-list-less INSERT of such a record, and `MOVE`s out of the text child that keep the SELECT's origin |
 | `sqlproc.cbl` | **`EXEC SQL CALL` as a `db2_proc` endpoint** — parameters, not columns |
+| `sqlretcs.cbl` | **a stored procedure's result set** — a `CURSOR WITH RETURN` and a plain cursor, each opened and never fetched, publish their tables at `OPEN`; a cursor never opened publishes nothing |
+| `sqlmerge.cbl` | **`MERGE` and a leading `WITH`** — a `MERGE` writes its target (from `VALUES`, and from a `USING` subquery it reads), and a `WITH ... SELECT ... INTO` reads the base table its CTE reads, with its column mapping refused and flagged |
 | `sqlcallvar.cbl` | **`EXEC SQL CALL :host-variable`** — resolved from a `VALUE`, from a `MOVE`d qualified name, flagged with two candidates, and runtime-determined from an `ACCEPT` |
 | `custrec.cpy` | a copybook (COPY expansion + `member` provenance) |
 
