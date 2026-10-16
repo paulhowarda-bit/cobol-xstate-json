@@ -8,6 +8,8 @@ document current behaviour so a later fix is a deliberate change, not a silent o
 
 import json
 
+import pytest
+
 from cobol_xstate.business import build_business_view
 from cobol_xstate.parser import parse_program
 from cobol_xstate.reactive import build_reactive_view
@@ -1353,3 +1355,223 @@ def test_the_reactive_view_waits_on_no_further_table():
     assert {"GET.DB2.T_COMMA_FIRST", "GET.DB2.T_CUR_FIRST"} <= waits
     assert not [f for f in view["flags"] if "multiple inbound gets" in str(f)
                 or "unhandled perimeter" in str(f)]
+
+
+# --------------------------------------------------------------------------- #
+# sqlretcs: a cursor opened and never fetched publishes its tables at OPEN
+# (upstream ledger item 74)
+#
+# Db2 runs a cursor's query when it is OPENed. A stored procedure's CURSOR WITH RETURN is
+# opened and handed to its caller, which does the fetching - so the procedure has no
+# FETCH, and its result set's tables were in no view at all.
+# --------------------------------------------------------------------------- #
+
+def _opens(iface):
+    return [(e["endpoint"], e.get("cursor"), e.get("secondaryTable"))
+            for e in iface["events"] if e["verb"] == "OPEN"]
+
+
+def test_a_result_set_cursors_tables_are_published_when_it_is_opened():
+    iface = _iface("sqlretcs.cbl")
+    assert _opens(iface) == [("T_RET_FIRST", "RET_CSR", True),
+                             ("T_RET_SECOND", None, True),
+                             ("T_OPEN_ONLY", "OPN_CSR", True)]
+    for e in iface["events"]:
+        if e["verb"] == "OPEN":
+            # No row arrives at OPEN: nothing is delivered into a field.
+            assert (e["direction"], e["fields"]) == ("get", [])
+            assert "columns" not in e
+
+
+def test_the_manifest_lists_the_result_set_tables_as_read_and_nothing_unopened():
+    from cobol_xstate.artifacts import build_artifacts
+    m = build_machine(parse_program((EXAMPLES / "sqlretcs.cbl").read_text()),
+                      source_name="sqlretcs.cbl")
+    io = {a["artifact"]: a["io"] for a in build_artifacts(m)["artifacts"]
+          if a["kind"] == "db2-table"}
+    # Db2 never runs a cursor nobody opens: NEVER_CSR's table is not a crossing.
+    assert io == {"T_SELECT_INTO": "read", "T_RET_FIRST": "read",
+                  "T_RET_SECOND": "read", "T_OPEN_ONLY": "read"}
+
+
+def test_the_select_into_beside_them_is_unchanged():
+    sel = [e for e in _iface("sqlretcs.cbl")["events"] if e["verb"] == "SELECT"]
+    assert [(e["endpoint"], e["fields"], e.get("params")) for e in sel] == [
+        ("T_SELECT_INTO", ["WS-NAME"], ["WS-ID"])]
+
+
+def test_an_open_of_a_result_set_is_not_a_delivery_the_reactive_view_waits_on():
+    from cobol_xstate.reactive import _is_wait_hit
+    from cobol_xstate import interface as _i
+    m = build_machine(parse_program((EXAMPLES / "sqlretcs.cbl").read_text()),
+                      source_name="sqlretcs.cbl")
+    opens = [a for a, s in m.semantics["actions"].items()
+             if isinstance(s, dict) and s.get("verb") == "OPEN"]
+    assert len(opens) == 2
+    cursors, refs = {}, {}
+    _i.seed_cursor_maps(cursors, {}, {}, m.sql_cursors, refs)
+    for a in opens:
+        hits = _i._classify(a, m.provenance[a]["cobol"], m.semantics["actions"][a],
+                            None, {}, cursors, cursor_refs=refs)
+        assert hits and not any(_is_wait_hit(h) for h in hits)
+
+
+@pytest.mark.parametrize("declare", [
+    "DECLARE RC CURSOR WITH RETURN TO CLIENT FOR",
+    "DECLARE RC CURSOR WITH HOLD WITH RETURN FOR",
+    "DECLARE RC CURSOR WITH RETURN TO CALLER FOR",
+])
+def test_every_spelling_of_a_result_set_cursor_publishes_at_open(declare):
+    m = _inline_machine(
+        f"           EXEC SQL {declare}\n"
+        "               SELECT COL1 FROM T_RS_A A JOIN T_RS_B B ON A.K = B.K\n"
+        "           END-EXEC.\n",
+        "           EXEC SQL OPEN RC END-EXEC\n")
+    assert _opens(m.bundle()["interface"]) == [("T_RS_A", "RC", True),
+                                              ("T_RS_B", None, True)]
+
+
+def test_a_result_set_cursor_declared_in_a_copybook_publishes_at_open(tmp_path):
+    from cobol_xstate.parser import CopybookResolver
+    (tmp_path / "RSCSR.cpy").write_text(
+        "           EXEC SQL DECLARE RC CURSOR WITH RETURN FOR\n"
+        "               SELECT COL1 FROM T_RS_COPIED\n"
+        "           END-EXEC.\n")
+    src = ("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+           "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+           "       COPY RSCSR.\n"
+           "       PROCEDURE DIVISION.\n       0000-MAIN.\n"
+           "           EXEC SQL OPEN RC END-EXEC\n           GOBACK.\n")
+    m = build_machine(parse_program(src, resolver=CopybookResolver(paths=[str(tmp_path)])))
+    assert _opens(m.bundle()["interface"]) == [("T_RS_COPIED", "RC", True)]
+
+
+def test_a_fetch_anywhere_in_the_program_keeps_its_cursors_open_silent(tmp_path):
+    """The FETCH may sit in a copied paragraph; it is still this program's, so the cursor
+    is published at that FETCH, as before, and its OPEN stays silent."""
+    from cobol_xstate.parser import CopybookResolver
+    (tmp_path / "FETCHP.cpy").write_text(
+        "       2000-FETCH.\n"
+        "           EXEC SQL FETCH C9 INTO :WS-A END-EXEC.\n")
+    src = ("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+           "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+           "       01  WS-A            PIC X(10).\n"
+           "           EXEC SQL DECLARE C9 CURSOR FOR SELECT COL1 FROM T_C9\n"
+           "           END-EXEC.\n"
+           "       PROCEDURE DIVISION.\n       0000-MAIN.\n"
+           "           EXEC SQL OPEN C9 END-EXEC\n"
+           "           PERFORM 2000-FETCH\n           GOBACK.\n"
+           "       COPY FETCHP.\n")
+    m = build_machine(parse_program(src, resolver=CopybookResolver(paths=[str(tmp_path)])))
+    iface = m.bundle()["interface"]
+    assert _opens(iface) == []
+    assert [(e["verb"], e["endpoint"]) for e in iface["events"]
+            if e["endpointType"] == "db2"] == [("FETCH", "T_C9")]
+    assert not [s for s in m.semantics["actions"].values()
+                if isinstance(s, dict) and s.get("unfetchedCursor")]
+
+
+def test_a_cursor_over_a_prepared_statement_still_publishes_nothing_at_open():
+    m = _inline_machine(
+        "           EXEC SQL DECLARE DC CURSOR WITH RETURN FOR DYN_STMT END-EXEC.\n",
+        "           EXEC SQL PREPARE DYN_STMT FROM :WS-A END-EXEC\n"
+        "           EXEC SQL OPEN DC END-EXEC\n")
+    assert _opens(m.bundle()["interface"]) == []
+
+
+def test_an_unfetched_data_change_cursor_publishes_its_write_and_only_that():
+    m = _inline_machine(
+        "           EXEC SQL DECLARE DCC CURSOR WITH RETURN FOR\n"
+        "               SELECT K FROM FINAL TABLE (INSERT INTO T_DC_Q (K)\n"
+        "                                          VALUES (:WS-A))\n"
+        "           END-EXEC.\n",
+        "           EXEC SQL OPEN DCC END-EXEC\n")
+    opens = [(e["direction"], e["verb"], e["endpoint"])
+             for e in m.bundle()["interface"]["events"] if e["line"] and "OPEN" in e["cobol"]]
+    assert opens == [("create", "INSERT", "T_DC_Q")]
+
+
+def test_a_parenthesised_result_set_publishes_every_table_it_names():
+    """A select wrapped whole in parens has no single FROM table, only its `tables`."""
+    m = _inline_machine(
+        "           EXEC SQL DECLARE PC CURSOR WITH RETURN FOR (\n"
+        "               -- the first half\n"
+        "               SELECT K FROM T_PAR_ONE\n"
+        "               UNION ALL SELECT K FROM T_PAR_TWO )\n"
+        "           END-EXEC.\n",
+        "           EXEC SQL OPEN PC END-EXEC\n")
+    assert _opens(m.bundle()["interface"]) == [("T_PAR_ONE", "PC", True),
+                                              ("T_PAR_TWO", None, True)]
+
+
+# --------------------------------------------------------------------------- #
+# sqlmerge: MERGE writes its target; a leading WITH reads what its CTEs read
+# (upstream ledger item 76)
+# --------------------------------------------------------------------------- #
+
+def _db2_events(iface):
+    return [(e["verb"], e["direction"], e["endpoint"], e["fields"], e.get("params"),
+             e.get("secondaryTable")) for e in iface["events"]
+            if e["endpointType"] == "db2"]
+
+
+def test_a_merge_writes_its_target_and_reads_its_using_subquery():
+    assert _db2_events(_iface("sqlmerge.cbl"))[:3] == [
+        ("MERGE", "create", "T_MRG_VALUES", ["WS-ID", "WS-AMT"], None, None),
+        ("MERGE", "create", "T_MRG_TARGET", [], None, None),
+        ("MERGE", "get", "T_MRG_SOURCE", [], None, True)]
+
+
+def test_a_merge_using_a_table_reads_it():
+    m = _inline_machine("", (
+        "           EXEC SQL MERGE INTO OWNER.T_MU_TGT T USING OWNER.T_MU_SRC S\n"
+        "                ON T.K = S.K WHEN MATCHED THEN DELETE\n"
+        "           END-EXEC\n"))
+    assert [(d, ep, sec) for _, d, ep, _, _, sec in _db2_events(
+        m.bundle()["interface"])] == [("create", "T_MU_TGT", None),
+                                      ("get", "T_MU_SRC", True)]
+
+
+def test_a_with_statement_reads_the_base_table_its_cte_reads():
+    """The CTE is not a table, its INTO targets are the delivery, and the WHERE
+    variable is a parameter - the same shape a SELECT publishes."""
+    assert _db2_events(_iface("sqlmerge.cbl"))[3:] == [
+        ("WITH", "get", "T_WITH_TXN", ["WS-CNT", "WS-LAST"], ["WS-ID"], None)]
+    assert "RECENT" not in _dirs(_iface("sqlmerge.cbl"), "db2")
+
+
+def test_a_with_statements_columns_are_refused_and_flagged_not_guessed():
+    m = build_machine(parse_program((EXAMPLES / "sqlmerge.cbl").read_text()),
+                      source_name="sqlmerge.cbl")
+    ev = next(e for e in m.bundle()["interface"]["events"] if e["verb"] == "WITH")
+    assert "columns" not in ev
+    assert ev["columnsUnresolved"] == "common-table-expression"
+    assert [f["line"] for f in m.flags if "EXEC SQL WITH" in f["message"]] == [32]
+
+
+def test_a_with_statement_is_an_input_its_targets_are_assigned_by():
+    """The runnable machine must see WS-CNT written by the statement: as an opaque
+    effect it kept its seed, and a branch on it read a value Db2 never produced."""
+    m = build_machine(parse_program((EXAMPLES / "sqlmerge.cbl").read_text()),
+                      source_name="sqlmerge.cbl")
+    spec = m.semantics["actions"]["exec_sql_with"]
+    assert spec["kind"] == "input"
+    assert [a["target"] for a in spec["assignments"]] == ["WS-CNT", "WS-LAST"]
+
+
+def test_a_cte_with_a_column_list_is_not_published_as_a_table():
+    assert _db2_endpoints(
+        "           EXEC SQL WITH C (K) AS (SELECT K FROM T_CL_BASE)\n"
+        "                SELECT COUNT(*) INTO :WS-A FROM C\n"
+        "           END-EXEC\n") == {"T_CL_BASE"}
+
+
+def test_a_cursor_declared_for_a_with_query_publishes_through_its_fetch():
+    m = _inline_machine("", (
+        "           EXEC SQL DECLARE WC CURSOR FOR\n"
+        "               WITH C AS (SELECT K FROM T_WC_BASE) SELECT K FROM C\n"
+        "           END-EXEC\n"
+        "           EXEC SQL OPEN WC END-EXEC\n"
+        "           EXEC SQL FETCH WC INTO :WS-A END-EXEC\n"))
+    assert [(v, ep) for v, _, ep, _, _, _ in _db2_events(m.bundle()["interface"])] == [
+        ("FETCH", "T_WC_BASE")]

@@ -85,6 +85,7 @@ _SQL_FROM = re.compile(_FROM_TABLE + _QUALIFIED, re.I)
 _SQL_DATA_CHANGE = re.compile(
     r"\bFROM\s+" + _DATA_CHANGE_HEAD + r"\s*(INSERT|UPDATE|DELETE|MERGE)\b", re.I)
 _SQL_INTO_TABLE = re.compile(r"\bINSERT\s+INTO\s+" + _QUALIFIED, re.I)
+_SQL_MERGE_INTO = re.compile(r"\bMERGE\s+INTO\s+" + _QUALIFIED, re.I)
 _SQL_UPDATE = re.compile(r"\bUPDATE\s+" + _QUALIFIED, re.I)
 # `:GFAC . AC-ACC-N` is a QUALIFIED host variable - the field AC-ACC-N inside group
 # GFAC - and the elementary name after the period is the one the data dictionary holds.
@@ -660,6 +661,25 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             return _read_tables([_note(_hit("create", _DB2, ep, verb, fields, params,
                                              columns=_qualify(columns, ep)),
                                        note, unresolved)], _sql_table_refs(mup), verb)
+        if verb == "MERGE":
+            # MERGE INTO t USING ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN
+            # INSERT: a write to t either way, and a USING subquery's tables are read.
+            m = _SQL_MERGE_INTO.search(up)
+            ep = m.group(1) if m else "<table>"
+            fields, params = _dml_split(host_vars, where_vars, columns)
+            return _read_tables([_note(_hit("create", _DB2, ep, verb, fields, params,
+                                             columns=_qualify(columns, ep)),
+                                       note, unresolved)], _sql_table_refs(mup), verb)
+        if verb == "WITH":
+            # A leading WITH introduces a query: the SELECT behind its common table
+            # expressions reads the tables they name, and its INTO is the delivery.
+            # A CTE is not a table (`_sql_table_refs`), so the endpoint is the first
+            # base table the statement reads.
+            tables = _sql_table_refs(mup)
+            ep = tables[0] if tables else "<table>"
+            params = _dedup([h for h in host_vars if h not in into_fields])
+            return _read_tables([_note(_hit("get", _DB2, ep, verb, into_fields, params),
+                                       note, unresolved)], tables, verb)
         if verb == "DELETE":
             m = _SQL_FROM.search(mup)
             # EVERY host variable in a DELETE is a filter. The statement has no SET and
@@ -714,6 +734,22 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             dele = change["verb"] == "DELETE"
             return [_hit("create", _DB2, change["table"], change["verb"],
                          [] if dele else hv, params=hv if dele else None)]
+        cname = (spec or {}).get("unfetchedCursor") if verb == "OPEN" else None
+        refs = ((cursor_refs or {}).get(cname) or []) if cname else []
+        table = (cursors.get(cname) or next(iter(refs), None)) if cname else None
+        if table:
+            # Db2 runs a cursor's query when it is OPENed. One no FETCH of this program
+            # reads (statechart._mark_unfetched_opens) - a stored procedure's CURSOR
+            # WITH RETURN, handed to its caller - is published here, or none of its
+            # tables reached any view. No row arrives at OPEN, so there are no fields
+            # or columns and every table is `secondaryTable`, which also keeps the
+            # reactive view from waiting on a delivery. A select wrapped whole in
+            # parens has no `table`, only `tables`; a cursor over a PREPAREd statement
+            # has neither and still publishes nothing.
+            hit = _hit("get", _DB2, table, verb, [], _dedup(host_vars))
+            hit["cursor"] = cname
+            hit["secondaryTable"] = True
+            return _read_tables([hit], refs, verb)
         return []  # OPEN/CLOSE cursor, DECLARE, COMMIT, WHENEVER - not a data crossing
 
     if is_cics:
