@@ -32,7 +32,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from mainframe_artifacts.synonyms import FROM_RESOLVER, SynonymLookup
 
@@ -1584,6 +1584,34 @@ def _mark_data_change_opens(ctx: "_BuildCtx", program: Program) -> None:
                                   **decl["dataChange"]}
 
 
+def _mark_unfetched_opens(ctx: "_BuildCtx") -> None:
+    """Stamp `unfetchedCursor` onto the OPEN of a cursor no FETCH of this program reads.
+
+    Db2 runs a cursor's query when it is OPENed; a FETCH only takes the rows. A stored
+    procedure's `CURSOR WITH RETURN` is opened and handed to its CALLER, which does the
+    fetching - so the procedure has no FETCH, and every table of its result set was in
+    no view (upstream ledger item 74). The interface publishes such an OPEN as the read
+    it is. A cursor this program does fetch is published at its FETCH, as before, so its
+    output does not change. Whole-program, like the data-change OPEN pass: the FETCH can
+    sit anywhere, a copied paragraph included.
+    """
+    from .interface import _fetch_cursor_name
+    fetched: Set[str] = set()
+    opens: List[dict] = []
+    for spec in ctx.action_sem.values():
+        if spec.get("verb") == "FETCH":
+            name = _fetch_cursor_name(spec, str(spec.get("raw") or "").upper())
+            if name:
+                fetched.add(name)
+        elif (spec.get("kind") == "exec-sql" and spec.get("verb") == "OPEN"
+              and not spec.get("dataChange")):
+            opens.append(spec)
+    for spec in opens:
+        m = _SQL_OPEN.search(str(spec.get("raw") or ""))
+        if m and m.group(1).upper() not in fetched:
+            spec["unfetchedCursor"] = m.group(1).upper()
+
+
 def _correlate_fetches(ctx: "_BuildCtx", program: Program,
                        program_tables: FrozenSet[str] = frozenset()) -> None:
     """Zip every FETCH's host variables against its cursor's DECLARE, once the whole
@@ -2028,6 +2056,7 @@ def build_machine(program: Program, source_name: str = "<source>",
               else frozenset())
     _correlate_fetches(ctx, program, tables)
     _mark_data_change_opens(ctx, program)
+    _mark_unfetched_opens(ctx)
     _correlate_selects(ctx, tables)
     _correlate_inserts(ctx, program, lookup, tables)
     # A catalog resolver that ERRORED is not the same as one that answered "not a
