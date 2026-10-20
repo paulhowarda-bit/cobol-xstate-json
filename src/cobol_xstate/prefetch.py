@@ -26,11 +26,13 @@ def attribute_resolution(manifest: dict, program, store: Dict[tuple, Tuple[str, 
     from the estate is what turned an unresolved runtime target into a named program."""
     if not store:
         return manifest
-    # Per program of the member: a contained program's row was proved through ITS OWN
-    # data item, which is not the main program's item of the same name.
+    # Per program of the member: a contained program's row was proved through the data
+    # item IT sees - its own, or a GLOBAL one of a program containing it - which is not
+    # the main program's item of the same name.
+    from .statechart import member_views
     origins: Dict[object, Dict[str, str]] = {}
-    for unit in [program, *program.contained]:
-        own = origins.setdefault(None if unit is program else unit.program_id, {})
+    for i, unit in enumerate(member_views(program)[0]):
+        own = origins.setdefault(unit.program_id if i else None, {})
         for item in getattr(unit, "data_items", None) or []:
             name = getattr(item, "name", None)
             origin = getattr(item, "origin", None)

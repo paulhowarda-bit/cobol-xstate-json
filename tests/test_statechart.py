@@ -815,3 +815,15 @@ def test_each_contained_program_is_its_own_machine_outside_the_main_chart():
     assert "1000-INNER" in m.contained[0].config["states"]
     assert "1000-INNER" not in m.config["states"]
     assert "EXTMOD" not in m.to_json()          # the main chart is the main program's
+
+
+def test_a_contained_programs_parameter_is_resolved_from_the_call_that_passes_it():
+    """NESTLOG's CALL LK-PGM resolves to what NESTSQL passes it - and the provenance says
+    so, naming the calling statement, since nothing in NESTLOG itself holds 'LOGWRITE'."""
+    ex = Path(__file__).resolve().parents[1] / "examples" / "nestdeps.cbl"
+    log = build_machine(parse_program(ex.read_text())).contained[1]
+    assert log.program_id == "NESTLOG" and log.unresolved_calls == {}
+    label = log.provenance["call_LOGWRITE"]["cobol"]
+    assert label.startswith("CALL LK-PGM -> resolved 'LOGWRITE'")
+    assert "NESTSQL line 38 passes WS-LOGPGM" in label
+    assert not [f for f in log.flags if "LK-PGM" in str(f)]

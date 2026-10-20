@@ -866,8 +866,30 @@ cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no m
   `internal-nested` and never fetched. A contained program's caller is a program in this
   source, so its `caller` row is `excluded` with that reason; its `flags` read
   `contained program NAME: …`. Its true dynamic targets are rows of the dynamic-calls view
-  too, each `program` naming it. Its storage is its own: an item it reaches only through
-  the outer program's `GLOBAL` data stays an unresolved, flagged target.
+  too, each `program` naming it. Its storage is its own, plus the `GLOBAL` items of the
+  programs containing it: a name is looked up in the program itself, then among the
+  `GLOBAL` declarations of each containing program outward (a nearer program's
+  declaration without `GLOBAL` is not seen, so it does not hide an outer one). An item
+  under a `GLOBAL` record, or a record of a `GLOBAL` FD, is global with it. Every program
+  sharing a `GLOBAL` item stores into one item, so a target reached through it resolves
+  from its `VALUE` plus what each sharer stores — its literals, its `SET`s of the item's
+  88-levels, and each item it `MOVE`s in, resolved in that program — and stays flagged
+  when one of those is not pinned; the provenance names the declaring program and each
+  store. That applies to the main program's own `GLOBAL` items too. An item of the
+  outer program without `GLOBAL` is never seen: reached only through one, a target stays
+  unresolved and flagged.
+  Only this source can call a contained program, so each `PROCEDURE DIVISION USING`
+  parameter holds what the `CALL`s naming it pass in that position — `CALL 'NAME'`, or a
+  dynamic `CALL` whose target the calling program resolves to `NAME` or lists among its
+  candidates. A dynamic target reached through a parameter resolves from the union of
+  those arguments (each resolved in its caller, and followed when the caller passes on
+  its own parameter) and the program's own assignments to it; the provenance label
+  names every calling statement (`NESTSQL line 38 passes WS-LOGPGM (...)`). It stays a
+  flagged dynamic row, its `why` saying which, when no `CALL` in the source names the
+  program, an argument list cannot be matched by position (a different count, a
+  qualified or `ADDRESS OF` operand, or a literal argument, which the parse does not
+  record), an argument is not pinned to literals in its caller, or the calls form a
+  cycle.
 - **What it won't claim**: a file used with no `SELECT ... ASSIGN` (or a CICS file with no
   local definition) has no known ddname, so the row says the dataset is unresolvable from
   this program alone and the manifest `flags` it — never an invented binding. Likewise a
@@ -1841,7 +1863,8 @@ most are pinned by a test.
 | `dyncands.cbl` | **each grade of dynamic-target answer the interface publishes** — resolved, several assigned literals, one literal beside a variable `MOVE`, 88-level values only, variables only — and a `CALL` and a CICS `LINK`/`XCTL` over the same item publishing the same `candidates` |
 | `callfilter.cbl` | **literals that reach a dynamic target but cannot be the name it invokes** — a message longer than the item, a wildcard template (its 88-level values take over), a `??` placeholder, a filler initialiser beside two real names — kept as `rejectedCandidates`; and a 9-byte item under `LINK PROGRAM()` resolving to its first 8 characters |
 | `fdrecord.cbl` | **a `WRITE` names a record, the endpoint is its file** — through the 01 under the FD, through the FD's `DATA RECORD` clause when the 01's copybook is missing, and marked `endpointUnresolved: "record"` when neither reaches it; the FD's multi-line clauses no longer leak into the item above |
-| `nestdeps.cbl` | **a contained program's dependencies are the member's** — a static `CALL`, a `CALL` resolved through the contained program's OWN `VALUE` (the outer program declares the same name with another), an SQL table, a file written by a program nested two deep, a caller-supplied target flagged, and calls to programs contained here never fetched |
+| `nestdeps.cbl` | **a contained program's dependencies are the member's** — a static `CALL`, a `CALL` resolved through the contained program's OWN `VALUE` (the outer program declares the same name with another), an SQL table, a file written by a program nested two deep, a target its in-source caller passes it resolved (`LOGWRITE`, through `LK-PGM`), and calls to programs contained here never fetched |
+| `nestglob.cbl` | **a contained program sees the `GLOBAL` data of the programs containing it** — an item under a `GLOBAL` record, an item a nearer program declares without `GLOBAL` (so the outer one is still the one seen), a program's own declaration hiding the outer one, and the main program's target fixed by a contained program's `SET` into the item they share |
 | `cicsnofile.cbl` | **CICS commands that share a verb with the file commands** — `WRITE OPERATOR` (the console), `DELETE CONTAINER` / `COUNTER` (no crossing), `WRITE JOURNALNAME` and an unreadable `FILE()` operand (`<file>`, marked `no-operand`), and `QNAME()` naming the queue |
 | `accum.cbl` | `PERFORM UNTIL` call-return |
 | `nestperf.cbl` | nested PERFORM threading context through two call levels |

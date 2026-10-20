@@ -406,3 +406,38 @@ def test_a_contained_programs_row_is_attributed_through_its_own_data_item():
         ("prefetch", "SUBPGMS")
     # OUTER's row keeps the plain binder resolver: its item came from no member.
     assert not isinstance(outer.get("resolvedBy"), dict)
+
+
+def test_a_contained_programs_row_through_an_outer_global_item_is_attributed():
+    """OUTER copies GLOBPGMS, which declares WS-GPGM GLOBAL with VALUE 'GLOBLOG'; INNER
+    calls through it. INNER's row is proved through the item INNER sees - OUTER's, from
+    the prefetched member - so the member gets the credit there too."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTER.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY GLOBPGMS.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'INNER'\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. INNER.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-IN.\n"
+        "           CALL WS-GPGM\n"
+        "           GOBACK.\n"
+        "       END PROGRAM INNER.\n"
+        "       END PROGRAM OUTER.\n"
+    )
+    estate = {"GLOBPGMS": "       01  WS-GPGM  PIC X(8) VALUE 'GLOBLOG' GLOBAL.\n"}
+    pre = prefetch_cobol(src, _mf(estate))
+    program = parse_program(src, resolver=CopybookResolver(store=pre.store))
+    man = attribute_resolution(
+        build_artifacts(build_machine(program)), program, pre.store)
+    rows = {(r.get("containedProgram"), r["artifact"]): r for r in man["artifacts"]}
+    row = rows[("INNER", "GLOBLOG")]
+    assert row["via"] == "WS-GPGM"
+    assert (row["resolvedBy"]["stage"], row["resolvedBy"]["member"]) == \
+        ("prefetch", "GLOBPGMS")

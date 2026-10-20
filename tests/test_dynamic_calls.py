@@ -608,19 +608,46 @@ TWO_DISPATCHERS = (
 
 
 def test_a_contained_programs_dynamic_target_is_a_row_with_its_program():
-    """NESTLOG calls whatever its caller passes. That edge used to vanish with the
-    contained program's body; it is a row, said to be NESTLOG's, sourced from the
-    caller - and never a guessed target."""
+    """INNER calls whatever its caller passes, and nothing in this source calls INNER -
+    so its caller is outside it after all. That edge used to vanish with the contained
+    program's body; it is a row, said to be INNER's, sourced from the caller - and
+    never a guessed target."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTER.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. INNER.\n"
+        "       DATA DIVISION.\n"
+        "       LINKAGE SECTION.\n"
+        "       01  LK-PGM  PIC X(8).\n"
+        "       PROCEDURE DIVISION USING LK-PGM.\n"
+        "       1000-IN.\n"
+        "           CALL LK-PGM\n"
+        "           GOBACK.\n"
+        "       END PROGRAM INNER.\n"
+        "       END PROGRAM OUTER.\n"
+    )
+    m, art, view = _view(src)
+    rows = [r for r in view["dynamicCalls"] if r["program"] == "INNER"]
+    assert [(r["item"], r["line"]) for r in rows] == [("LK-PGM", 13)]
+    assert [s["kind"] for s in rows[0]["sources"]] == ["caller"]
+    assert "candidates" not in rows[0]
+    assert "no CALL in this source names INNER" in rows[0]["why"]
+    assert view["program"] == "OUTER"
+    assert view["counts"]["dynamicTargets"] == 1
+    assert view["counts"]["callerSupplied"] == 1
+
+
+def test_a_target_the_in_source_caller_passes_is_no_dynamic_row():
+    """nestdeps.cbl's NESTLOG calls what NESTSQL passes it, 'LOGWRITE': resolved, so it
+    is an ordinary dependency and not a row here."""
     from pathlib import Path
     ex = Path(__file__).resolve().parents[1] / "examples" / "nestdeps.cbl"
     m, art, view = _view(ex.read_text())
-    rows = [r for r in view["dynamicCalls"] if r["program"] == "NESTLOG"]
-    assert [(r["item"], r["line"]) for r in rows] == [("LK-PGM", 58)]
-    assert [s["kind"] for s in rows[0]["sources"]] == ["caller"]
-    assert "candidates" not in rows[0]
-    assert view["program"] == "NESTDEPS"
-    assert view["counts"]["dynamicTargets"] == 1
-    assert view["counts"]["callerSupplied"] == 1
+    assert view["dynamicCalls"] == [] and view["flags"] == []
 
 
 def test_each_programs_dynamic_target_is_traced_to_its_own_file():

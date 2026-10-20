@@ -4,6 +4,8 @@ its program-local name still needs (docs/mainframe-artifacts.md)."""
 
 from pathlib import Path
 
+import pytest
+
 from cobol_xstate.artifacts import build_artifacts
 from cobol_xstate.parser import parse_program
 from cobol_xstate.preprocessor import CopybookResolver
@@ -490,14 +492,182 @@ def test_a_call_to_any_program_contained_here_stays_internal_and_is_never_fetche
     assert plan["ACCOUNT_MASTER"]["status"] == "planned"
 
 
-def test_a_contained_programs_unresolvable_target_is_flagged_with_its_unit():
-    """NESTLOG calls whatever its caller passes: no static answer, so it is a flagged
-    dynamic row - never a guessed program - and the flag names the unit."""
+def test_a_contained_programs_parameter_holds_what_its_in_source_caller_passes():
+    """NESTLOG calls whatever its caller passes in LK-PGM. Only this source can call a
+    contained program, and its one caller, NESTSQL, passes WS-LOGPGM (VALUE 'LOGWRITE'):
+    so the target is LOGWRITE - a fetchable program, proved through LK-PGM - and not a
+    flagged data item."""
     man = _artifacts_example("nestdeps.cbl")
-    row = _by_unit(man)[("NESTLOG", "LK-PGM")]
-    assert row["dynamic"] is True and row["identity"] == "program-local"
-    assert row["resolvedBy"] is None
-    assert any(f.startswith("contained program NESTLOG: program LK-PGM: dynamic target")
+    rows = _by_unit(man)
+    row = rows[("NESTLOG", "LOGWRITE")]
+    assert (row["kind"], row["identity"], row["via"], row["lines"]) == \
+        ("program", "global", "LK-PGM", [58])
+    assert row["classification"] == "unresolved"     # fetchable, decided by the estate
+    assert ("NESTLOG", "LK-PGM") not in rows
+    assert man["flags"] == []
+
+
+# --------------------------------------------------------------------------- #
+# a contained program's parameters hold what the CALLs in its source pass
+# --------------------------------------------------------------------------- #
+
+def _program(name, proc, ws=(), lk=(), using=(), inner="", common=False):
+    """One program unit: its storage, its PROCEDURE DIVISION, the units it contains."""
+    out = ["IDENTIFICATION DIVISION.",
+           f"PROGRAM-ID. {name}{' IS COMMON' if common else ''}."]
+    if ws or lk:
+        out.append("DATA DIVISION.")
+    if ws:
+        out += ["WORKING-STORAGE SECTION.", *ws]
+    if lk:
+        out += ["LINKAGE SECTION.", *lk]
+    out += ["PROCEDURE DIVISION" + (" USING " + " ".join(using) if using else "") + ".",
+            f"{name}-MAIN.", *("    " + s for s in proc), "    GOBACK."]
+    return ("".join(f"       {line}\n" for line in out) + inner
+            + f"       END PROGRAM {name}.\n")
+
+
+def _member(src: str):
+    """(manifest, rows by unit, dynamic-call rows by (program, item)) for one source."""
+    from cobol_xstate.dynamic_calls import build_dynamic_calls
+    m = build_machine(parse_program(src))
+    man = build_artifacts(m)
+    dyn = {(r["program"], r["item"]): r
+           for r in build_dynamic_calls(m, man)["dynamicCalls"]}
+    return man, _by_unit(man), dyn
+
+
+_INNER_CALLS_ITS_PARAMETER = _program(
+    "INNER", ["CALL LK-PGM"], lk=["01  LK-PGM  PIC X(8)."], using=["LK-PGM"],
+    common=True)
+
+
+def test_every_caller_and_the_programs_own_assignment_are_the_candidates():
+    """OUTER passes 'MODA', its sibling B passes 'MODB', and INNER itself moves 'MODC'
+    into the parameter. The target is one of the three - flagged, with all three as
+    candidates - and never the one literal INNER's own storage holds."""
+    inner = _program("INNER", ["MOVE 'MODC' TO LK-PGM", "CALL LK-PGM"],
+                     lk=["01  LK-PGM  PIC X(8)."], using=["LK-PGM"], common=True)
+    b = _program("B", ["CALL 'INNER' USING WS-B"],
+                 ws=["01  WS-B  PIC X(8) VALUE 'MODB'."], common=True)
+    src = _program("OUTER", ["CALL 'INNER' USING WS-A", "CALL 'B'"],
+                   ws=["01  WS-A  PIC X(8) VALUE 'MODA'."], inner=inner + b)
+    man, rows, dyn = _member(src)
+    row = rows[("INNER", "LK-PGM")]
+    assert row["dynamic"] is True and row["candidates"] == ["MODA", "MODB", "MODC"]
+    assert not [k for k in rows if k[1] in ("MODA", "MODB", "MODC")]
+    assert "OUTER line 8 passes WS-A" in dyn[("INNER", "LK-PGM")]["why"]
+    assert "B line 29 passes WS-B" in dyn[("INNER", "LK-PGM")]["why"]
+
+
+def test_a_parameter_passed_down_a_chain_of_contained_programs_is_followed():
+    """OUTER passes WS-P ('DEEPMOD') to MID, MID passes its own parameter on to INNER,
+    and INNER moves it to WS-X before calling: the target is DEEPMOD, and the reason
+    walks back through every hop to the literal."""
+    inner = _program("INNER", ["MOVE LK-I TO WS-X", "CALL WS-X"],
+                     ws=["01  WS-X  PIC X(8)."], lk=["01  LK-I  PIC X(8)."],
+                     using=["LK-I"])
+    mid = _program("MID", ["CALL 'INNER' USING LK-M"], lk=["01  LK-M  PIC X(8)."],
+                   using=["LK-M"], inner=inner)
+    src = _program("OUTER", ["CALL 'MID' USING WS-P"],
+                   ws=["01  WS-P  PIC X(8) VALUE 'DEEPMOD'."], inner=mid)
+    man, rows, dyn = _member(src)
+    assert rows[("INNER", "DEEPMOD")]["via"] == "WS-X"
+    assert man["flags"] == [] and dyn == {}
+    m = build_machine(parse_program(src))
+    (label,) = [p["cobol"] for p in m.contained[1].provenance.values()
+                if str(p.get("cobol", "")).startswith("CALL WS-X")]
+    assert "LK-I is a parameter of INNER" in label
+    assert "MID line 17 passes LK-M" in label and "OUTER line 8 passes WS-P" in label
+
+
+def test_a_dynamic_call_the_caller_resolves_to_a_contained_program_is_a_call_site():
+    """OUTER calls INNER through WS-SUB (VALUE 'INNER'): that CALL names INNER as surely
+    as CALL 'INNER' does, so what it passes is INNER's parameter."""
+    src = _program("OUTER", ["CALL WS-SUB USING WS-A"],
+                   ws=["01  WS-SUB  PIC X(8) VALUE 'INNER'.",
+                       "01  WS-A    PIC X(8) VALUE 'MODA'."],
+                   inner=_INNER_CALLS_ITS_PARAMETER)
+    man, rows, dyn = _member(src)
+    assert rows[("INNER", "MODA")]["via"] == "LK-PGM"
+    assert rows[(None, "INNER")]["classification"] == "internal-nested"
+    assert man["flags"] == []
+
+
+def test_a_dynamic_call_that_may_name_a_contained_program_counts_as_a_call_site():
+    """WS-SUB may be 'INNER' or 'OTHER', so that CALL may be INNER's - and what it passes
+    may be INNER's parameter. Leaving it out would pin LK-PGM to the one static
+    caller's 'MODB'; with it, the target is one of the two, flagged."""
+    src = _program("OUTER", ["IF WS-A = 'MODA'", "    MOVE 'INNER' TO WS-SUB",
+                             "ELSE", "    MOVE 'OTHER' TO WS-SUB", "END-IF",
+                             "CALL WS-SUB USING WS-A", "CALL 'INNER' USING WS-B"],
+                   ws=["01  WS-SUB  PIC X(8).",
+                       "01  WS-A    PIC X(8) VALUE 'MODA'.",
+                       "01  WS-B    PIC X(8) VALUE 'MODB'."],
+                   inner=_INNER_CALLS_ITS_PARAMETER)
+    man, rows, dyn = _member(src)
+    assert rows[("INNER", "LK-PGM")]["candidates"] == ["MODA", "MODB"]
+    assert ("INNER", "MODB") not in rows
+
+
+@pytest.mark.parametrize("outer, why", [
+    # Nothing in this source calls INNER - the source CANNOT be all of its callers.
+    (_program("OUTER", [], inner=_INNER_CALLS_ITS_PARAMETER),
+     "do not pin it: no CALL in this source names INNER"),
+    # The argument holds a literal but is also set from a variable: not pinned.
+    (_program("OUTER", ["MOVE WS-IN TO WS-A", "CALL 'INNER' USING WS-A"],
+              ws=["01  WS-A   PIC X(8) VALUE 'MODA'.", "01  WS-IN  PIC X(8)."],
+              inner=_INNER_CALLS_ITS_PARAMETER),
+     "the CALL at OUTER line 10 passes WS-A - WS-A set to ['MODA'] and also to a "
+     "variable"),
+    # One literal is longer than the caller's item, which then holds a truncation of
+    # it - not the literal, even though INNER's wider parameter could hold that.
+    (_program("OUTER", ["MOVE 'LONGERNAME' TO WS-A", "CALL 'INNER' USING WS-A"],
+              ws=["01  WS-A  PIC X(8) VALUE 'MODA'."],
+              inner=_program("INNER", ["CALL LK-PGM"], lk=["01  LK-PGM  PIC X(10)."],
+                             using=["LK-PGM"])),
+     "not a name: 'LONGERNAME' (length)"),
+    # The main program's own parameter comes from outside this source.
+    (_program("OUTER", ["CALL 'INNER' USING LK-O"], lk=["01  LK-O  PIC X(8)."],
+              using=["LK-O"], inner=_INNER_CALLS_ITS_PARAMETER),
+     "passes LK-O - LK-O is declared but never assigned"),
+    # Two items for one parameter: they cannot be matched by position.
+    (_program("OUTER", ["CALL 'INNER' USING WS-A WS-A"],
+              ws=["01  WS-A  PIC X(8) VALUE 'MODA'."],
+              inner=_INNER_CALLS_ITS_PARAMETER),
+     "names 2 data item(s) for INNER's 1 parameter(s)"),
+    # A qualified argument is several words: three of them for three parameters must
+    # not be read as three arguments.
+    (_program("OUTER", ["CALL 'INNER' USING WS-A OF GRP"],
+              ws=["01  GRP.", "    05  WS-A  PIC X(8) VALUE 'MODA'."],
+              inner=_program("INNER", ["CALL LK-PGM"],
+                             lk=["01  LK-PGM  PIC X(8).", "01  LK-2  PIC X(8).",
+                                 "01  LK-3  PIC X(8)."],
+                             using=["LK-PGM", "LK-2", "LK-3"])),
+     "passes a qualified name or an ADDRESS OF / LENGTH OF operand"),
+    # A literal argument is not a data item the CALL records, so the list is short.
+    (_program("OUTER", ["CALL 'INNER' USING BY CONTENT 'MODA'"],
+              inner=_INNER_CALLS_ITS_PARAMETER),
+     "names 0 data item(s) for INNER's 1 parameter(s)"),
+    # INNER and B pass their parameters to each other: a cycle proves nothing.
+    (_program("OUTER", ["CALL 'INNER' USING WS-A"],
+              ws=["01  WS-A  PIC X(8) VALUE 'MODA'."],
+              inner=_program("INNER", ["CALL 'B' USING LK-PGM", "CALL LK-PGM"],
+                             lk=["01  LK-PGM  PIC X(8)."], using=["LK-PGM"],
+                             common=True)
+              + _program("B", ["CALL 'INNER' USING LK-B"], lk=["01  LK-B  PIC X(8)."],
+                         using=["LK-B"], common=True)),
+     "is on a cycle of calls back to"),
+])
+def test_a_parameter_its_callers_do_not_pin_stays_flagged_and_says_why(outer, why):
+    """Every way the CALLs in this source can fail to fix a parameter leaves the target
+    a flagged dynamic row - never a guess - and the row's `why` names the failure."""
+    man, rows, dyn = _member(outer)
+    assert rows[("INNER", "LK-PGM")]["dynamic"] is True
+    assert "LK-PGM is a parameter of INNER, and the CALLs in this source do not pin " \
+           "it" in dyn[("INNER", "LK-PGM")]["why"]
+    assert why in dyn[("INNER", "LK-PGM")]["why"]
+    assert any(f.startswith("contained program INNER: program LK-PGM: dynamic target")
                for f in man["flags"])
 
 
@@ -583,32 +753,167 @@ def test_a_call_between_two_programs_contained_here_is_internal():
     assert (row["classification"], row["identity"]) == ("internal-nested", "internal")
 
 
-def test_a_contained_program_never_borrows_the_outer_programs_storage():
-    """INNER calls WS-PGM, which only OUTER declares (GLOBAL, VALUE 'GLOBMOD'). INNER's
-    own analysis cannot pin it, so it stays a flagged dynamic row - the outer program's
-    VALUE is never used to name INNER's target."""
-    src = (
-        "       IDENTIFICATION DIVISION.\n"
-        "       PROGRAM-ID. OUTER.\n"
-        "       DATA DIVISION.\n"
-        "       WORKING-STORAGE SECTION.\n"
-        "       01  WS-PGM     PIC X(8) VALUE 'GLOBMOD' GLOBAL.\n"
-        "       PROCEDURE DIVISION.\n"
-        "       0000-MAIN.\n"
-        "           CALL 'INNER'\n"
-        "           GOBACK.\n"
-        "       IDENTIFICATION DIVISION.\n"
-        "       PROGRAM-ID. INNER.\n"
-        "       PROCEDURE DIVISION.\n"
-        "       1000-IN.\n"
-        "           CALL WS-PGM\n"
-        "           GOBACK.\n"
-        "       END PROGRAM INNER.\n"
-        "       END PROGRAM OUTER.\n"
-    )
-    man = build_artifacts(build_machine(parse_program(src)))
+_GLOBMOD_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. OUTER.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-PGM     PIC X(8) VALUE 'GLOBMOD' GLOBAL.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'INNER'\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. INNER.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       1000-IN.\n"
+    "           CALL WS-PGM\n"
+    "           GOBACK.\n"
+    "       END PROGRAM INNER.\n"
+    "       END PROGRAM OUTER.\n"
+)
+
+
+def test_a_contained_program_sees_the_outer_programs_global_item():
+    """INNER calls WS-PGM, which only OUTER declares - GLOBAL, VALUE 'GLOBMOD'. GLOBAL
+    makes it INNER's item too, so the target is GLOBMOD, and the provenance says whose
+    declaration it came through."""
+    m = build_machine(parse_program(_GLOBMOD_SRC))
+    man = build_artifacts(m)
+    rows = _by_unit(man)
+    assert rows[("INNER", "GLOBMOD")]["via"] == "WS-PGM"
+    assert ("INNER", "WS-PGM") not in rows and man["flags"] == []
+    label = m.contained[0].provenance["call_GLOBMOD"]["cobol"]
+    assert "WS-PGM is declared GLOBAL in OUTER" in label
+
+
+def test_the_global_fixture_resolves_every_target_through_the_item_each_program_sees():
+    """examples/nestglob.cbl: GLOBLEAF's targets come from NESTGLOB's GLOBAL record and
+    GLOBAL item (GLOBMID's own WS-OWNPGM is not GLOBAL, so it is not the one GLOBLEAF
+    sees), GLOBMID's from its own WS-OWNPGM, and NESTGLOB's from what GLOBMID's SET
+    stores in the item they share. Nothing is left flagged."""
+    man = _artifacts_example("nestglob.cbl")
+    rows = _by_unit(man)
+    got = {k: r["via"] for k, r in rows.items() if r.get("via")}
+    assert got == {("GLOBLEAF", "GLOBLOG"): "WS-LOGPGM",
+                   ("GLOBLEAF", "OUTRMOD"): "WS-OWNPGM",
+                   ("GLOBMID", "MIDMOD"): "WS-OWNPGM",
+                   (None, "AUDITV2"): "WS-AUDPGM"}
+    assert man["flags"] == []
+
+
+def test_a_contained_program_never_borrows_the_outer_programs_local_storage():
+    """Without GLOBAL, OUTER's WS-PGM is OUTER's alone: INNER's analysis cannot pin it,
+    so it stays a flagged dynamic row - never named from the outer VALUE."""
+    man = build_artifacts(build_machine(parse_program(
+        _GLOBMOD_SRC.replace(" GLOBAL.", "."))))
     rows = _by_unit(man)
     assert rows[("INNER", "WS-PGM")]["dynamic"] is True
     assert not [k for k in rows if k[1] == "GLOBMOD"]
     assert any(f.startswith("contained program INNER: program WS-PGM: dynamic target")
                for f in man["flags"])
+
+
+def test_a_programs_own_declaration_hides_the_outer_global_one():
+    """INNER declares WS-PGM itself ('OWNMOD'): that is the item it calls through, not
+    OUTER's GLOBAL one."""
+    inner = _program("INNER", ["CALL WS-PGM"],
+                     ws=["01  WS-PGM  PIC X(8) VALUE 'OWNMOD'."])
+    src = _program("OUTER", ["CALL 'INNER'"],
+                   ws=["01  WS-PGM  PIC X(8) VALUE 'GLOBMOD' GLOBAL."], inner=inner)
+    man, rows, dyn = _member(src)
+    assert rows[("INNER", "OWNMOD")]["via"] == "WS-PGM"
+    assert not [k for k in rows if k[1] == "GLOBMOD"] and man["flags"] == []
+
+
+def test_the_nearest_global_declaration_wins_and_a_local_one_between_is_skipped():
+    """LEAF names WS-PGM and WS-LOG. MID declares WS-PGM GLOBAL and WS-LOG without it;
+    OUTER declares both GLOBAL. A name is looked up in the program, then in the GLOBAL
+    declarations of each container outward: WS-PGM is MID's, and WS-LOG - MID's own
+    being invisible to LEAF - OUTER's."""
+    leaf = _program("LEAF", ["CALL WS-PGM", "CALL WS-LOG"])
+    mid = _program("MID", ["CALL 'LEAF'"],
+                   ws=["01  WS-PGM  PIC X(8) VALUE 'MIDPGM' GLOBAL.",
+                       "01  WS-LOG  PIC X(8) VALUE 'MIDLOG'."], inner=leaf)
+    src = _program("OUTER", ["CALL 'MID'"],
+                   ws=["01  WS-PGM  PIC X(8) VALUE 'OUTPGM' GLOBAL.",
+                       "01  WS-LOG  PIC X(8) VALUE 'OUTLOG' GLOBAL."], inner=mid)
+    man, rows, dyn = _member(src)
+    assert rows[("LEAF", "MIDPGM")]["via"] == "WS-PGM"
+    assert rows[("LEAF", "OUTLOG")]["via"] == "WS-LOG"
+    assert not [k for k in rows if k[1] in ("OUTPGM", "MIDLOG")]
+
+
+def test_a_global_records_subordinates_and_conditions_are_seen():
+    """GLOBAL on the 01 makes its subordinates global: INNER calls WS-AUD, which OUTER
+    declares under WS-SHARED with no VALUE, and sets it through the 88-level AUDIT-V2 -
+    the target is AUDITV2. OUTER calls WS-AUD too, and INNER's SET is a store into the
+    item they share, so OUTER's target is AUDITV2 as well."""
+    inner = _program("INNER", ["SET AUDIT-V2 TO TRUE", "CALL WS-AUD"])
+    src = _program("OUTER", ["CALL 'INNER'", "CALL WS-AUD"],
+                   ws=["01  WS-SHARED GLOBAL.", "    05  WS-AUD  PIC X(8).",
+                       "        88  AUDIT-V2  VALUE 'AUDITV2'."], inner=inner)
+    man, rows, dyn = _member(src)
+    assert rows[("INNER", "AUDITV2")]["via"] == "WS-AUD"
+    assert rows[(None, "AUDITV2")]["via"] == "WS-AUD"
+    assert man["flags"] == []
+
+
+def test_every_program_sharing_a_global_item_sees_what_the_others_store():
+    """OUTER's GLOBAL WS-PGM starts as 'GLOBA'; INNER moves 'GLOBB' into it. Both CALL
+    it, and in both the target is one of the two - flagged with both candidates, and
+    never just the one each program's own text holds."""
+    inner = _program("INNER", ["MOVE 'GLOBB' TO WS-PGM", "CALL WS-PGM"])
+    src = _program("OUTER", ["CALL 'INNER'", "CALL WS-PGM"],
+                   ws=["01  WS-PGM  PIC X(8) VALUE 'GLOBA' GLOBAL."], inner=inner)
+    man, rows, dyn = _member(src)
+    for unit in (None, "INNER"):
+        assert rows[(unit, "WS-PGM")]["candidates"] == ["GLOBA", "GLOBB"]
+    assert "INNER stores 'GLOBB'" in dyn[("OUTER", "WS-PGM")]["why"]
+
+
+def test_an_item_each_sharer_moves_into_a_global_is_resolved_where_it_is_moved():
+    """OUTER moves its WS-A ('MODP') into the GLOBAL WS-PGM and INNER moves its WS-B
+    ('MODQ'). Each source item is resolved in the program that moves it, so both
+    programs' targets are one of MODP / MODQ - and resolving each needs the other's
+    analysis, which must not leave either one flagged as a cycle."""
+    inner = _program("INNER", ["MOVE WS-B TO WS-PGM", "CALL WS-PGM"],
+                     ws=["01  WS-B  PIC X(8) VALUE 'MODQ'."])
+    src = _program("OUTER", ["MOVE WS-A TO WS-PGM", "CALL 'INNER'", "CALL WS-PGM"],
+                   ws=["01  WS-PGM  PIC X(8) GLOBAL.",
+                       "01  WS-A    PIC X(8) VALUE 'MODP'."], inner=inner)
+    man, rows, dyn = _member(src)
+    for unit, program in ((None, "OUTER"), ("INNER", "INNER")):
+        row = rows[(unit, "WS-PGM")]
+        assert row["candidates"] == ["MODP", "MODQ"], program
+        assert not row.get("hasVariableAssignment"), program
+
+
+def test_a_value_another_sharer_stores_from_a_variable_keeps_the_global_flagged():
+    """INNER moves WS-IN - set from nothing this source pins - into the GLOBAL WS-PGM.
+    OUTER's CALL WS-PGM can then reach a value no reading names: flagged, never the
+    VALUE alone, and the reason says which program stores what."""
+    inner = _program("INNER", ["MOVE WS-IN TO WS-PGM"], ws=["01  WS-IN  PIC X(8)."])
+    src = _program("OUTER", ["CALL 'INNER'", "CALL WS-PGM"],
+                   ws=["01  WS-PGM  PIC X(8) VALUE 'GLOBA' GLOBAL."], inner=inner)
+    man, rows, dyn = _member(src)
+    row = rows[(None, "WS-PGM")]
+    assert row["dynamic"] is True and row["candidates"] == ["GLOBA"]
+    assert not [k for k in rows if k[1] == "GLOBA"]
+    why = dyn[("OUTER", "WS-PGM")]["why"]
+    assert "WS-PGM is GLOBAL, so the programs OUTER contains share it" in why
+    assert "INNER moves WS-IN into it (WS-IN is declared but never assigned" in why
+
+
+def test_a_contained_programs_unpinned_global_is_not_called_undeclared():
+    """INNER's CALL WS-PGM stays flagged (INNER moves an unpinned value into it), but the
+    row must not call WS-PGM undeclared - it is OUTER's GLOBAL item, in plain sight - nor
+    send the reader looking for a missing copybook."""
+    inner = _program("INNER", ["MOVE WS-IN TO WS-PGM", "CALL WS-PGM"],
+                     ws=["01  WS-IN  PIC X(8)."])
+    src = _program("OUTER", ["CALL 'INNER'"],
+                   ws=["01  WS-PGM  PIC X(8) GLOBAL."], inner=inner)
+    man, rows, dyn = _member(src)
+    row = dyn[("INNER", "WS-PGM")]
+    assert "provisional" not in row
+    assert "WS-PGM is declared GLOBAL in OUTER" in row["why"]

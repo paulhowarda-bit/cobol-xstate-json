@@ -3,8 +3,8 @@
       * this member (ledger item 55). NESTSQL calls EXTMOD, calls       *
       * INNERMOD through its OWN WS-TARGET (the outer one says          *
       * OUTERMOD), and reads ACCOUNT_MASTER. NESTLOG, nested one level  *
-      * deeper, writes LOGDD and calls whatever its caller passes -     *
-      * a true dynamic target, flagged, never guessed. A CALL to a      *
+      * deeper, writes LOGDD and calls what its caller passes - only    *
+      * this source calls it: NESTSQL passes 'LOGWRITE'. A CALL to a    *
       * program contained here stays internal, never fetched.           *
       *================================================================*
        IDENTIFICATION DIVISION.

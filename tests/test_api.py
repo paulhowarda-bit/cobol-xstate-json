@@ -96,7 +96,10 @@ def test_a_contained_programs_dependencies_are_requested_from_the_estate():
 
     a = analyze((EXAMPLES / "nestdeps.cbl").read_text(), source_name="nestdeps.cbl",
                 fetcher=fetcher)
-    assert {"EXTMOD", "INNERMOD", "OUTERMOD", "ACCOUNT_MASTER", "LOGDD"} <= set(asked)
+    # LOGWRITE is what NESTSQL passes NESTLOG to call: requested like any program.
+    assert {"EXTMOD", "INNERMOD", "OUTERMOD", "ACCOUNT_MASTER", "LOGDD",
+            "LOGWRITE"} <= set(asked)
     assert not {"NESTSQL", "NESTLOG", "NESTDEPS", "LK-PGM"} & set(asked)
     status = {r["artifact"]: r["status"] for r in a.fetch["artifacts"]}
-    assert status["NESTLOG"] == status["NESTSQL"] == status["LK-PGM"] == "skipped"
+    assert status["NESTLOG"] == status["NESTSQL"] == "skipped"
+    assert "LK-PGM" not in status

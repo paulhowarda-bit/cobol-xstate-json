@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
+from cobol_parser.analysis import _SOURCE_NAME
 from mainframe_artifacts.synonyms import FROM_RESOLVER, SynonymLookup
 
 from . import VIEW_SCHEMA_VERSION
@@ -1930,18 +1931,255 @@ def _conventions_of(ctx: "_BuildCtx"):
     return ctx.conventions
 
 
+# A CALL ... USING operand that is not one data item: a qualifier (`A OF B`) or the
+# ADDRESS OF / LENGTH OF special registers. The parser keeps such an operand as several
+# words, so the arguments after it no longer line up with the parameters by position.
+_NOT_ONE_ITEM = frozenset(("OF", "IN", "ADDRESS", "LENGTH"))
+
+
+@dataclass
+class _Widened(CallAnalysis):
+    """A program's call analysis, widened by what the rest of its source stores.
+
+    Two kinds of item in a program are written from OUTSIDE it, by statements still in
+    this source: a contained program's PROCEDURE DIVISION USING parameter holds whatever
+    the CALLs naming it pass in its position, and a GLOBAL item holds whatever any
+    program sharing it stores. Both arrive as literal assignments (or, where a program
+    stores a value that is not pinned, as an assignment this analysis cannot reduce, so
+    the item stays unresolved). ``notes`` says, per such item, where those values come
+    from or why they could not be pinned; a resolution that walks through the item
+    carries that text, so the answer traces back to the statement that supplied it."""
+
+    notes: Dict[str, str] = field(default_factory=dict)
+
+    def resolve(self, name: str, operand_limit: Optional[int] = None):
+        res = super().resolve(name, operand_limit)
+        _lits, _opaque, through = self._reaching(name.upper())
+        notes = [self.notes[p] for p in (name.upper(), *through) if p in self.notes]
+        if notes:
+            res.reason += "; " + "; ".join(notes)
+        return res
+
+
+def _pinned(res) -> Optional[Set[str]]:
+    """The literals a resolution pins an item to, or None when it does not pin it: a
+    variable also reaches, nothing proves a stored value, or a literal is longer than
+    the item, which then holds a truncation of it. A literal that cannot be a name is
+    kept - it is still the value, and the program it reaches rejects it in turn."""
+    if (res.has_variable_assignment or res.evidence != "assigned"
+            or any(r["reason"] == "length" for r in res.rejected)):
+        return None
+    return set(res.candidates) | {r["literal"] for r in res.rejected}
+
+
+def member_views(program: Program) -> Tuple[List[Program], List[Dict[str, int]]]:
+    """Every program of this source - this one first, then ``program.contained`` in
+    order - as the program it SEES, and for each the GLOBAL items it sees from outside
+    itself (name -> index of the program declaring the one it sees).
+
+    A contained program sees, beside its own storage, each GLOBAL item of the programs
+    containing it: the innermost container's declaration of a name first, and none of a
+    name it declares itself. Its view carries those items, so a reference to one
+    resolves through the declaration and the VALUE it has."""
+    programs = [program, *program.contained]
+    ids = [p.program_id.upper() for p in programs]
+    # Who contains whom: the main program contains every unit, and a unit the units its
+    # `nested_programs` name. A deeper container has more containers itself, so sorting
+    # on that puts the innermost first.
+    inside = [set()] + [
+        {0} | {j for j in range(1, len(programs))
+               if ids[i] in {n.upper() for n in programs[j].nested_programs}}
+        for i in range(1, len(programs))]
+    views: List[Program] = []
+    sees: List[Dict[str, int]] = []
+    for i, prog in enumerate(programs):
+        seen: Dict[str, int] = {}
+        extra: list = []
+        for c in sorted(inside[i], key=lambda j: -len(inside[j])):
+            fresh = [it for it in programs[c].data_items
+                     if it.is_global and it.name != "FILLER"
+                     and it.name not in prog.data_by_name and it.name not in seen]
+            for it in fresh:
+                seen.setdefault(it.name, c)
+            extra += fresh
+        sees.append(seen)
+        if not extra:
+            views.append(prog)
+            continue
+        by_name: Dict[str, object] = {}
+        for it in extra:
+            by_name.setdefault(it.name, it)
+        views.append(replace(prog, data_items=[*prog.data_items, *extra],
+                             data_by_name={**by_name, **prog.data_by_name}))
+    return views, sees
+
+
+def _member(program: Program) -> Tuple[List[Program], List[CallAnalysis]]:
+    """Every program of this source as it SEES (``member_views``), and its call analysis
+    widened by what the rest of the source stores in what it sees.
+
+    **Parameters.** A CALL names a contained program when it is ``CALL 'UNIT'``, or a
+    dynamic CALL whose target the calling program resolves to - or lists among its
+    candidates - the unit's name. Each argument is matched to a parameter by position
+    and resolved in the CALLER's analysis, itself widened, so a parameter passed on down
+    a chain of units is followed. A parameter is widened only when every such CALL pins
+    its argument; with no CALL naming the unit, arguments that do not line up, one that
+    is not pinned, or a cycle of calls, it is left as it was - flagged where it is the
+    target - and the note says which.
+
+    **Shared GLOBAL items.** The declaring program and every program seeing its item
+    share ONE item, so each one's analysis adds what the others store in it: their
+    literals, and what each item they MOVE into it resolves to in their own analysis -
+    or, when that is not pinned, a value this analysis cannot reduce."""
+    programs = [program, *program.contained]
+    ids = [p.program_id.upper() for p in programs]
+    views, sees = member_views(program)
+    base = [analyze_calls(v) for v in views]
+
+    # (container, name) -> the programs sharing that GLOBAL item, its declarer first;
+    # and the literals its own VALUE clauses give it, which every sharer already sees.
+    sharers: Dict[Tuple[int, str], List[int]] = {}
+    for i, seen in enumerate(sees):
+        for name, c in seen.items():
+            sharers.setdefault((c, name), [c]).append(i)
+    values = {key: {str(it.value)[1:-1].rstrip() for it in programs[key[0]].data_items
+                    if it.name == key[1] and it.is_global and len(str(it.value or "")) >= 2
+                    and str(it.value)[0] == str(it.value)[-1]
+                    and str(it.value)[0] in ("'", '"')}
+              for key in sharers}
+
+    index = {name: i for i, name in enumerate(ids) if i}
+    sites: Dict[int, List[Tuple[int, CallStmt]]] = {i: [] for i in index.values()}
+    for i, prog in enumerate(programs):
+        for para in [*prog.paragraphs, *prog.declaratives]:
+            for st in walk_statements(para.statements):
+                if not isinstance(st, CallStmt):
+                    continue
+                names = ([st.target] if not st.dynamic
+                         else base[i].resolve(st.target).candidates)
+                for name in dict.fromkeys(n.upper() for n in names):
+                    if name in index:
+                        sites[index[name]].append((i, st))
+
+    done: Dict[int, CallAnalysis] = {}
+
+    def widened(i: int, open_: FrozenSet[int], cuts: Set[int]) -> Optional[CallAnalysis]:
+        """Program ``i``'s widened analysis, or None for one already being widened - a
+        cycle, along which nothing is proven. ``cuts`` collects the programs this cut
+        short; an answer resting on a cut at a program still open ABOVE it is not kept,
+        because that program's own answer, once finished, may pin what the cut did not."""
+        if i in done:
+            return done[i]
+        if i in open_:
+            cuts.add(i)
+            return None
+        prog, open_, mine = programs[i], open_ | {i}, set()
+        uid = prog.program_id
+        literals = {k: set(v) for k, v in base[i].literal_assigns.items()}
+        variables = {k: set(v) for k, v in base[i].var_assigns.items()}
+        notes: Dict[str, List[str]] = {}
+        # The main program's parameters come from outside this source.
+        for pos, param in enumerate(prog.using if i else ()):
+            found: Set[str] = set()
+            routes: List[str] = []
+            problem = None if sites[i] else f"no CALL in this source names {uid}"
+            for c, st in sites[i]:
+                where = f"{ids[c]} line {st.line}"
+                if _NOT_ONE_ITEM & set(st.using):
+                    problem = (f"the CALL at {where} passes a qualified name or an "
+                               f"ADDRESS OF / LENGTH OF operand, so its arguments "
+                               f"cannot be matched to {uid}'s parameters by position")
+                    break
+                if len(st.using) != len(prog.using):
+                    problem = (f"the CALL at {where} names {len(st.using)} data item(s) "
+                               f"for {uid}'s {len(prog.using)} parameter(s), so they "
+                               f"cannot be matched by position")
+                    break
+                caller = widened(c, open_, mine)
+                if caller is None:
+                    problem = (f"the CALL at {where} is on a cycle of calls back to "
+                               f"{uid}")
+                    break
+                arg = st.using[pos]
+                res = caller.resolve(arg)
+                lits = _pinned(res)
+                if lits is None:
+                    problem = f"the CALL at {where} passes {arg} - {res.reason}"
+                    break
+                found |= lits
+                routes.append(f"{where} passes {arg} ({res.reason})")
+            if problem:
+                notes.setdefault(param, []).append(
+                    f"{param} is a parameter of {uid}, and the CALLs in this source do "
+                    f"not pin it: {problem}")
+            else:
+                literals[param] = literals.get(param, set()) | found
+                notes.setdefault(param, []).append(
+                    f"{param} is a parameter of {uid}, which is contained in this "
+                    f"source, so every CALL naming it is in sight: " + "; ".join(routes))
+        for (c, name), share in sorted(sharers.items()):
+            if i not in share:
+                continue
+            parts: List[str] = []
+            for q in share:
+                if q == i:
+                    continue
+                stored = base[q].literal_assigns.get(name, set()) - values[(c, name)]
+                if stored:
+                    literals.setdefault(name, set()).update(stored)
+                    parts.append(f"{ids[q]} stores "
+                                 + ", ".join(f"'{s}'" for s in sorted(stored)))
+                for src in sorted(base[q].var_assigns.get(name, ())):
+                    m = _SOURCE_NAME.match(src)
+                    other = widened(q, open_, mine) if m else None
+                    res = other.resolve(m.group(1)) if other is not None else None
+                    lits = _pinned(res) if res is not None else None
+                    if lits is None:
+                        # A value this analysis cannot reduce: it keeps the item flagged.
+                        variables.setdefault(name, set()).add(f"<{ids[q]}>")
+                    else:
+                        literals.setdefault(name, set()).update(lits)
+                    parts.append(f"{ids[q]} moves {src} into it" + (
+                        f" ({res.reason})" if res is not None else
+                        " (a cycle of programs storing into each other)" if m else ""))
+            if c != i or parts:
+                notes.setdefault(name, []).append(
+                    (f"{name} is declared GLOBAL in {ids[c]}" if c != i else
+                     f"{name} is GLOBAL, so the programs {uid} contains share it")
+                    + (", and " + "; ".join(parts) if parts else ""))
+        out = (_Widened(**{**vars(base[i]), "literal_assigns": literals,
+                           "var_assigns": variables},
+                        notes={k: "; ".join(v) for k, v in notes.items()})
+               if notes else base[i])
+        mine.discard(i)
+        if not mine:
+            done[i] = out
+        cuts |= mine
+        return out
+
+    return views, [widened(i, frozenset(), set()) for i in range(len(programs))]
+
+
 def build_machine(program: Program, source_name: str = "<source>",
                   synonyms: Optional[Dict[str, str]] = None,
                   conventions: object = _AUTO_CONVENTIONS,
                   synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
+                  calls: Optional[CallAnalysis] = None,
                   ) -> Machine:
     """``synonyms`` (a ``{"SYNONYM": "BASE"}`` map) and ``synonym_resolver`` (a
     ``(name) -> base | None`` callable the host supplies, see
     ``mainframe_artifacts.protocol.SynonymResolver``) are the two doors Db2 catalog
     knowledge arrives by. The map answers first; the resolver answers what the map
     does not hold, and is asked only at the point of need. Neither is ever a default:
-    with both absent a synonym stays a flagged, unresolved INSERT, never a guess."""
-    ctx = _BuildCtx(reg=NameRegistry(), calls=analyze_calls(program),
+    with both absent a synonym stays a flagged, unresolved INSERT, never a guess.
+
+    ``calls`` replaces the program's own dynamic-CALL analysis: a contained program is
+    built from the view, and with the analysis, that its containing program worked out
+    for it (see ``_member``) - what its callers pass it, and the GLOBAL items it sees."""
+    member = _member(program) if program.contained else None
+    if calls is None:
+        calls = member[1][0] if member else analyze_calls(program)
+    ctx = _BuildCtx(reg=NameRegistry(), calls=calls,
                     data=program.data_by_name, conventions=conventions)
     lookup = (SynonymLookup(synonyms, synonym_resolver)
               if (synonyms or synonym_resolver is not None) else None)
@@ -2097,11 +2335,14 @@ def build_machine(program: Program, source_name: str = "<source>",
     # Each contained program is modelled on its own - its own storage, its own dynamic
     # CALL analysis - never folded into this one. The parser's list is flat (every unit
     # at any depth, each with an empty `contained`), so this goes one level deep. A CALL
-    # from one unit to any other unit of this source is internal, as it is from here.
-    contained = [build_machine(unit, source_name=source_name, synonyms=synonyms,
+    # from one unit to any other unit of this source is internal, as it is from here -
+    # and since only this source can call a unit, its parameters hold what those CALLs
+    # pass, and it sees the GLOBAL items of the programs containing it (_member).
+    contained = [build_machine(view, source_name=source_name, synonyms=synonyms,
                                conventions=ctx.conventions,
-                               synonym_resolver=synonym_resolver)
-                 for unit in program.contained]
+                               synonym_resolver=synonym_resolver, calls=unit_calls)
+                 for view, unit_calls in zip(member[0][1:], member[1][1:])
+                 ] if member else []
     for unit in contained:
         unit.nested_programs = program.nested_programs
 
