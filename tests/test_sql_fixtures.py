@@ -1575,3 +1575,106 @@ def test_a_cursor_declared_for_a_with_query_publishes_through_its_fetch():
         "           EXEC SQL FETCH WC INTO :WS-A END-EXEC\n"))
     assert [(v, ep) for v, _, ep, _, _, _ in _db2_events(m.bundle()["interface"])] == [
         ("FETCH", "T_WC_BASE")]
+
+
+# --------------------------------------------------------------------------- #
+# sqlwrite: five write shapes whose host variables reached a CREATE event with no
+# column mapping and no reason token (ledger item 84)
+# --------------------------------------------------------------------------- #
+
+def _write(iface, endpoint):
+    """The one Db2 CREATE event on ``endpoint``: (fields, params, columns, token)."""
+    [e] = [e for e in iface["events"] if e["endpointType"] == "db2"
+           and e["direction"] == "create" and e["endpoint"] == endpoint]
+    cols = [(c.get("column"), c["hostVar"], c.get("derived", False))
+            for c in e.get("columns") or []]
+    return e["fields"], e.get("params"), cols, e.get("columnsUnresolved")
+
+
+def test_an_insert_inside_final_table_maps_its_column_list():
+    """`SELECT ... FROM FINAL TABLE (INSERT INTO t (c1, ...) VALUES (:a, ...))` was
+    dispatched on SELECT, so the inner column list was never zipped."""
+    fields, params, cols, token = _write(_iface("sqlwrite.cbl"), "T_XORD_INFO")
+    assert fields == ["WS-ORD-ID", "WS-ORD-AMT", "WS-ORD-TS"]
+    assert cols == [("ORD_ID", "WS-ORD-ID", False), ("ORD_AMT", "WS-ORD-AMT", False),
+                    ("ORD_TS", "WS-ORD-TS", False)]
+    assert (params, token) == (None, None)
+
+
+def test_an_update_inside_final_table_publishes_its_where_as_a_parameter():
+    """A plain UPDATE of the same text already split its WHERE off; inside FINAL TABLE
+    the row selector was published as a written field."""
+    fields, params, cols, _ = _write(_iface("sqlwrite.cbl"), "T_XSEQ_SEQUENCE")
+    assert (fields, params) == (["WS-SEQ-JOB"], ["WS-SEQ-CO"])
+    assert cols == [("JOB_NAME", "WS-SEQ-JOB", False)]
+
+
+def test_a_column_list_less_insert_inside_final_table_zips_against_its_declare():
+    """The build-time zip a plain INSERT gets: the table's DECLARE TABLE order. The
+    variable read back INTO is also the one written, so it stays a field."""
+    fields, _, cols, token = _write(_iface("sqlwrite.cbl"), "T_XLOG_ENTRY")
+    assert cols == [("LOG_ID", "WS-ORD-ID", False), ("LOG_AMT", "WS-ORD-AMT", False)]
+    assert fields == ["WS-ORD-ID", "WS-ORD-AMT"]
+    assert token is None
+
+
+def test_a_cursor_over_final_table_splits_its_write_at_open():
+    fields, params, cols, _ = _write(_iface("sqlwrite.cbl"), "T_XSEQ_CURSOR")
+    assert (fields, params) == (["WS-SEQ-JOB"], ["WS-SEQ-CO"])
+    assert cols == [("JOB_NAME", "WS-SEQ-JOB", False)]
+
+
+def test_a_merge_composes_values_slot_correlation_column_and_target_column():
+    """`USING (VALUES (:a, :b)) AS S (X, Y)` then `INSERT (C1, C2) VALUES (S.X, S.Y)` /
+    `UPDATE SET C2 = S.Y`: two explicit hops, host variable -> column. The MERGE arm
+    always received empty columns before. The FOR :n ROWS count is a parameter."""
+    fields, params, cols, token = _write(_iface("sqlwrite.cbl"), "T_XMRG_FUND")
+    assert fields == ["WS-ORD-ID", "WS-ORD-AMT"]
+    assert sorted(cols) == [("ORD_AMT", "WS-ORD-AMT", False),
+                            ("ORD_ID", "WS-ORD-ID", False)]
+    assert (params, token) == (["WS-ROWS"], None)
+
+
+def test_a_merge_that_cannot_be_correlated_says_why():
+    """No correlation column list: no hop can be made, so the event carries the token
+    rather than publishing fields with no mapping and no reason. The ON variable is a
+    row selector all the same."""
+    iface = _iface("sqlwrite.cbl")
+    fields, params, cols, token = _write(iface, "T_XMRG_NONAME")
+    assert (cols, token) == ([], "merge-not-correlated")
+    assert (fields, params) == (["WS-ORD-ID", "WS-ORD-AMT"], ["WS-SEQ-CO"])
+    [e] = [e for e in iface["events"] if e["endpoint"] == "T_XMRG_NONAME"]
+    assert "names no columns" in e["columnNote"]
+
+
+def test_a_multi_row_insert_count_is_a_parameter_not_a_field():
+    fields, params, cols, _ = _write(_iface("sqlwrite.cbl"), "T_XQUE_BATCH")
+    assert (fields, params) == (["WS-ORD-ID", "WS-ORD-AMT"], ["WS-ROWS"])
+    assert [c for c, _, _ in cols] == ["ORD_ID", "ORD_AMT"]
+
+
+def test_a_function_of_one_host_variable_is_a_derived_entry():
+    """`VALUES (UPPER(:WS-NAME), ...)` fills NAME_T from WS-NAME: the SET rule's derived
+    entry, naming the column it fills, instead of a field with no entry at all."""
+    iface = _iface("sqlwrite.cbl")
+    [e] = [e for e in iface["events"] if e["endpoint"] == "T_XENR_REC"]
+    assert e["fields"] == ["WS-NAME", "WS-ORD-ID"]
+    assert e["columns"][0] == {"table": "T_XENR_REC", "column": None,
+                               "hostVar": "WS-NAME", "derived": True,
+                               "expression": "UPPER", "derivedFrom": ["NAME_T"]}
+    assert "columnNote" not in e
+
+
+def test_a_group_in_a_where_is_expanded_into_row_selectors():
+    fields, params, _, _ = _write(_iface("sqlwrite.cbl"), "T_XTYP_CODE")
+    assert (fields, params) == (["WS-CNT"], ["WS-TYP-SET-1", "WS-TYP-SET-2"])
+
+
+def test_no_write_in_sqlwrite_leaves_a_field_without_a_column_or_a_reason():
+    """The consumer's residual: a field with no `columns[]` entry on an event with no
+    `columnsUnresolved` token. Every shape above is one of the five that produced it."""
+    for e in _iface("sqlwrite.cbl")["events"]:
+        if e["endpointType"] != "db2" or e["direction"] != "create":
+            continue
+        mapped = {c["hostVar"] for c in e.get("columns") or []}
+        assert e.get("columnsUnresolved") or set(e["fields"]) <= mapped, e["endpoint"]

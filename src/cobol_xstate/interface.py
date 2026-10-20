@@ -640,10 +640,22 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             change = _SQL_DATA_CHANGE.search(mup)
             if change:
                 # The inner statement WRITES the table the SELECT reads back: one
-                # statement, both directions on the same endpoint.
-                fields, wparams = _dml_split(params, where_vars, None)
-                hits.append(_hit("create", _DB2, endpoint, change.group(1).upper(),
-                                 fields, wparams))
+                # statement, both directions on the same endpoint. The parser read the
+                # inner statement as it would read it alone (`dataChange`): its columns,
+                # its row selectors and, when it could not map them, why. A spec-less
+                # overlay has none of it and splits nothing, as before.
+                # A variable both written and read back (`SELECT ID INTO :X FROM NEW
+                # TABLE (INSERT ... VALUES (:X))`) is sent before it is overwritten, so
+                # it is the write's field as well as the read's.
+                dc = (spec or {}).get("dataChange") or {}
+                dcols = dc.get("columns") or None
+                mapped = {str(c.get("hostVar", "")).upper() for c in (dcols or ())}
+                fields, wparams = _dml_split(
+                    _dedup([h for h in host_vars if h not in into_fields or h in mapped]),
+                    {h.lstrip(":").upper() for h in dc.get("whereVars") or ()}, dcols)
+                hits.append(_note(_hit("create", _DB2, endpoint, change.group(1).upper(),
+                                       fields, wparams, _qualify(dcols, endpoint)),
+                                  dc.get("columnNote"), dc.get("columnsUnresolved")))
             return _read_tables(hits, tables, verb)
         if verb == "INSERT":
             m = _SQL_INTO_TABLE.search(up)
@@ -729,11 +741,19 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         if change:
             # A cursor over `FROM FINAL TABLE (INSERT ...)`: opening it runs the inner
             # write (statechart._mark_data_change_opens). A DELETE's host variables
-            # only pick rows, as in the DELETE arm above; otherwise nothing is split.
+            # only pick rows, as in the DELETE arm above; the others split on the
+            # inner statement's own columns and row selectors, which a parse bundle
+            # older than VERSION 14 does not carry - and then nothing is split.
             hv = list(change.get("hostVars") or [])
-            dele = change["verb"] == "DELETE"
-            return [_hit("create", _DB2, change["table"], change["verb"],
-                         [] if dele else hv, params=hv if dele else None)]
+            if change["verb"] == "DELETE":
+                return [_hit("create", _DB2, change["table"], change["verb"], [],
+                             params=hv)]
+            dcols = change.get("columns") or None
+            fields, wparams = _dml_split(
+                hv, {h.lstrip(":").upper() for h in change.get("whereVars") or ()}, dcols)
+            return [_note(_hit("create", _DB2, change["table"], change["verb"], fields,
+                               wparams, _qualify(dcols, change["table"])),
+                          change.get("columnNote"), change.get("columnsUnresolved"))]
         cname = (spec or {}).get("unfetchedCursor") if verb == "OPEN" else None
         refs = ((cursor_refs or {}).get(cname) or []) if cname else []
         table = (cursors.get(cname) or next(iter(refs), None)) if cname else None

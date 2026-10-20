@@ -458,6 +458,11 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         # Null indicators: in the source, not among the host variables, and neither an
         # omission nor a field. A nullable column is a fact about the interface.
         spec["indicatorVars"] = st.indicator_vars
+    if st.data_change:
+        # `SELECT ... FROM FINAL TABLE (INSERT ...)`: the write's own columns and row
+        # selectors, apart from the SELECT's read-back above (interface's SELECT arm).
+        # A copy: the zip of a column-list-less INSERT (_correlate_inserts) writes to it.
+        spec["dataChange"] = dict(st.data_change)
     return spec
 
 
@@ -780,7 +785,11 @@ class _ParaCompiler:
         # TABLE declarations and flags only what stays unresolved.
         insert_pending = (st.lang == "SQL" and st.verb == "INSERT"
                           and st.table is not None)
-        if insert_pending:
+        # The same wait for an INSERT inside `FROM FINAL TABLE (...)`: the zip runs on
+        # the spec's dataChange rather than on the SELECT's own columns.
+        change_pending = (st.lang == "SQL" and st.verb == "SELECT"
+                          and bool(st.data_change) and "table" in st.data_change)
+        if insert_pending or change_pending:
             self.ctx.insert_sites.append((name, self.pname, st.line))
         # A FAILED SELECT correlation is likewise still pending when a naming-
         # conventions source is present: the post-pass (_correlate_selects) gets one
@@ -799,6 +808,13 @@ class _ParaCompiler:
             self.ctx.flag(self.pname, st.line,
                           f"EXEC {st.lang} {st.verb}: column<->host-variable mapping not "
                           f"recovered ({st.column_note}); cross-program state identity "
+                          f"for these fields is unresolved")
+        change_note = (st.data_change or {}).get("columnNote")
+        if change_note and not change_pending:
+            self.ctx.flag(self.pname, st.line,
+                          f"EXEC {st.lang} {st.verb} FROM a data-change "
+                          f"{st.data_change['verb']}: column<->host-variable mapping not "
+                          f"recovered ({change_note}); cross-program state identity "
                           f"for these fields is unresolved")
         if st.kind == "handle":
             self.ctx.flag(self.pname, st.line,
@@ -1834,6 +1850,8 @@ def _correlate_inserts(ctx: "_BuildCtx", program: Program,
         declared.setdefault(name.rsplit(".", 1)[-1], entry)
     for name, para, line in ctx.insert_sites:
         spec = ctx.action_sem.get(name)
+        if spec and spec.get("verb") == "SELECT":
+            spec = spec.get("dataChange")         # `FROM FINAL TABLE (INSERT INTO t ...)`
         if not spec or spec.get("columns"):
             continue
         table = str(spec.get("table", "")).upper()

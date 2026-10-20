@@ -666,3 +666,19 @@ def test_each_programs_dynamic_target_is_traced_to_its_own_file():
             for r in annotated["artifacts"]}
     assert rows[(None, "WS-SUBPGM")]["namedBy"][0]["ddname"] == "OUTDD"
     assert rows[("INNER", "WS-SUBPGM")]["namedBy"][0]["ddname"] == "INDD"
+
+
+def test_a_call_through_a_group_whose_values_spell_the_name_is_an_edge():
+    """A group has no VALUE, but its leading bytes are its subordinates': one X(08)
+    VALUE, or three FILLERs together, spell the program the CALL invokes. Both used to
+    be dynamic endpoints named after the data item. The third group's first field
+    receives a table name, so its call stays a dynamic row."""
+    from pathlib import Path
+    ex = Path(__file__).resolve().parents[1] / "examples" / "callgrp.cbl"
+    m, art, view = _view(ex.read_text())
+    programs = {r["artifact"]: r.get("via") for r in art["artifacts"]
+                if r["kind"] == "program"}
+    assert programs["XPGMA400"] == "WS-XPGMA400"
+    assert programs["XQSD2FSW"] == "XQ2K-XQSD2FSW"
+    assert "WS-XPGMA400" not in programs and "XQ2K-XQSD2FSW" not in programs
+    assert [r["item"] for r in view["dynamicCalls"]] == ["WS-ERR-MSG"]
