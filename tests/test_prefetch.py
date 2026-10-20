@@ -365,3 +365,44 @@ def test_every_outcome_survives_the_concurrent_path_distinctly():
     assert by["L3A"]["status"] == "fetched", "the third level must still be reached"
     # ...and one member named by two parents is still one round-trip and one row
     assert [r["member"] for r in rep["members"]].count("L2A") == 1
+
+
+def test_a_contained_programs_row_is_attributed_through_its_own_data_item():
+    """Ledger item 55. INNER's WS-SUBPGM comes from the prefetched SUBPGMS and names
+    POSTLOG; OUTER declares its own WS-SUBPGM locally. Each row is attributed through
+    its OWN program's item: INNER's to the copybook, OUTER's to nothing - the same
+    name in the other program must not lend it a provenance it does not have."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTER.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-SUBPGM  PIC X(8) VALUE 'OUTERSUB'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL WS-SUBPGM\n"
+        "           CALL 'INNER'\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. INNER.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY SUBPGMS.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-IN.\n"
+        "           CALL WS-SUBPGM\n"
+        "           GOBACK.\n"
+        "       END PROGRAM INNER.\n"
+        "       END PROGRAM OUTER.\n"
+    )
+    pre = prefetch_cobol(src, _mf())
+    program = parse_program(src, resolver=CopybookResolver(store=pre.store))
+    man = attribute_resolution(
+        build_artifacts(build_machine(program)), program, pre.store)
+    rows = {(r.get("containedProgram"), r["artifact"]): r for r in man["artifacts"]}
+    inner, outer = rows[("INNER", "POSTLOG")], rows[(None, "OUTERSUB")]
+    assert (inner["via"], outer["via"]) == ("WS-SUBPGM", "WS-SUBPGM")
+    assert (inner["resolvedBy"]["stage"], inner["resolvedBy"]["member"]) == \
+        ("prefetch", "SUBPGMS")
+    # OUTER's row keeps the plain binder resolver: its item came from no member.
+    assert not isinstance(outer.get("resolvedBy"), dict)

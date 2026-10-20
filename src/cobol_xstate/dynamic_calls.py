@@ -308,11 +308,13 @@ def annotate_artifacts(manifest: dict, report: dict) -> dict:
     "not resolvable from this program alone". That is where the pointer is worth the
     most - and carrying it here also means the fetch plan inherits it, since the plan
     is built from these rows."""
-    by_item = {r["item"]: r for r in report.get("dynamicCalls", [])}
+    # Keyed on the program too: two programs of one member can each have a WS-TARGET.
+    by_item = {(r["program"], r["item"]): r for r in report.get("dynamicCalls", [])}
     for row in (manifest.get("artifacts") or []):
         if not row.get("dynamic"):
             continue
-        found = by_item.get(str(row.get("artifact", "")).upper())
+        found = by_item.get((row.get("containedProgram", manifest.get("program")),
+                             str(row.get("artifact", "")).upper()))
         if not found:
             continue
         named: List[dict] = []
@@ -348,12 +350,20 @@ def annotate_artifacts(manifest: dict, report: dict) -> dict:
     return manifest
 
 
-def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> dict:
-    """One row per TRUE dynamic target: what it is, why it is unresolvable, which
-    artifact supplies its value, and how the value gets from there to the call.
+def _own_rows(manifest: Optional[dict], unit: Optional[str]) -> Optional[dict]:
+    """The manifest as ONE program of the member sees it: the main program's rows when
+    ``unit`` is None, else those of the contained program ``unit``. A source names its
+    artifact from its own program's row - two programs' CUST-FILE are two files, and
+    one must never lend the other its ddname."""
+    if manifest is None:
+        return None
+    return dict(manifest, artifacts=[r for r in manifest.get("artifacts") or []
+                                     if r.get("containedProgram") == unit])
 
-    ``artifacts`` is the related-artifact manifest, used to give each source its
-    retrievable identity (ddname, and the dataset when the JCL was bound). Pure read."""
+
+def _dynamic_rows(machine: Machine, artifacts: Optional[dict]
+                  ) -> Tuple[List[dict], List[str]]:
+    """One program's rows, from its own lineage, and the lineage flags they rest on."""
     lin = machine.lineage()
     lin.run()
 
@@ -506,6 +516,25 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
                         f"is whatever it was initialised to - usually a defect rather "
                         f"than a run-time indirection")
         rows.append(row)
+    return rows, lin.flags
+
+
+def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> dict:
+    """One row per TRUE dynamic target: what it is, why it is unresolvable, which
+    artifact supplies its value, and how the value gets from there to the call.
+
+    ``artifacts`` is the related-artifact manifest, used to give each source its
+    retrievable identity (ddname, and the dataset when the JCL was bound). Pure read.
+
+    A program contained in this source is part of this member, so its dynamic targets
+    are rows here too, traced over ITS lineage and its storage; each row's ``program``
+    says whose call it is."""
+    rows, own_flags = _dynamic_rows(machine, _own_rows(artifacts, None))
+    flags = list(own_flags)
+    for unit in machine.contained:
+        more, unit_flags = _dynamic_rows(unit, _own_rows(artifacts, unit.program_id))
+        rows.extend(more)
+        flags.extend(f"contained program {unit.program_id}: {f}" for f in unit_flags)
 
     return {
         "format": "cobol-xstate-dynamic-calls",
@@ -541,5 +570,5 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
                                        for s in r.get("sources", []))),
         },
         "dynamicCalls": rows,
-        "flags": lin.flags,
+        "flags": flags,
     }

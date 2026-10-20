@@ -857,6 +857,17 @@ cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no m
   reason — response registers (`SQLCODE`, `EIB`, FILE STATUS), handled conditions
   (`NOTFND`, end-of-file), and system intrinsics (DATE/TIME) are the program *reacting* to
   a subsystem, not a second thing it touches.
+- **Contained programs** (`PROGRAM-ID … END PROGRAM` inside this one, at any depth) are
+  part of this member, so each one's rows are listed too, tagged **`containedProgram`**
+  with its name and pointing at its own source lines. Each is modelled on its own: its
+  dynamic `CALL`s resolve from its own `VALUE`s, never the outer program's, and its rows
+  are never merged by name with another program's (`CUST-FILE` in two programs is two
+  files). A `CALL` from any program of the source to one contained in it is
+  `internal-nested` and never fetched. A contained program's caller is a program in this
+  source, so its `caller` row is `excluded` with that reason; its `flags` read
+  `contained program NAME: …`. Its true dynamic targets are rows of the dynamic-calls view
+  too, each `program` naming it. Its storage is its own: an item it reaches only through
+  the outer program's `GLOBAL` data stays an unresolved, flagged target.
 - **What it won't claim**: a file used with no `SELECT ... ASSIGN` (or a CICS file with no
   local definition) has no known ddname, so the row says the dataset is unresolvable from
   this program alone and the manifest `flags` it — never an invented binding. Likewise a
@@ -1830,6 +1841,7 @@ most are pinned by a test.
 | `dyncands.cbl` | **each grade of dynamic-target answer the interface publishes** — resolved, several assigned literals, one literal beside a variable `MOVE`, 88-level values only, variables only — and a `CALL` and a CICS `LINK`/`XCTL` over the same item publishing the same `candidates` |
 | `callfilter.cbl` | **literals that reach a dynamic target but cannot be the name it invokes** — a message longer than the item, a wildcard template (its 88-level values take over), a `??` placeholder, a filler initialiser beside two real names — kept as `rejectedCandidates`; and a 9-byte item under `LINK PROGRAM()` resolving to its first 8 characters |
 | `fdrecord.cbl` | **a `WRITE` names a record, the endpoint is its file** — through the 01 under the FD, through the FD's `DATA RECORD` clause when the 01's copybook is missing, and marked `endpointUnresolved: "record"` when neither reaches it; the FD's multi-line clauses no longer leak into the item above |
+| `nestdeps.cbl` | **a contained program's dependencies are the member's** — a static `CALL`, a `CALL` resolved through the contained program's OWN `VALUE` (the outer program declares the same name with another), an SQL table, a file written by a program nested two deep, a caller-supplied target flagged, and calls to programs contained here never fetched |
 | `cicsnofile.cbl` | **CICS commands that share a verb with the file commands** — `WRITE OPERATOR` (the console), `DELETE CONTAINER` / `COUNTER` (no crossing), `WRITE JOURNALNAME` and an unreadable `FILE()` operand (`<file>`, marked `no-operand`), and `QNAME()` naming the queue |
 | `accum.cbl` | `PERFORM UNTIL` call-return |
 | `nestperf.cbl` | nested PERFORM threading context through two call levels |

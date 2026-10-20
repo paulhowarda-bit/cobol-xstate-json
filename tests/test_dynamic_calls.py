@@ -567,3 +567,75 @@ def test_a_literal_procedure_name_is_unchanged():
     assert {(e["endpoint"], tuple(e["fields"]), e.get("via")) for e in _proc_events(m)} \
         == {("PROCC", ("WS-P", "WS-IN"), None)}
     assert view["dynamicCalls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 55: a contained program's dynamic targets are the member's rows
+# --------------------------------------------------------------------------- #
+
+def _unit_src(name: str, ddname: str) -> str:
+    """One program whose CALL target is read from CTL-FILE on ``ddname``."""
+    return (
+        "       IDENTIFICATION DIVISION.\n"
+        f"       PROGRAM-ID. {name}.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        f"           SELECT CTL-FILE ASSIGN TO {ddname}.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  CTL-FILE.\n"
+        "       01  CTL-REC.\n"
+        "           05  CTL-PGM-NAME  PIC X(8).\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-SUBPGM  PIC X(8).\n"
+        "       PROCEDURE DIVISION.\n"
+        f"       {name}-MAIN.\n"
+        "           READ CTL-FILE AT END CONTINUE END-READ\n"
+        "           MOVE CTL-PGM-NAME TO WS-SUBPGM\n"
+        "           CALL WS-SUBPGM\n"
+    )
+
+
+# OUTER and INNER each read the program to call from their own CTL-FILE - same item
+# name, same file name, two ddnames.
+TWO_DISPATCHERS = (
+    _unit_src("OUTER", "OUTDD") + "           CALL 'INNER'\n           GOBACK.\n"
+    + _unit_src("INNER", "INDD") + "           GOBACK.\n"
+    "       END PROGRAM INNER.\n"
+    "       END PROGRAM OUTER.\n"
+)
+
+
+def test_a_contained_programs_dynamic_target_is_a_row_with_its_program():
+    """NESTLOG calls whatever its caller passes. That edge used to vanish with the
+    contained program's body; it is a row, said to be NESTLOG's, sourced from the
+    caller - and never a guessed target."""
+    from pathlib import Path
+    ex = Path(__file__).resolve().parents[1] / "examples" / "nestdeps.cbl"
+    m, art, view = _view(ex.read_text())
+    rows = [r for r in view["dynamicCalls"] if r["program"] == "NESTLOG"]
+    assert [(r["item"], r["line"]) for r in rows] == [("LK-PGM", 58)]
+    assert [s["kind"] for s in rows[0]["sources"]] == ["caller"]
+    assert "candidates" not in rows[0]
+    assert view["program"] == "NESTDEPS"
+    assert view["counts"]["dynamicTargets"] == 1
+    assert view["counts"]["callerSupplied"] == 1
+
+
+def test_each_programs_dynamic_target_is_traced_to_its_own_file():
+    """Two programs of one member, each with a CTL-FILE and a WS-SUBPGM. Each row is
+    traced over its own program's lineage and named from its own manifest row - INNER's
+    source on INDD, never OUTER's OUTDD - and the manifest's pointer follows suit."""
+    m, art, view = _view(TWO_DISPATCHERS)
+    by_prog = {r["program"]: r for r in view["dynamicCalls"]}
+    assert sorted(by_prog) == ["INNER", "OUTER"]
+    for prog, dd in (("OUTER", "OUTDD"), ("INNER", "INDD")):
+        (src,) = by_prog[prog]["sources"]
+        assert (src["artifact"], src["ddname"]) == ("CTL-FILE", dd)
+        assert src["how"]["field"] == "CTL-PGM-NAME"
+    annotated = annotate_artifacts(art, view)
+    rows = {(r.get("containedProgram"), r["artifact"]): r
+            for r in annotated["artifacts"]}
+    assert rows[(None, "WS-SUBPGM")]["namedBy"][0]["ddname"] == "OUTDD"
+    assert rows[("INNER", "WS-SUBPGM")]["namedBy"][0]["ddname"] == "INDD"

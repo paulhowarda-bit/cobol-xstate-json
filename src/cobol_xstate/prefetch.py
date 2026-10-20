@@ -26,19 +26,21 @@ def attribute_resolution(manifest: dict, program, store: Dict[tuple, Tuple[str, 
     from the estate is what turned an unresolved runtime target into a named program."""
     if not store:
         return manifest
-    origins = {}
-    for item in getattr(program, "data_items", None) or []:
-        name = getattr(item, "name", None)
-        origin = getattr(item, "origin", None)
-        if name and origin:
-            origins.setdefault(str(name).upper(), str(origin).upper())
-    if not origins:
-        return manifest
+    # Per program of the member: a contained program's row was proved through ITS OWN
+    # data item, which is not the main program's item of the same name.
+    origins: Dict[object, Dict[str, str]] = {}
+    for unit in [program, *program.contained]:
+        own = origins.setdefault(None if unit is program else unit.program_id, {})
+        for item in getattr(unit, "data_items", None) or []:
+            name = getattr(item, "name", None)
+            origin = getattr(item, "origin", None)
+            if name and origin:
+                own.setdefault(str(name).upper(), str(origin).upper())
     for row in manifest.get("artifacts", []) or []:
         via = row.get("via")
         if not via:
             continue
-        member = origins.get(str(via).upper())
+        member = origins.get(row.get("containedProgram"), {}).get(str(via).upper())
         if member and lookup(store, member, "copybook") is not None:
             row["resolvedBy"] = {
                 "stage": "prefetch", "member": member,

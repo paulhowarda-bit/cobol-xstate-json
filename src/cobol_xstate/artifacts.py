@@ -428,6 +428,28 @@ def build_artifacts(machine: Machine) -> dict:
 
         artifacts.append(row)
 
+    # A program CONTAINED in this source is part of this member, so what its own manifest
+    # lists is this member's dependency too, and each row names the unit it came from.
+    # Rows of their own, never merged by name: a file, queue or data-item name is local
+    # to the program declaring it, so the main program's CUST-FILE and a contained one's
+    # are not one artifact. A contained program's caller is a program in this source, not
+    # a job step or a transaction, so that row is excluded with the reason instead.
+    for unit in machine.contained:
+        sub = build_artifacts(unit)
+        for row in sub["artifacts"]:
+            if row["kind"] == "caller":
+                excluded.append({
+                    "name": row[_ARTIFACT], "endpointType": "caller",
+                    "containedProgram": unit.program_id,
+                    "reason": "the caller of a contained program is a program in this "
+                              "source, not a job step or a transaction"})
+                continue
+            artifacts.append({_ARTIFACT: row[_ARTIFACT],
+                              "containedProgram": unit.program_id, **row})
+        excluded.extend(dict(row, containedProgram=unit.program_id)
+                        for row in sub["excluded"])
+        flags.extend(f"contained program {unit.program_id}: {f}" for f in sub["flags"])
+
     # Copybooks (COPY / EXEC SQL INCLUDE) - a COMPILE-TIME source dependency, not a
     # runtime endpoint, so they carry no io/verbs. A member name is program-local in the
     # sense that matters here: it is unique only *within a library*, and which library the

@@ -124,6 +124,11 @@ class Machine:
     # name a FETCH's real table endpoint when the DECLARE never became a
     # procedure-division action (its columns were already joined at build time).
     sql_cursors: List[dict] = field(default_factory=list)
+    # One Machine per program CONTAINED in this source, in source order. A contained
+    # program is a separate program, so it is no part of this machine's statechart - but
+    # its CALLs, SQL, CICS and files are dependencies of this member, so the dependency
+    # views (artifacts, dynamic-calls) walk these as well.
+    contained: List["Machine"] = field(default_factory=list)
     _iface_cache: Optional[dict] = field(default=None, repr=False, compare=False)
     _lineage_cache: object = field(default=None, repr=False, compare=False)
     # The reactive lowering (reactive._lower), solved once for the same reason.
@@ -2089,6 +2094,17 @@ def build_machine(program: Program, source_name: str = "<source>",
             "binary-float, arithmetic to stay faithful."
         )
 
+    # Each contained program is modelled on its own - its own storage, its own dynamic
+    # CALL analysis - never folded into this one. The parser's list is flat (every unit
+    # at any depth, each with an empty `contained`), so this goes one level deep. A CALL
+    # from one unit to any other unit of this source is internal, as it is from here.
+    contained = [build_machine(unit, source_name=source_name, synonyms=synonyms,
+                               conventions=ctx.conventions,
+                               synonym_resolver=synonym_resolver)
+                 for unit in program.contained]
+    for unit in contained:
+        unit.nested_programs = program.nested_programs
+
     return Machine(
         config=config,
         provenance=ctx.reg.provenance_dict(),
@@ -2110,4 +2126,5 @@ def build_machine(program: Program, source_name: str = "<source>",
         nested_programs=program.nested_programs,
         unresolved_calls=ctx.unresolved_calls,
         sql_cursors=program.sql_cursors,
+        contained=contained,
     )

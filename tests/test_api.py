@@ -82,3 +82,21 @@ def test_a_memoized_view_is_not_shared_between_analyses():
     """The cache is per-Analysis. Two runs of the same source are two objects, because a
     caller that mutates one must not reach into the other."""
     assert _analysis().lineage() is not _analysis().lineage()
+
+
+def test_a_contained_programs_dependencies_are_requested_from_the_estate():
+    """Ledger item 55, end to end: what a contained program calls and reads reaches the
+    fetch stage as this member's dependency, and a program contained here is never
+    asked for."""
+    asked = []
+
+    def fetcher(name, type=None, copy=None):
+        asked.append(name.upper())
+        return {"artifact_name": name, "found": False, "detected_type": None}
+
+    a = analyze((EXAMPLES / "nestdeps.cbl").read_text(), source_name="nestdeps.cbl",
+                fetcher=fetcher)
+    assert {"EXTMOD", "INNERMOD", "OUTERMOD", "ACCOUNT_MASTER", "LOGDD"} <= set(asked)
+    assert not {"NESTSQL", "NESTLOG", "NESTDEPS", "LK-PGM"} & set(asked)
+    status = {r["artifact"]: r["status"] for r in a.fetch["artifacts"]}
+    assert status["NESTLOG"] == status["NESTSQL"] == status["LK-PGM"] == "skipped"

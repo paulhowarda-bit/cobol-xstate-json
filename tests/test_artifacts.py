@@ -436,3 +436,179 @@ def test_a_placeholder_and_an_untraced_record_are_rows_that_say_what_they_are():
     ph = _by_name(_artifacts_example("cicsnofile.cbl"))["<file>"]
     assert ph["endpointUnresolved"] == "no-operand"
     assert "placeholder" in ph["needs"] and "SELECT" not in ph["needs"]
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 55: a CONTAINED program's dependencies are the member's
+# --------------------------------------------------------------------------- #
+
+def _by_unit(manifest: dict) -> dict:
+    """(containedProgram or None for the main program, artifact) -> row."""
+    return {(a.get("containedProgram"), a["artifact"]): a for a in manifest["artifacts"]}
+
+
+def test_a_contained_programs_calls_and_tables_are_dependencies_of_the_member():
+    """NESTSQL is parsed out of NESTDEPS, and what it touches used to go with it: the
+    member's manifest held only the internal CALL 'NESTSQL'. Each row names the unit it
+    came from and the source line of the statement."""
+    rows = _by_unit(_artifacts_example("nestdeps.cbl"))
+    ext = rows[("NESTSQL", "EXTMOD")]
+    assert (ext["kind"], ext["identity"], ext["lines"]) == ("program", "global", [30])
+    assert ext["classification"] == "unresolved"     # fetchable, decided by the estate
+    tbl = rows[("NESTSQL", "ACCOUNT_MASTER")]
+    assert (tbl["kind"], tbl["io"], tbl["lines"]) == ("db2-table", "read", [32])
+    log = rows[("NESTLOG", "LOG-FILE")]               # a unit nested two deep
+    assert (log["kind"], log["io"], log["ddname"]) == ("file", "write", "LOGDD")
+    assert log["lines"] == [54, 56]
+    # The main program's own rows carry no unit, and keep their own lines.
+    assert "containedProgram" not in rows[(None, "OUTERMOD")]
+    assert rows[(None, "NESTSQL")]["lines"] == [17]
+
+
+def test_a_contained_programs_dynamic_call_resolves_through_its_own_storage():
+    """Both programs declare WS-TARGET, with different VALUEs. NESTSQL's CALL WS-TARGET
+    is INNERMOD - its own storage - and never the main program's OUTERMOD."""
+    rows = _by_unit(_artifacts_example("nestdeps.cbl"))
+    assert rows[("NESTSQL", "INNERMOD")]["via"] == "WS-TARGET"
+    assert rows[("NESTSQL", "INNERMOD")]["lines"] == [31]
+    assert rows[(None, "OUTERMOD")]["via"] == "WS-TARGET"
+    assert ("NESTSQL", "OUTERMOD") not in rows and (None, "INNERMOD") not in rows
+
+
+def test_a_call_to_any_program_contained_here_stays_internal_and_is_never_fetched():
+    """NESTLOG is contained in NESTSQL, NESTSQL in NESTDEPS: a CALL to either, from
+    whichever program of this source, is internal - never a member to request."""
+    from mainframe_artifacts.fetch import build_fetch_plan
+    man = _artifacts_example("nestdeps.cbl")
+    rows = _by_unit(man)
+    for key in ((None, "NESTSQL"), ("NESTSQL", "NESTLOG")):
+        assert rows[key]["classification"] == "internal-nested"
+        assert rows[key]["identity"] == "internal"
+    plan = {p["artifact"]: p for p in build_fetch_plan(man)}
+    assert plan["NESTSQL"]["status"] == plan["NESTLOG"]["status"] == "skipped"
+    assert plan["EXTMOD"]["status"] == plan["INNERMOD"]["status"] == "planned"
+    assert plan["ACCOUNT_MASTER"]["status"] == "planned"
+
+
+def test_a_contained_programs_unresolvable_target_is_flagged_with_its_unit():
+    """NESTLOG calls whatever its caller passes: no static answer, so it is a flagged
+    dynamic row - never a guessed program - and the flag names the unit."""
+    man = _artifacts_example("nestdeps.cbl")
+    row = _by_unit(man)[("NESTLOG", "LK-PGM")]
+    assert row["dynamic"] is True and row["identity"] == "program-local"
+    assert row["resolvedBy"] is None
+    assert any(f.startswith("contained program NESTLOG: program LK-PGM: dynamic target")
+               for f in man["flags"])
+
+
+def test_a_contained_programs_caller_is_excluded_not_sent_to_the_jcl():
+    """A contained program's PROCEDURE DIVISION USING is filled by a program in this
+    source. A `caller` row would send the reader to a job step or the CSD for it."""
+    for name, unit in (("nestdeps.cbl", "NESTLOG"), ("nestedpgm.cbl", "USEMQ")):
+        man = _artifacts_example(name)
+        assert not [a for a in man["artifacts"] if a["kind"] == "caller"]
+        ex = [e for e in man["excluded"] if e.get("containedProgram") == unit]
+        assert [(e["name"], e["endpointType"]) for e in ex] == [("CALLER", "caller")]
+
+
+def test_two_programs_of_one_member_never_share_a_program_local_name():
+    """A file name is local to the program that declares it: the main program's CUST-FILE
+    and a contained program's are two files on two ddnames, never one merged row."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTER.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT CUST-FILE ASSIGN TO OUTDD.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  CUST-FILE.\n"
+        "       01  CUST-REC  PIC X(80).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           OPEN OUTPUT CUST-FILE\n"
+        "           CALL 'INNER'\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. INNER.\n"
+        "       ENVIRONMENT DIVISION.\n"
+        "       INPUT-OUTPUT SECTION.\n"
+        "       FILE-CONTROL.\n"
+        "           SELECT CUST-FILE ASSIGN TO INDD.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  CUST-FILE.\n"
+        "       01  CUST-REC  PIC X(80).\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-IN.\n"
+        "           OPEN INPUT CUST-FILE\n"
+        "           GOBACK.\n"
+        "       END PROGRAM INNER.\n"
+        "       END PROGRAM OUTER.\n"
+    )
+    rows = _by_unit(build_artifacts(build_machine(parse_program(src))))
+    assert (rows[(None, "CUST-FILE")]["ddname"], rows[(None, "CUST-FILE")]["io"]) == \
+        ("OUTDD", "write")
+    assert (rows[("INNER", "CUST-FILE")]["ddname"], rows[("INNER", "CUST-FILE")]["io"]) \
+        == ("INDD", "read")
+
+
+def test_a_call_between_two_programs_contained_here_is_internal():
+    """A and B are siblings inside OUTER; A calls B (COMMON). B is a program of this
+    source, so from A it is as internal as from OUTER - not a member to request."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTER.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'A'\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. A.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-A.\n"
+        "           CALL 'B'\n"
+        "           GOBACK.\n"
+        "       END PROGRAM A.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. B IS COMMON.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       2000-B.\n"
+        "           GOBACK.\n"
+        "       END PROGRAM B.\n"
+        "       END PROGRAM OUTER.\n"
+    )
+    row = _by_unit(build_artifacts(build_machine(parse_program(src))))[("A", "B")]
+    assert (row["classification"], row["identity"]) == ("internal-nested", "internal")
+
+
+def test_a_contained_program_never_borrows_the_outer_programs_storage():
+    """INNER calls WS-PGM, which only OUTER declares (GLOBAL, VALUE 'GLOBMOD'). INNER's
+    own analysis cannot pin it, so it stays a flagged dynamic row - the outer program's
+    VALUE is never used to name INNER's target."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTER.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-PGM     PIC X(8) VALUE 'GLOBMOD' GLOBAL.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'INNER'\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. INNER.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-IN.\n"
+        "           CALL WS-PGM\n"
+        "           GOBACK.\n"
+        "       END PROGRAM INNER.\n"
+        "       END PROGRAM OUTER.\n"
+    )
+    man = build_artifacts(build_machine(parse_program(src)))
+    rows = _by_unit(man)
+    assert rows[("INNER", "WS-PGM")]["dynamic"] is True
+    assert not [k for k in rows if k[1] == "GLOBMOD"]
+    assert any(f.startswith("contained program INNER: program WS-PGM: dynamic target")
+               for f in man["flags"])

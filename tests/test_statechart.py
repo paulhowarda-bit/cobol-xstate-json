@@ -801,3 +801,17 @@ def test_unpadded_and_data_name_cics_operands_still_classify_correctly():
     assert acts["link_CALLA099"]["resources"]["PROGRAM"] == {"name": "CALLA099"}
     xctl = acts["exec_cics_xctl"]["resources"]["PROGRAM"]
     assert xctl["name"] == "CALLA150" and xctl["via"] == "WS-PGM"
+
+
+def test_each_contained_program_is_its_own_machine_outside_the_main_chart():
+    """Ledger item 55. Every contained program, at any depth, is modelled on its own -
+    never folded into the main statechart - and a CALL from any one of them to another
+    program of this source is internal, as it is from the main program."""
+    ex = Path(__file__).resolve().parents[1] / "examples" / "nestdeps.cbl"
+    m = build_machine(parse_program(ex.read_text()), source_name="nestdeps.cbl")
+    assert [u.program_id for u in m.contained] == ["NESTSQL", "NESTLOG"]
+    assert all(u.nested_programs == ["NESTSQL", "NESTLOG"] for u in m.contained)
+    assert all(u.contained == [] for u in m.contained)
+    assert "1000-INNER" in m.contained[0].config["states"]
+    assert "1000-INNER" not in m.config["states"]
+    assert "EXTMOD" not in m.to_json()          # the main chart is the main program's
