@@ -103,3 +103,87 @@ def test_a_contained_programs_dependencies_are_requested_from_the_estate():
     status = {r["artifact"]: r["status"] for r in a.fetch["artifacts"]}
     assert status["NESTLOG"] == status["NESTSQL"] == "skipped"
     assert "LK-PGM" not in status
+
+
+def _not_found(log):
+    def fetcher(name, type=None, copy=None):
+        log.append((name.upper(), type))
+        return {"artifact_name": name, "found": False, "detected_type": None}
+    return fetcher
+
+
+def test_each_fetch_row_says_which_contained_program_it_is_for():
+    """A contained program's manifest rows are tagged with it; the fetch rows built from
+    them used to drop the tag, so the report could not say whose dependency each was."""
+    a = analyze((EXAMPLES / "nestdeps.cbl").read_text(), source_name="nestdeps.cbl",
+                fetcher=_not_found([]))
+    manifest = [(r.get("containedProgram"), r["artifact"])
+                for r in a.artifacts()["artifacts"]]
+    fetched = [(r.get("containedProgram"), r["artifact"]) for r in a.fetch["artifacts"]]
+    assert fetched == manifest
+    assert ("NESTLOG", "LOGWRITE") in fetched and (None, "OUTERMOD") in fetched
+
+
+def test_a_callee_of_two_programs_of_one_member_is_asked_for_once():
+    """NESTDEPS's GLOBAL WS-TARGET says OUTERMOD, and NESTLOG calls through it too: one
+    manifest row per program (ledger item 55 never merges rows by name), one request to
+    the estate, and a fetch row per program saying whose it is."""
+    src = (EXAMPLES / "nestdeps.cbl").read_text()
+    src = src.replace("01  WS-TARGET  PIC X(8) VALUE 'OUTERMOD'.",
+                      "01  WS-TARGET  PIC X(8) GLOBAL VALUE 'OUTERMOD'.")
+    src = src.replace("           CALL LK-PGM\n",
+                      "           CALL LK-PGM\n           CALL WS-TARGET\n")
+    asked = []
+    a = analyze(src, source_name="nestdup.cbl", fetcher=_not_found(asked))
+    assert [r.get("containedProgram") for r in a.artifacts()["artifacts"]
+            if r["artifact"] == "OUTERMOD"] == [None, "NESTLOG"]
+    assert asked.count(("OUTERMOD", "cobol")) == asked.count(("OUTERMOD", "asm")) == 1
+    rows = [r for r in a.fetch["artifacts"] if r["artifact"] == "OUTERMOD"]
+    assert [(r.get("containedProgram"), r["status"]) for r in rows] == [
+        (None, "not-found"), ("NESTLOG", "not-found")]
+    assert "already requested in this run" in rows[1]["reason"]
+
+
+def test_a_contained_programs_dynamic_call_candidates_say_whose_call_it_is():
+    """Both programs have a WS-PGM that two literals reach, so `forDynamicCall` alone
+    cannot say whose call a candidate is for; the contained program's carry its name."""
+    src = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OUTPICK.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM  PIC X(8).
+       01  WS-FLAG PIC X.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           IF WS-FLAG = 'A'
+              MOVE 'OUTONE' TO WS-PGM
+           ELSE
+              MOVE 'OUTTWO' TO WS-PGM
+           END-IF
+           CALL WS-PGM
+           CALL 'INPICK'
+           GOBACK.
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. INPICK.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM  PIC X(8).
+       01  WS-FLAG PIC X.
+       PROCEDURE DIVISION.
+       1000-PICK.
+           IF WS-FLAG = 'A'
+              MOVE 'INONE' TO WS-PGM
+           ELSE
+              MOVE 'INTWO' TO WS-PGM
+           END-IF
+           CALL WS-PGM
+           GOBACK.
+       END PROGRAM INPICK.
+       END PROGRAM OUTPICK.
+"""
+    a = analyze(src, source_name="nestpick.cbl", fetcher=_not_found([]))
+    got = {r["artifact"]: (r["forDynamicCall"], r.get("containedProgram"))
+           for r in a.fetch["artifacts"] if r.get("forDynamicCall")}
+    assert got == {"OUTONE": ("WS-PGM", None), "OUTTWO": ("WS-PGM", None),
+                   "INONE": ("WS-PGM", "INPICK"), "INTWO": ("WS-PGM", "INPICK")}

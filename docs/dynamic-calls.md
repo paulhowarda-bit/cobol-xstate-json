@@ -100,8 +100,8 @@ output for the dispatcher above.
 When literals *do* reach the item, they are retrieved — a candidate is a real member name
 and having it locally beats not. But they appear **only in `fetch.json`**, never as
 program rows in `artifacts.json`, because the manifest's value is that everything in it is
-a proven dependency. Candidate rows carry `forDynamicCall` (which item they belong to) and
-an `evidence` grade:
+a proven dependency. Candidate rows carry `forDynamicCall` (which item they belong to),
+`containedProgram` when the call is a contained program's, and an `evidence` grade:
 
 | `evidence` | Meaning |
 |---|---|

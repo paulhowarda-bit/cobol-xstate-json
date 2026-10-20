@@ -865,7 +865,9 @@ cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no m
   files). A `CALL` from any program of the source to one contained in it is
   `internal-nested` and never fetched. A contained program's caller is a program in this
   source, so its `caller` row is `excluded` with that reason; its `flags` read
-  `contained program NAME: …`. Its true dynamic targets are rows of the dynamic-calls view
+  `contained program NAME: …`. Each `fetch.json` row keeps the tag, so a program that
+  both the main program and a contained one call is one request to the estate and a
+  fetch row per program, the second carrying the first's outcome. Its true dynamic targets are rows of the dynamic-calls view
   too, each `program` naming it. Its storage is its own, plus the `GLOBAL` items of the
   programs containing it: a name is looked up in the program itself, then among the
   `GLOBAL` declarations of each containing program outward (a nearer program's
