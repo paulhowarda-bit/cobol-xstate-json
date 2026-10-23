@@ -1126,6 +1126,28 @@ def test_qname_names_the_queue_literal_or_through_its_item():
     assert "<queue>" not in eps
 
 
+def test_a_qname_group_is_published_under_all_sixteen_characters():
+    """Ledger item 87: QNAME() passes 16 characters of the group; publishing its first 8
+    named a different queue - in the pair's case, the invoking program's own name."""
+    iface = _example_iface("tsqgrp.cbl")
+    queues = {(e["verb"], e["endpoint"], e.get("via"), e.get("dynamic"))
+              for e in iface["events"] if e["endpointType"] == "queue"}
+    assert queues == {
+        ("CICS WRITEQ TS", "XAPQRSLOG", "WS-LOG-TSQ-NAME", None),
+        ("CICS READQ TS", "XAB0310PXAB7700P", "WS-TSQ-PAIR", None),
+        ("CICS WRITEQ TS", "WS-TSQ-KEYED", None, True),
+        ("CICS WRITEQ TD", "XTDQ", "WS-TDQ", None),
+    }
+    assert not {"XAPQRSLO", "XAB0310P", "XKEYQ001"} & {
+        e["endpoint"] for e in iface["endpoints"] if e["type"] == "queue"}
+
+
+def test_a_call_through_a_qname_group_still_passes_eight_characters():
+    iface = _example_iface("tsqgrp.cbl")
+    calls = [(e["endpoint"], e.get("via")) for e in iface["events"] if e["verb"] == "CALL"]
+    assert calls == [("XAPQRSLO", "WS-LOG-TSQ-NAME")]
+
+
 def test_a_written_record_is_published_under_its_file():
     """`WRITE F-REC` names the record; the endpoint is the FD that declares it, carrying
     the ASSIGN - and F-REC is no endpoint at all."""

@@ -370,6 +370,10 @@ _CICS_RES_OPT = re.compile(
     r"([A-Z0-9$#@._-]+)\s*['\"]?\s*\)", re.I)
 # CICS passes exactly this many characters of a PROGRAM() operand, whatever the item.
 _CICS_PROGRAM_LEN = 8
+# ... and of the others it bounds: a TS queue's QNAME() 16, its QUEUE() 8. A TD queue's
+# QUEUE() is left unbounded here.
+_CICS_OPERAND_LEN = {"PROGRAM": _CICS_PROGRAM_LEN, "QNAME": 16, "QUEUE": 8}
+_TD_COMMAND = re.compile(r"\s*\w+\s+TD\b", re.I)
 
 
 def _call_args_suffix(st: CallStmt) -> str:
@@ -691,9 +695,10 @@ class _ParaCompiler:
                               f"dynamic CICS {st.verb} {opt}({operand}) - {operand} is "
                               f"a CICS-supplied EIB field; value runtime-determined")
             else:
+                limit = (None if opt == "QUEUE" and _TD_COMMAND.match(st.text)
+                         else _CICS_OPERAND_LEN.get(opt))
                 out[opt] = self._resolve_operand(
-                    st, operand, _CICS_PROGRAM_LEN if opt == "PROGRAM" else None,
-                    f"dynamic CICS {st.verb} {opt}({operand})")
+                    st, operand, limit, f"dynamic CICS {st.verb} {opt}({operand})")
         return out
 
     def _resolve_operand(self, st: ExecStmt, operand: str, limit: Optional[int],

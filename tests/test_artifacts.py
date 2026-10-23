@@ -371,6 +371,18 @@ def test_replacing_is_recorded_on_the_copybook_row():
     assert cb.get("replacing") is True
 
 
+def test_an_sql_include_with_no_period_is_a_copybook_row_and_expanded():
+    """Ledger item 86: the period after END-EXEC is optional. Without one, the member was
+    neither fetched nor expanded, and the record it declares was missing from the model."""
+    man = _artifacts_example("sqlincnp.cbl")
+    rows = {a["artifact"]: a for a in man["artifacts"] if a["kind"] == "copybook"}
+    assert sorted(rows) == ["CUSTREC", "SQLCA", "XSQLERRP"]
+    assert {r["via"] for r in rows.values()} == {"EXEC SQL INCLUDE"}
+    assert rows["CUSTREC"]["status"] == "expanded"
+    assert rows["CUSTREC"]["contributes"]["dataItems"] >= 1
+    assert rows["SQLCA"]["status"] == rows["XSQLERRP"]["status"] == "missing"
+
+
 def test_programs_with_no_copy_have_no_copybook_rows():
     man = _artifacts_example("sqlunld.cbl")            # no COPY
     assert not any(a["kind"] == "copybook" for a in man["artifacts"])
