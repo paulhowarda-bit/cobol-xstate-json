@@ -46,6 +46,9 @@ _DB2_PROC = "db2_proc"
 # consumer that cannot tell this apart from static SQL counts every one of its host
 # variables as a mapping failure instead of an inherent unknown.
 _DYNAMIC_SQL = "dynamic_sql"
+# The statement name right after the verb; the text arrives as `EXEC SQL PREPARE S1 ...`.
+_SQL_PREPARED_NAME = re.compile(
+    r"\s*(?:EXEC\s+SQL\s+)?(?:PREPARE|EXECUTE)\s+(?!IMMEDIATE\b)([A-Z0-9_#@$-]+)")
 
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|QNAME|TSQUEUE|TDQUEUE)\s*\(\s*'?"
@@ -709,8 +712,14 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             v = verb + (" IMMEDIATE" if "IMMEDIATE" in up else "")
             hits = [_hit("get", _DYNAMIC_SQL, "<dynamic-sql>", v, host_vars),
                     _hit("create", _DYNAMIC_SQL, "<dynamic-sql>", v, host_vars)]
+            # The statement this PREPAREs or EXECUTEs: `PREPARE S1 FROM ...`,
+            # `EXECUTE S1 USING ...`. Same key the dynamic-cursor FETCH carries, so the
+            # three ends of one statement join. EXECUTE IMMEDIATE names none.
+            m = _SQL_PREPARED_NAME.match(up)
             for h in hits:
                 h["dynamic"] = True
+                if m:
+                    h["preparedStatement"] = m.group(1)
             return hits
         if verb == "CALL":
             # A STORED PROCEDURE, not a table: the operands are the procedure's

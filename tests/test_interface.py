@@ -382,6 +382,65 @@ def test_dynamic_sql_is_its_own_endpoint_kind_marked_dynamic():
         e["endpoint"] for e in iface["events"] if e["endpointType"] == "db2"}
 
 
+_TWO_STATEMENTS = (
+    "       0000-MAIN.\n"
+    "           EXEC SQL DECLARE C2 CURSOR FOR S2 END-EXEC\n"
+    "           EXEC SQL PREPARE S1 FROM :WS-A END-EXEC\n"
+    "           EXEC SQL EXECUTE S1 USING :WS-B END-EXEC\n"
+    "           EXEC SQL EXECUTE IMMEDIATE :WS-C END-EXEC\n"
+    "           EXEC SQL PREPARE S2 FROM :WS-D END-EXEC\n"
+    "           EXEC SQL OPEN C2 END-EXEC\n"
+    "           EXEC SQL FETCH C2 INTO :WS-E END-EXEC\n"
+    "           GOBACK.\n"
+)
+_TWO_STATEMENTS_DATA = "".join(
+    f"       01 WS-{c} PIC X(200).\n" for c in "ABCDE")
+
+
+def _dynamic_events(iface, verb):
+    return [e for e in iface["events"]
+            if e["endpointType"] == "dynamic_sql" and e["verb"] == verb]
+
+
+def test_prepare_and_execute_name_the_statement():
+    """Ledger item 89: with more than one prepared statement, the fields that BUILD a
+    statement and the fields that PARAMETERISE it could not be paired - neither event
+    said which statement it was about."""
+    iface = _iface(_TWO_STATEMENTS, _TWO_STATEMENTS_DATA)
+    for verb, field in (("PREPARE", "WS-A"), ("EXECUTE", "WS-B")):
+        evs = [e for e in _dynamic_events(iface, verb) if e["fields"] == [field]]
+        assert sorted(e["event"] for e in evs) == [
+            "CREATE.DYNAMIC_SQL.<dynamic-sql>", "GET.DYNAMIC_SQL.<dynamic-sql>"]
+        assert {e.get("preparedStatement") for e in evs} == {"S1"}
+
+
+def test_execute_immediate_names_no_statement():
+    iface = _iface(_TWO_STATEMENTS, _TWO_STATEMENTS_DATA)
+    evs = _dynamic_events(iface, "EXECUTE IMMEDIATE")
+    assert len(evs) == 2
+    assert all("preparedStatement" not in e for e in evs)
+
+
+def test_dynamic_cursor_fetch_joins_its_prepare_by_statement_name():
+    """The FETCH end already said `preparedStatement: S2`; the PREPARE that built S2 now
+    carries the same key and value, so the three ends of one statement join."""
+    iface = _iface(_TWO_STATEMENTS, _TWO_STATEMENTS_DATA)
+    fetch = _dynamic_events(iface, "FETCH")
+    assert [(e["cursor"], e["preparedStatement"]) for e in fetch] == [("C2", "S2")]
+    prep = [e for e in _dynamic_events(iface, "PREPARE") if e["fields"] == ["WS-D"]]
+    assert {e["preparedStatement"] for e in prep} == {fetch[0]["preparedStatement"]}
+
+
+def test_prepared_statement_name_keeps_underscores_and_hyphens():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL PREPARE DYN_STMT-1 FROM :WS-A END-EXEC\n",
+        data_body="       01 WS-A PIC X(200).\n",
+    )
+    assert {e["preparedStatement"] for e in _dynamic_events(iface, "PREPARE")} == {
+        "DYN_STMT-1"}
+
+
 def test_perimeter_states_are_tagged_on_the_machine_nodes():
     prog = parse_program(
         "       IDENTIFICATION DIVISION.\n"
