@@ -172,11 +172,13 @@ def test_only_immediate_dependencies_are_fetched():
 def test_one_member_is_one_round_trip_however_many_rows_reach_it():
     """An INCLUDE member and a control card of one name are both asked for as `cntl` -
     one member as far as the estate can tell. Asking twice for the same thing is waste
-    that scales with the estate, so the second row reports what happened instead."""
+    that scales with the estate, so the second row reports what happened instead.
+    (The card's library is still a symbol, so none is sent: `LIB(AUDITLOG)` would be a
+    second ask, made with library=LIB - upstream ledger item 98.)"""
     calls = []
     man = {"program": "PAYJOB", "artifacts": [
         {"artifact": "AUDITLOG", "kind": "include-member", "dependency": "compile-time"},
-        {"artifact": "LIB(AUDITLOG)", "kind": "control-card", "dependency": "runtime"},
+        {"artifact": "&PFX..CTL(AUDITLOG)", "kind": "control-card", "dependency": "runtime"},
     ]}
     rep = fetch_dependencies(man, _fetcher(log=calls))
     assert calls == [("AUDITLOG", "cntl")]

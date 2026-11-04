@@ -285,11 +285,18 @@ cobol-xstate SAMPB066.cbl                                    # uses mf-fetch
 cobol-xstate SAMPB066.cbl --copybook-fetcher pkg.client:get  # ...or your own
 ```
 
-`FUNC(name, type=, copy=)` is called for any member not found under an `-I` path. Both
-keyword arguments are optional parts of the contract: a client that does not accept them
-is called without, so an existing client needs no adapter. `type` is only ever a *hint* —
-what this program's usage suggests the artifact is — and a service that auto-detects is
-free to ignore it and answer with `detected_type`, which is what the reports record.
+`FUNC(name, type=, copy=, library=)` is called for any member not found under an `-I`
+path. Every keyword argument is an optional part of the contract: a client that does not
+accept one is called without it (`library` dropped first, then `copy`, then `type`), so an
+existing client needs no adapter. `type` is only ever a *hint* — what this program's usage
+suggests the artifact is — and a service that auto-detects is free to ignore it and answer
+with `detected_type`, which is what the reports record. `library` is sent only for a
+member a JCL DD names inside a dataset (`LIB(MEMBER)`): the library it named, so a service
+holding the name in several libraries can answer with that library's copy. While the
+library still holds an unresolved symbol (`&LPREFX..CTL(SORT2)`, a PROC parsed without
+an invoking job) the literal member is still requested, without a library. A member the
+client reports `found` is a member even when it is empty or all blanks — an empty control
+card is a step with no input statements, reported `fetched` with `bytes: 0`.
 
 If the client cannot be imported, the run is **not** an error: it proceeds against the
 local `-I` paths and every unobtainable member is reported as `no-service` — never as
