@@ -187,6 +187,10 @@ pass that emits the rows (so only reachable states contribute):
 - **`flow`** — one record per write site: `target` was computed from `sources`. `action`
   resolves in the bundle's `semantics.actions`, whose `kind` (`assign`, `arith`,
   `compute`, …) tells a copy from a computation, so the record does not repeat it.
+  `STRING`, `UNSTRING` and `INSPECT` write one record per receiver too; their action's
+  `kind` is `effect` with the verb, since only the dependency is modeled, not the
+  value. `INSPECT ... REPLACING` rewrites its subject in place, so the subject is its
+  own source (`X <- X`).
 - Both carry `state` and `baseState` for the same reason the rows do.
 
 Walking `flow` backwards from a field until it reaches a `fills` record answers *which

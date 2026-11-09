@@ -203,7 +203,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
         _log.info(f"[{job.name or 'JOB'}] {len(job.steps)} step(s), "
               f"{len(lineage['datasets'])} dataset(s), "
               f"{len(lineage['dataflow'])} dataflow edge(s), "
-              f"{len(lineage['fieldLineage'])} field-lineage step(s), "
+              f"{len(lineage['fieldLineage'])} field-lineage row(s), "
               f"{len(job.flags)} flag(s)")
         for f in job.flags:
             _log.info(f"  FLAG {f}")

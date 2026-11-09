@@ -584,6 +584,52 @@ def test_inspect_tallying_for_a_literal_spelling_replacing_is_still_a_read():
     recv, src = _dep_only_flow(
         "INSPECT", "INSPECT WS-X REPLACING ALL ' ' BY '0'", known)
     assert recv == ["WS-X"]
+    assert src == ["WS-X"]          # ...and is its own source: X <- X
+
+
+# -- a STRING / UNSTRING / INSPECT write is a `flow` record (ledger item 99) ---
+
+_DEP_ONLY_SRC = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DEPONLY.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A        PIC X(10).
+       01  WS-B        PIC X(10).
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-SRC  PIC X(20).
+           05  LK-X    PIC X(20).
+       PROCEDURE DIVISION USING LK-REC.
+           UNSTRING LK-SRC DELIMITED BY ',' INTO WS-A WS-B
+           END-UNSTRING
+           INSPECT LK-X REPLACING ALL 'A' BY 'B'
+           GOBACK.
+"""
+
+
+def _flow_of(d: dict, target: str) -> list:
+    return [f for f in d["flow"] if f["target"] == target]
+
+
+def test_string_into_publishes_a_flow_record():
+    """`flow` held OUT-MEMO <- WS-MEMO and nothing for WS-MEMO, so a consumer walking
+    `flow` back from OUT-MEMO stopped at WS-MEMO as if nothing filled it."""
+    d = build_lineage(build_machine(
+        parse_program((EXAMPLES / "lineage.cbl").read_text()), source_name="lineage.cbl"))
+    recs = _flow_of(d, "WS-MEMO")
+    assert [f["sources"] for f in recs] == [["WS-NAME", "WS-REF"]]
+    assert recs[0]["action"].startswith("STRING_")
+    assert recs[0]["cobol"].upper().startswith("STRING ")
+
+
+def test_unstring_and_inspect_publish_flow_records():
+    d = build_lineage(build_machine(parse_program(_DEP_ONLY_SRC), source_name="deponly.cbl"))
+    # one record per UNSTRING receiver, each fed by the sending field
+    assert [f["sources"] for f in _flow_of(d, "WS-A")] == [["LK-SRC"]]
+    assert [f["sources"] for f in _flow_of(d, "WS-B")] == [["LK-SRC"]]
+    # INSPECT ... REPLACING rewrites its subject in place: X <- X
+    assert [f["sources"] for f in _flow_of(d, "LK-X")] == [["LK-X"]]
 
 
 # --------------------------------------------------------------------------- #

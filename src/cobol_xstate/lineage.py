@@ -129,8 +129,12 @@ def _dep_only_flow(verb: str, text: str, known: Set[str]) -> Tuple[List[str], Li
         recv = [m.group(1)] if m and m.group(1) in known else []
         src = _operands(up, known)
         subject = src[0] if src else None
-        if subject and "REPLACING" in up and subject not in recv:
-            recv = recv + [subject]     # REPLACING rewrites the subject in place
+        if subject and "REPLACING" in up:
+            # REPLACING rewrites the subject in place: it is a receiver AND its own
+            # source, so its origins survive the rewrite (`X <- X` in the flow).
+            if subject not in recv:
+                recv = recv + [subject]
+            return recv, [w for w in src if w not in recv or w == subject]
         return recv, [w for w in src if w not in recv]
     return [], []
 
@@ -853,6 +857,14 @@ class _Lineage:
                             acc |= set(cur.get(s, frozenset()))
                         for r in recv:
                             cur[r] = frozenset(acc)
+                            # the same record step 2 writes, so walking `flow` back
+                            # from a field these verbs fill does not stop at it
+                            if rows is not None:
+                                self.flow.append({
+                                    "target": r, "sources": list(srcs), "state": name,
+                                    "baseState": self.origin_state.get(name, name),
+                                    "line": line, "cobol": cobol, "action": aname,
+                                })
 
             # 4. CALL ... USING is BY REFERENCE: the callee may rewrite an argument.
             for h in made:
