@@ -707,8 +707,20 @@ def _emit_split(key: str, st: dict, out: dict, buildable: Dict[str, str],
     out[ids[n]] = control
 
 
+def order_index(ordered: List[str]) -> Dict[str, int]:
+    """paragraph -> its first position in ``ordered``: what `_target_owner` looks names
+    up in. A walker that resolves a target per step builds it once and passes it, rather
+    than scanning the paragraph list on every step - which made the business view of a
+    program with thousands of paragraphs run for tens of minutes."""
+    out: Dict[str, int] = {}
+    for i, n in enumerate(ordered):
+        out.setdefault(n, i)
+    return out
+
+
 def _target_owner(target: str, ordered: List[str],
                   sections: Optional[Dict[str, List[str]]] = None,
+                  index: Optional[Dict[str, int]] = None,
                   ) -> Tuple[Optional[set], Optional[str]]:
     """Resolve a PERFORM target to (owner_paragraph_set, initial_paragraph). A plain
     paragraph owns just itself; a SECTION name owns the header plus every member
@@ -716,24 +728,26 @@ def _target_owner(target: str, ordered: List[str],
     source-order span head..tail, extended through TAIL's members when TAIL is a
     section (PERFORM p THRU q runs p through the end of q, then returns)."""
     sections = sections or {}
+    if index is None:
+        index = order_index(ordered)
 
     def extent_end(name: str) -> int:
         """Index in `ordered` of the last paragraph belonging to `name`."""
-        idxs = [ordered.index(n) for n in sections.get(name, [name]) if n in ordered]
+        idxs = [index[n] for n in sections.get(name, [name]) if n in index]
         return max(idxs) if idxs else -1
 
     if "__THRU__" in target:
         head, tail = target.split("__THRU__", 1)
-        if head in ordered and tail in ordered:
-            i, j = ordered.index(head), extent_end(tail)
+        if head in index and tail in index:
+            i, j = index[head], extent_end(tail)
             if 0 <= i <= j:
                 return set(ordered[i:j + 1]), head
         return None, None
-    if target not in ordered:
+    if target not in index:
         return None, None
     members = sections.get(target)
     if members:
-        return {n for n in members if n in ordered}, target
+        return {n for n in members if n in index}, target
     return {target}, target
 
 
@@ -743,7 +757,8 @@ _REG_SUFFIX = re.compile(r"_\d+$")
 
 
 def perform_target(action: str, ordered: List[str],
-                   sections: Optional[Dict[str, List[str]]] = None) -> Optional[str]:
+                   sections: Optional[Dict[str, List[str]]] = None,
+                   index: Optional[Dict[str, int]] = None) -> Optional[str]:
     """The paragraph a ``perform_...`` action calls, or None if it is not one.
 
     The target is carried IN the action's name, and the name registry appends ``_2``
@@ -763,10 +778,12 @@ def perform_target(action: str, ordered: List[str],
     if not action.startswith(_PERFORM):
         return None
     rest = action[len(_PERFORM):]
-    if _target_owner(rest, ordered, sections)[0] is not None:
+    if index is None:
+        index = order_index(ordered)
+    if _target_owner(rest, ordered, sections, index)[0] is not None:
         return rest
     trimmed = _REG_SUFFIX.sub("", rest)
-    if trimmed != rest and _target_owner(trimmed, ordered, sections)[0] is not None:
+    if trimmed != rest and _target_owner(trimmed, ordered, sections, index)[0] is not None:
         return trimmed
     return rest              # unresolvable either way: report it as written
 
@@ -779,12 +796,13 @@ def _buildable_targets(pool: dict, ordered: List[str],
     states actually carry and it is not always the paragraph name plus a prefix.
     """
     out: Dict[str, str] = {}
+    index = order_index(ordered)
     for st in pool.values():
         for a in (st.get("entry", []) or []):
             if not a.startswith(_PERFORM) or a in out:
                 continue
-            target = perform_target(a, ordered, sections)
-            if _target_owner(target, ordered, sections)[0] is not None:
+            target = perform_target(a, ordered, sections, index)
+            if _target_owner(target, ordered, sections, index)[0] is not None:
                 out[a] = target
     return out
 
@@ -840,12 +858,13 @@ def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: Lis
     # in the emitted module and of `charts` in the JSON bundle - vary run to run on
     # identical input, which makes the output unreproducible and diff review useless.
     work = sorted(seed, reverse=True)          # reverse: pop() takes from the end
+    index = order_index(ordered)
     while work:
         target = work.pop()
         name = f"actor:{target}"
         if name in actor_configs:
             continue
-        owner, initial = _target_owner(target, ordered, sections)
+        owner, initial = _target_owner(target, ordered, sections, index)
         if owner is None:
             continue
         keys = [k for p in owner for k in by_para.get(p, ())]

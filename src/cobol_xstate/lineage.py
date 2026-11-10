@@ -52,7 +52,7 @@ from . import interface as _iface
 from .semantics import mask_literals
 from .business import _is_control_guard
 from .emitter import (
-    _para_of, _target_owner, edge_target, iter_transitions,
+    _para_of, _target_owner, edge_target, iter_transitions, order_index,
     perform_target as _perform_target, segment_entry,
 )
 from .statechart import Machine
@@ -210,6 +210,8 @@ class _Lineage:
                                   and it.get("section") == "LINKAGE"}
         self.ordered = machine.paragraph_order
         self.sections = getattr(machine, "sections", {}) or {}
+        # Built once: PERFORM targets are resolved through it, never by list scans.
+        self._index = order_index(self.ordered)
         self.files = getattr(machine, "files", {}) or {}
         self.dv = _iface._DataView(self.data, machine.fd_records)
         self.cursors = _iface._cursor_tables(self.provenance)
@@ -638,7 +640,7 @@ class _Lineage:
     def _perform_of(self, st: dict) -> Optional[str]:
         for a in st.get("entry", []) or []:
             if a.startswith("perform_"):
-                return _perform_target(a, self.ordered, self.sections)
+                return _perform_target(a, self.ordered, self.sections, self._index)
         return None
 
     def _edges(self, st: dict) -> List[str]:
@@ -719,7 +721,8 @@ class _Lineage:
                 succ[name] = [t for t in edges_of[name] if t in states]
                 continue
             if target not in owner_of:
-                owner_of[target] = _target_owner(target, self.ordered, self.sections)
+                owner_of[target] = _target_owner(target, self.ordered, self.sections,
+                                                 self._index)
             owner, init = owner_of[target]
             cont = edges_of[name][0] if edges_of[name] else None
             if owner is None or init not in states:

@@ -212,7 +212,7 @@ def test_an_undeclared_item_points_at_the_missing_copybook_not_at_runtime_config
        PROGRAM-ID. NODECL.
        DATA DIVISION.
        WORKING-STORAGE SECTION.
-       COPY MISSINGCPY.
+       COPY MISSNCPY.
        PROCEDURE DIVISION.
        0000-MAIN.
            CALL WS-SUBPGM
@@ -225,8 +225,8 @@ def test_an_undeclared_item_points_at_the_missing_copybook_not_at_runtime_config
     # not on a property of the program, and must not read as an equal finding.
     assert row["provisional"] is True
     assert "may not be a dynamic call at all" in row["provisionalNote"]
-    assert "MISSINGCPY" in row["provisionalNote"]
-    assert row["missingMembers"] == ["MISSINGCPY"]
+    assert "MISSNCPY" in row["provisionalNote"]
+    assert row["missingMembers"] == ["MISSNCPY"]
     assert "prefetch report" in row["provisionalNote"]
 
 

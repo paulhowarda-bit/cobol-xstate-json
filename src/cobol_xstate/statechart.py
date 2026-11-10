@@ -548,26 +548,41 @@ class _ParaCompiler:
                 return self._emit(root, {"always": [self._edge(
                     cont, "fallthrough", self.para.line, note="fall-through")]})
             return cont
-        # Peel a leading run of straight-line statements into one state's entry list.
-        run: List[Stmt] = []
+        # Segments, left to right: a maximal run of straight-line statements (one state's
+        # entry list), or one control statement. Compiled right to left below, in a loop:
+        # recursing once per segment overflowed the interpreter's recursion limit on a
+        # flat paragraph of ~500 control statements, and the program published nothing.
+        # Right to left is the order the recursion compiled them in, so every `_fresh`
+        # name, action and flag comes out as it did.
+        segs: List[tuple] = []
         idx = 0
-        while idx < len(stmts) and self._is_straightline(stmts[idx]):
-            run.append(stmts[idx])
-            idx += 1
-        if run:
-            rest = self.compile_block(stmts[idx:], cont)
-            name = root if root is not None else self._fresh("seq")
-            actions: List[str] = []
-            for s in run:
-                actions.extend(self._straight_actions(s))
-            state: dict = {}
-            if actions:
-                state["entry"] = actions
-            state["always"] = [self._edge(rest, "seq", run[0].line, note="continue")]
-            return self._emit(name, state)
-        first = stmts[0]
-        rest = self.compile_block(stmts[1:], cont)
-        return self.compile_control(first, rest, root)
+        while idx < len(stmts):
+            if self._is_straightline(stmts[idx]):
+                j = idx
+                while j < len(stmts) and self._is_straightline(stmts[j]):
+                    j += 1
+                segs.append((True, stmts[idx:j]))
+                idx = j
+            else:
+                segs.append((False, stmts[idx]))
+                idx += 1
+        rest = cont
+        for k in range(len(segs) - 1, -1, -1):
+            is_run, seg = segs[k]
+            r = root if k == 0 else None
+            if is_run:
+                name = r if r is not None else self._fresh("seq")
+                actions: List[str] = []
+                for s in seg:
+                    actions.extend(self._straight_actions(s))
+                state: dict = {}
+                if actions:
+                    state["entry"] = actions
+                state["always"] = [self._edge(rest, "seq", seg[0].line, note="continue")]
+                rest = self._emit(name, state)
+            else:
+                rest = self.compile_control(seg, rest, r)
+        return rest
 
     def _is_straightline(self, st: Stmt) -> bool:
         if isinstance(st, CallStmt):

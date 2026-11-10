@@ -685,3 +685,34 @@ def test_a_dependents_map_is_written_as_its_own_view(tmp_path):
 def test_a_dependents_map_that_will_not_open_is_an_operator_error(tmp_path):
     assert run([EXAMPLES_CBL, "--outdir", str(tmp_path), "-q", "--no-fetch",
                 "--dependents-map", str(tmp_path / "missing.json")]) == 2
+
+
+def test_a_flat_paragraph_of_600_control_statements_publishes_every_view(tmp_path):
+    """Ledger item 106: `compile_block` recursed once per segment, so a flat paragraph
+    alternating plain statements and out-of-line PERFORM ... UNTIL about 500 times
+    overflowed the default recursion limit, and the program published nothing. Run
+    under the default limit, never a raised one."""
+    import sys
+    pairs = "".join(f"           MOVE 'V{i:05d}' TO WS-A\n"
+                    f"           PERFORM B-100-STEP UNTIL WS-DONE = 'Y'\n"
+                    for i in range(600))
+    src = tmp_path / "flatp.cbl"
+    src.write_text("       IDENTIFICATION DIVISION.\n"
+                   "       PROGRAM-ID. FLATP.\n"
+                   "       DATA DIVISION.\n"
+                   "       WORKING-STORAGE SECTION.\n"
+                   "       01 WS-DONE PIC X VALUE 'N'.\n"
+                   "       01 WS-A    PIC X(6).\n"
+                   "       PROCEDURE DIVISION.\n"
+                   "       A-100-MAIN.\n"
+                   "           IF WS-DONE = 'Y'\n"
+                   "              GOBACK\n"
+                   "           END-IF\n" + pairs +
+                   "           GOBACK.\n"
+                   "       B-100-STEP.\n"
+                   "           MOVE 'Y' TO WS-DONE.\n")
+    assert sys.getrecursionlimit() <= 1000
+    out = tmp_path / "out"
+    assert run([str(src), "--outdir", str(out)]) == 0
+    assert _names(out) >= {f"flatp{s}.json" for s in (
+        "", ".business", ".lineage", ".reactive", ".artifacts", ".dynamic-calls")}

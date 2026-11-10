@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 from . import VIEW_SCHEMA_VERSION
 from . import interface as _iface
 from .emitter import (
-    _para_of, _target_owner, edge_target, iter_transitions,
+    _para_of, _target_owner, edge_target, iter_transitions, order_index,
     perform_target as _perform_target,
 )
 from .statechart import Machine
@@ -143,6 +143,8 @@ class _BusinessView:
                                 getattr(machine, "sql_cursors", None), self._cursor_refs)
         self.ordered: List[str] = machine.paragraph_order
         self.sections: Dict[str, List[str]] = getattr(machine, "sections", {}) or {}
+        # Built once: every step of the walk resolves a PERFORM target through it.
+        self._index = order_index(self.ordered)
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
         self.flags: List[str] = []
         self._business_memo: Dict[str, bool] = {}
@@ -200,7 +202,7 @@ class _BusinessView:
     # level (empty stack) is program end; reached inside a call it is a return.
 
     def _perform_names(self, st: dict) -> List[str]:
-        return [_perform_target(a, self.ordered, self.sections)
+        return [_perform_target(a, self.ordered, self.sections, self._index)
                 for a in (st.get("entry", []) or []) if a.startswith("perform_")]
 
     def _continuation(self, st: dict) -> Optional[str]:
@@ -225,7 +227,7 @@ class _BusinessView:
         performs = self._perform_names(st)
         if performs:                                   # a call
             name = performs[0]
-            owner, init = _target_owner(name, self.ordered, self.sections)
+            owner, init = _target_owner(name, self.ordered, self.sections, self._index)
             cont = self._continuation(st)
             if len(performs) > 1:
                 self._flag(f"{state}: {len(performs)} PERFORMs in one state; "
