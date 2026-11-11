@@ -388,6 +388,24 @@ def _call_args_suffix(st: CallStmt) -> str:
 
 
 def _call_action(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
+    """Action name for a CALL - and, where it passes arguments, its spec carrying them by
+    position (``CallStmt.arguments``) for the interface to put on the CALL event."""
+    name = _call_action_name(st, ctx, para)
+    if st.arguments:
+        spec = ctx.action_sem.setdefault(name, {"kind": "call",
+                                                "arguments": list(st.arguments)})
+        if spec.get("arguments") not in (None, st.arguments):
+            # Two CALLs share one action (one label) yet pass different positions - a
+            # literal or OMITTED the label does not spell. One list would be wrong for
+            # the other, so the action carries none.
+            spec.pop("arguments")
+            ctx.flag(para, st.line, f"CALL {st.target}: two calls sharing action {name} "
+                                    f"pass their arguments in different positions - "
+                                    f"no argument positions are published for it")
+    return name
+
+
+def _call_action_name(st: CallStmt, ctx: _BuildCtx, para: str) -> str:
     """Action name for a CALL, resolving a dynamic target by constant propagation
     where the program proves it constant (else flag, don't guess)."""
     reg = ctx.reg

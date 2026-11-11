@@ -332,6 +332,10 @@ def _build_ops(machine: Machine, fields: Dict[str, dict]
     actions = machine.semantics.get("actions", {})
     for name, spec in actions.items():
         kind = spec.get("kind")
+        if kind == "call":
+            # A CALL's spec only carries its argument positions for the interface; the
+            # CALL is lowered as it always was, never as a data operation or an effect.
+            continue
         if kind not in _DATA_KINDS or not spec.get("assignments"):
             effects.append(name)
             continue

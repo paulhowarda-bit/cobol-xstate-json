@@ -190,7 +190,12 @@ pass that emits the rows (so only reachable states contribute):
   `STRING`, `UNSTRING` and `INSPECT` write one record per receiver too; their action's
   `kind` is `effect` with the verb, since only the dependency is modeled, not the
   value. `INSPECT ... REPLACING` rewrites its subject in place, so the subject is its
-  own source (`X <- X`).
+  own source (`X <- X`). CICS `FORMATTIME` writes each output option from its `ABSTIME`
+  operand (and a separator given as a field), and a Db2 `SET :X = …` / `VALUES … INTO
+  :X` writes `X` from the host variables in its expression; their action's `kind` is
+  `exec-cics` / `exec-sql` with the verb. A clock register (`CURRENT DATE`, `CURRENT
+  TIMESTAMP`) and `ASKTIME ABSTIME(X)` are `fills` from `SYSTEM-DATE` / `SYSTEM-TIME`
+  instead, as `ACCEPT X FROM TIME` is; a target set from both has both.
 - Both carry `state` and `baseState` for the same reason the rows do.
 
 Walking `flow` backwards from a field until it reaches a `fills` record answers *which

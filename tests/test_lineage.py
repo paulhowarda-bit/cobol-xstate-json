@@ -1043,3 +1043,145 @@ def test_a_flow_record_on_a_split_segment_names_its_base_state():
     states = set(m.config["states"])
     assert all(f["state"] not in states and f["baseState"] in states for f in split)
     assert all(r["baseState"] in states for r in d["fills"] + d["flow"])
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 108: a data name that begins END- is not a scope terminator
+# --------------------------------------------------------------------------- #
+
+_END_NAME = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENDNAME.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT IN-FILE ASSIGN TO INFILE.
+           SELECT OUT-FILE ASSIGN TO OUTFILE.
+       DATA DIVISION.
+       FILE SECTION.
+       FD  IN-FILE.
+       01  IN-REC              PIC X(20).
+       FD  OUT-FILE.
+       01  OUT-REC.
+           05 OUT-A            PIC X(20).
+           05 OUT-CNT          PIC 9(5).
+       WORKING-STORAGE SECTION.
+       01  WS-REC              PIC X(20).
+       01  WS-CNT              PIC 9(5) VALUE 0.
+       01  WS-EOF              PIC X VALUE 'N'.
+           88  END-OF-FILE     VALUE 'Y'.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           PERFORM 1000-READ THRU 1000-EXIT
+           PERFORM 2000-READ THRU 2000-EXIT
+           MOVE WS-CNT TO OUT-CNT
+           WRITE OUT-REC
+           STOP RUN.
+       1000-READ.
+           READ IN-FILE INTO WS-REC
+               AT END
+                   SET END-OF-FILE TO TRUE
+                   GO TO 1000-EXIT
+           END-READ.
+           MOVE WS-REC TO OUT-A
+           ADD 1 TO WS-CNT.
+       1000-EXIT.
+           EXIT.
+       2000-READ.
+           READ IN-FILE INTO WS-REC
+               AT END SET END-OF-FILE TO TRUE
+           END-READ
+           IF END-OF-FILE
+               GO TO 2000-EXIT
+           ELSE
+               COMPUTE WS-CNT = WS-CNT + 1
+           END-IF.
+       2000-EXIT.
+           EXIT.
+"""
+
+
+def test_an_end_data_name_keeps_the_writes_after_it():
+    """`flow` held OUT-CNT alone: the READ's AT END body ended at END-OF-FILE, its GO TO
+    became a top-level statement, and the MOVE and ADD after END-READ were unreachable
+    and pruned; the IF ended at its condition and `ELSE` became an action."""
+    m = build_machine(parse_program(_END_NAME), source_name="endname.cbl")
+    d = build_lineage(m)
+    assert {f["target"] for f in d["flow"]} == {"OUT-A", "OUT-CNT", "WS-CNT", "WS-EOF"}
+    assert [f["sources"] for f in _flow_of(d, "OUT-A")] == [["WS-REC"]]
+    assert not [n for n in m.semantics["actions"] if n.upper().startswith("ELSE")]
+    assert not d.get("unreached")
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 109: CICS ASKTIME / FORMATTIME and Db2 SET / VALUES INTO
+# --------------------------------------------------------------------------- #
+
+_CLOCK = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CLOCK.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-ABSTIME          PIC S9(15) COMP-3.
+       01  WS-TIME             PIC X(8).
+       01  WS-TMST             PIC X(26).
+       01  WS-DATE-1           PIC X(10).
+       01  WS-OUT              PIC X(44).
+       01  WS-A                PIC S9(9) COMP.
+       01  WS-B                PIC X(10).
+       01  WS-C                PIC X(10).
+       LINKAGE SECTION.
+       01  DFHCOMMAREA         PIC X(44).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           EXEC CICS ASKTIME ABSTIME(WS-ABSTIME) END-EXEC
+           EXEC CICS FORMATTIME ABSTIME(WS-ABSTIME)
+                TIME(WS-TIME) TIMESEP(':')
+           END-EXEC
+           EXEC SQL
+                SET :WS-TMST = CURRENT TIMESTAMP
+           END-EXEC
+           EXEC SQL
+                SET :WS-DATE-1 = CURRENT DATE - 1 YEAR
+           END-EXEC
+           EXEC SQL
+                SET :WS-A = DAYS(:WS-B) - DAYS(:WS-C)
+           END-EXEC
+           STRING WS-TIME WS-TMST WS-DATE-1 DELIMITED BY SIZE
+                INTO WS-OUT
+           END-STRING
+           MOVE WS-OUT TO DFHCOMMAREA
+           EXEC CICS RETURN END-EXEC.
+"""
+
+
+def test_the_clock_fills_the_fields_asktime_and_db2_registers_store():
+    """These statements published no fill, so everything built from them traced back to
+    nothing - where `ACCEPT WS-TIME FROM TIME` is a fill from SYSTEM-TIME."""
+    d = _lin_src(_CLOCK)
+    assert [(f["field"], f["endpoint"], f["endpointType"], f["verb"])
+            for f in d["fills"]] == [
+        ("WS-ABSTIME", "SYSTEM-TIME", "system", "CICS ASKTIME"),
+        ("WS-TMST", "SYSTEM-TIME", "system", "SET CURRENT TIMESTAMP"),
+        ("WS-DATE-1", "SYSTEM-DATE", "system", "SET CURRENT DATE"),
+    ]
+    assert _origins(_row(d, "DFHCOMMAREA")) == {
+        "GET.SYSTEM.SYSTEM-TIME", "GET.SYSTEM.SYSTEM-DATE"}
+
+
+def test_formattime_and_a_db2_set_expression_publish_flow_records():
+    d = _lin_src(_CLOCK)
+    # FORMATTIME formats the ABSTIME value ASKTIME read; a literal separator is no source
+    assert [f["sources"] for f in _flow_of(d, "WS-TIME")] == [["WS-ABSTIME"]]
+    assert _flow_of(d, "WS-TIME")[0]["action"] == "exec_cics_formattime"
+    assert [f["sources"] for f in _flow_of(d, "WS-A")] == [["WS-B", "WS-C"]]
+    # a register alone is a fill, not a write from other fields
+    assert not _flow_of(d, "WS-TMST") and not _flow_of(d, "WS-DATE-1")
+
+
+def test_a_db2_set_from_the_clock_and_a_field_keeps_both_origins():
+    d = _lin_src(_CLOCK.replace(
+        "SET :WS-DATE-1 = CURRENT DATE - 1 YEAR",
+        "SET :WS-DATE-1 = CURRENT DATE - :WS-A DAYS"))
+    assert [f["field"] for f in d["fills"]].count("WS-DATE-1") == 1
+    assert [f["sources"] for f in _flow_of(d, "WS-DATE-1")] == [["WS-A"]]

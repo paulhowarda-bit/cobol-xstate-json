@@ -128,6 +128,22 @@ _UNRESOLVED_RECORD = "record"
 _PLACEHOLDERS = frozenset(("<program>", "<file>", "<queue>", "<transid>", "<table>",
                            "<procedure>"))
 _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
+# The other two ways a program reads the clock. CICS ASKTIME stores it in its ABSTIME
+# operand; a Db2 SET / VALUES INTO stores a CURRENT DATE / TIME / TIMESTAMP register.
+# Both are the input `ACCEPT ... FROM TIME` is, so they get its endpoint.
+_CICS_ABSTIME = re.compile(r"\bABSTIME\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+_SQL_CLOCK = re.compile(r"\bCURRENT(?:\s+|_)(DATE|TIME|TIMESTAMP)\b")
+_CLOCK_ENDPOINT = {"DATE": "SYSTEM-DATE", "TIME": "SYSTEM-TIME", "TIMESTAMP": "SYSTEM-TIME"}
+# `SET :A = (SELECT ...)` assigns from a table, the read `SELECT ... INTO :A` is.
+_SQL_FULLSELECT = re.compile(r"\(\s*(?:SELECT|VALUES|WITH)\b")
+_SQL_SELECT = re.compile(r"\bSELECT\b")
+# FORMATTIME writes the ABSTIME value, formatted, into each of these options; DATESEP
+# and TIMESEP are the separators it formats with (a literal, or a field it reads).
+_FORMATTIME_OUT = re.compile(
+    r"\b(?:DATE|DATEFORM|DATESTRING|DAYCOUNT|DAYOFMONTH|DAYOFWEEK|DDMMYY|DDMMYYYY|"
+    r"FULLDATE|MILLISECONDS|MMDDYY|MMDDYYYY|MONTHOFYEAR|TIME|YEAR|YYDDD|YYDDMM|YYMMDD|"
+    r"YYYYDDD|YYYYDDMM|YYYYMMDD)\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+_FORMATTIME_SEP = re.compile(r"\b(?:DATESEP|TIMESEP)\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
 _WORD = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
 
@@ -387,6 +403,119 @@ def _data_targets(spec: Optional[dict]) -> List[str]:
     return [t for t in targets if str(t).upper() not in indicators]
 
 
+def _depth0(text: str) -> str:
+    """``text`` with everything inside parentheses blanked (the outermost parens kept),
+    same length: a top-level comma, ``=`` or ``INTO`` found in it slices the original."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == ")":
+            depth -= 1
+        out.append(ch if depth <= 0 else " ")
+        if ch == "(":
+            depth += 1
+    return "".join(out)
+
+
+def _top_split(text: str) -> List[str]:
+    """Split at the top-level commas."""
+    flat, parts, start = _depth0(text), [], 0
+    for i, ch in enumerate(flat):
+        if ch == ",":
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return parts
+
+
+def _first_host_var(text: str) -> Optional[str]:
+    """The host variable an assignment target names; an indicator after it is not one."""
+    found = _sql_host_vars(text)
+    return found[0] if found else None
+
+
+def _sql_assignments(mup: str, verb: str) -> List[Tuple[str, str]]:
+    """``(host variable, expression)`` for each target a Db2 SET or VALUES INTO assigns,
+    over the MASKED statement text.
+
+    ``SET :A = e1, :B = e2``, ``SET (:A, :B) = (e1, e2)`` and ``VALUES (e1, e2) INTO :A,
+    :B`` pair each target with its own expression; when the counts do not pair (a row
+    fullselect), each target gets the whole right-hand side. A target that is not a host
+    variable (``SET CURRENT SQLID = :X``) assigns no field of the program."""
+    body = re.sub(r"^\s*EXEC\s+SQL\s+", "", mup)
+    body = re.sub(r"\s*END-EXEC\b.*$", "", body, flags=re.S)
+    pairs: List[Tuple[str, str]] = []
+
+    def assign(lhs: str, rhs: str) -> None:
+        lhs = lhs.strip()
+        if lhs.startswith("(") and re.fullmatch(r"\(\s*\)", _depth0(lhs)):
+            lhs = lhs[1:-1]
+        targets = [t for t in (_first_host_var(e) for e in _top_split(lhs)) if t]
+        rhs = rhs.strip()
+        exprs = [rhs]
+        if (len(targets) > 1 and re.fullmatch(r"\(\s*\)", _depth0(rhs))
+                and not _SQL_FULLSELECT.match(rhs)):
+            exprs = _top_split(rhs[1:-1])
+        for i, t in enumerate(targets):
+            pairs.append((t, exprs[i] if len(exprs) == len(targets) else rhs))
+
+    if verb == "SET":
+        pieces: List[str] = []
+        for piece in _top_split(re.sub(r"^SET\s+", "", body)):
+            if "=" in _depth0(piece) or not pieces:
+                pieces.append(piece)
+            else:  # a comma inside an expression that is not in parens
+                pieces[-1] += "," + piece
+        for piece in pieces:
+            eq = _depth0(piece).find("=")
+            if eq >= 0:
+                assign(piece[:eq], piece[eq + 1:])
+    elif verb == "VALUES":
+        into = None
+        for m in re.finditer(r"\bINTO\b", _depth0(body)):
+            into = m
+        if into:
+            assign(body[into.end():], re.sub(r"^VALUES\s+", "", body[:into.start()]))
+    return pairs
+
+
+def _exec_verb(up: str, spec: Optional[dict]) -> str:
+    verb = (spec or {}).get("verb", "")
+    if not verb:
+        toks = up.replace("EXEC", "", 1).split()
+        # skip the language word (SQL/CICS/DLI) to reach the verb
+        verb = toks[1] if len(toks) > 1 and toks[0] in ("SQL", "CICS", "DLI") else (
+            toks[0] if toks else "")
+    return verb.upper()
+
+
+def _exec_writes(name: str, cobol: str, spec: Optional[dict]) -> List[Tuple[str, List[str]]]:
+    """``(field, the fields its value is computed from)`` for each field an EXEC
+    statement writes INSIDE the program - the lineage view's `flow` for statements that
+    have no `assignments`.
+
+    CICS FORMATTIME formats its ABSTIME operand (and the separators it is given as
+    fields) into every output option. A Db2 SET / VALUES INTO assigns each target host
+    variable from the host variables in its expression. A target filled from the clock
+    alone (`_classify_exec` gives it a system read) has no write of its own here; one
+    filled from the clock AND other host variables has both."""
+    up = (cobol or "").upper()
+    verb = _exec_verb(up, spec)
+    mup = mask_literals(up)
+    if ("EXEC CICS" in up or name.startswith("exec_cics")) and verb == "FORMATTIME":
+        src = _CICS_ABSTIME.findall(mup) + _FORMATTIME_SEP.findall(mup)
+        return [(t, list(src)) for t in _dedup(_FORMATTIME_OUT.findall(mup))]
+    if ("EXEC SQL" in up or name.startswith("exec_sql")) and verb in ("SET", "VALUES"):
+        out = []
+        for t, expr in _sql_assignments(mup, verb):
+            srcs = _sql_host_vars(expr)
+            if _SQL_SELECT.search(expr):
+                continue  # filled by the table read `_classify_exec` publishes
+            if srcs or not _SQL_CLOCK.search(expr):
+                out.append((t, srcs))
+        return out
+    return []
+
+
 def _sql_host_vars(text: str) -> List[str]:
     out = []
     for base, qualified in _SQL_HOSTVAR.findall(text or ""):
@@ -573,13 +702,7 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     ``cursor_refs`` is cursor -> every table its DECLARE names (`_cursor_table_refs`):
     a FETCH's text names only the cursor, so its further tables come from there."""
     up = cobol.upper()
-    verb = (spec or {}).get("verb", "")
-    if not verb:
-        toks = up.replace("EXEC", "", 1).split()
-        # skip the language word (SQL/CICS/DLI) to reach the verb
-        verb = toks[1] if len(toks) > 1 and toks[0] in ("SQL", "CICS", "DLI") else (
-            toks[0] if toks else "")
-    verb = verb.upper()
+    verb = _exec_verb(up, spec)
     into_fields = _data_targets(spec)
     # Masked for the keyword scans below: an SQL string constant can contain FROM
     # (`SELECT 'FROM AUDIT', COL1 ...` named the phantom Db2 table AUDIT - which the
@@ -746,6 +869,33 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             return [_mark_dynamic(_note(_hit(d, _DB2_PROC, proc, verb, params), note),
                                   rs, "PROCEDURE")
                     for d in ("get", "create")]
+        if verb in ("SET", "VALUES"):
+            # `SET :hv = CURRENT TIMESTAMP` reads the clock into :hv, as `ACCEPT ... FROM
+            # TIME` does: one system read per register, filling every target whose
+            # expression names it. A host variable on the right is an internal write
+            # (`_exec_writes`). A target assigned from a fullselect is filled by a read
+            # of its first table, as `SELECT ... INTO` is, with the expression's host
+            # variables as that read's params; any further table is read as usual.
+            hits: List[dict] = []
+            by_reg: Dict[str, List[str]] = {}
+            by_table: Dict[str, Tuple[List[str], List[str]]] = {}
+            for t, expr in _sql_assignments(mup, verb):
+                if _SQL_SELECT.search(expr):
+                    table = next(iter(_sql_table_refs(expr)), "<table>")
+                    fields, params = by_table.setdefault(table, ([], []))
+                    fields.append(t)
+                    params.extend(h for h in _sql_host_vars(expr) if h not in params)
+                    continue
+                for reg in _dedup(_SQL_CLOCK.findall(expr)):
+                    fields = by_reg.setdefault(reg, [])
+                    if t not in fields:
+                        fields.append(t)
+            for table, (fields, params) in by_table.items():
+                hits.append(_hit("get", _DB2, table, verb, _dedup(fields), params))
+            for reg, fields in by_reg.items():
+                hits.append(_hit("get", _SYSTEM, _CLOCK_ENDPOINT[reg],
+                                 f"{verb} CURRENT {reg}", fields))
+            return _read_tables(hits, _sql_table_refs(mup), verb)
         change = (spec or {}).get("dataChange") if verb == "OPEN" else None
         if change:
             # A cursor over `FROM FINAL TABLE (INSERT ...)`: opening it runs the inner
@@ -864,7 +1014,12 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         if verb == "ABEND":
             code = opts.get("ABCODE", "ABEND")
             return [_hit("create", _CONDITION, code, "CICS ABEND", [])]
-        return []  # HANDLE (-> handler region), ADDRESS, ASKTIME, etc.
+        if verb == "ASKTIME":
+            # Without ABSTIME it refreshes only EIBDATE / EIBTIME, which no field holds.
+            m = _CICS_ABSTIME.search(mup)
+            return [_hit("get", _SYSTEM, "SYSTEM-TIME", "CICS ASKTIME",
+                         [m.group(1)])] if m else []
+        return []  # HANDLE (-> handler region), ADDRESS, FORMATTIME (internal), etc.
 
     # DLI / IMS
     if verb in ("GU", "GN", "GNP", "GHU", "GHN"):
@@ -1001,6 +1156,11 @@ def _classify(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             params = [rm.group(1).upper()]
         hit = _hit("create", _PROGRAM, _call_endpoint(cobol, name), "CALL",
                    _parse_call_args(cobol), params)
+        # Positional: one entry per USING argument, the data name or null (a literal,
+        # OMITTED, LENGTH OF) - CallStmt.arguments, carried on the action spec by
+        # statechart._call_action. `fields` names what is passed; this says where.
+        if spec and spec.get("arguments") is not None:
+            hit["arguments"] = list(spec["arguments"])
         # The statechart's provenance label spells out the dynamic-target status
         # (see statechart._call_action): carry it so downstream views don't present
         # an unresolved identifier as a load-module name.
@@ -1353,6 +1513,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                 entry[k] = hit[k]
         if hit.get("secondaryTable"):
             entry["secondaryTable"] = True
+        if "arguments" in hit:
+            entry["arguments"] = hit["arguments"]       # a CALL's USING list, by position
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
         # `dynamic` marks an unresolved runtime target, `via` the data item a resolved
         # one came through, `candidates` the literals an ambiguous one may be, with

@@ -1374,3 +1374,105 @@ def test_a_copied_linkage_section_puts_nothing_on_the_caller_perimeter():
     assert [e for e in iface["events"] if e["endpointType"] == "caller"] == []
     rows = [r for r in build_lineage(machine)["rows"] if r["field"] == "WS-TARGET"]
     assert rows and all(r["origins"] == [] for r in rows)
+
+
+# Ledger item 109: a Db2 SET / VALUES INTO assigns host variables. A clock register is
+# a system read, the read `ACCEPT ... FROM TIME` is; a fullselect is a table read.
+_SET_DATA = (
+    "       01 WS-A PIC X(26).\n"
+    "       01 WS-B PIC X(26).\n"
+    "       01 WS-K PIC 9(5).\n"
+    "       01 WS-S PIC X(8).\n"
+)
+
+
+def test_a_db2_set_of_a_clock_register_is_a_system_read():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL VALUES (CURRENT TIMESTAMP, CURRENT_DATE)\n"
+        "                INTO :WS-A, :WS-B END-EXEC\n"
+        "           EXEC CICS ASKTIME ABSTIME(WS-K) END-EXEC\n"
+        "           EXEC SQL SET CURRENT SQLID = :WS-S END-EXEC.\n", _SET_DATA)
+    got = sorted((e["endpoint"], e["verb"], tuple(e["fields"])) for e in iface["events"])
+    assert got == [("SYSTEM-DATE", "VALUES CURRENT DATE", ("WS-B",)),
+                   ("SYSTEM-TIME", "CICS ASKTIME", ("WS-K",)),
+                   ("SYSTEM-TIME", "VALUES CURRENT TIMESTAMP", ("WS-A",))]
+    assert all(e["type"] == "system" for e in iface["endpoints"])
+
+
+def test_a_db2_set_from_a_fullselect_is_a_read_of_its_table():
+    iface = _iface(
+        "       0000-MAIN.\n"
+        "           EXEC SQL SET (:WS-A, :WS-B) =\n"
+        "                (SELECT C1, C2 FROM T1 JOIN T2 ON T1.K = T2.K\n"
+        "                  WHERE T1.K = :WS-K) END-EXEC.\n", _SET_DATA)
+    t1 = next(e for e in iface["events"] if e["endpoint"] == "T1")
+    assert t1["fields"] == ["WS-A", "WS-B"] and t1["params"] == ["WS-K"]
+    t2 = next(e for e in iface["events"] if e["endpoint"] == "T2")
+    assert t2["fields"] == [] and t2.get("secondaryTable") is True
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 116: a CALL event carries its USING arguments by position
+# --------------------------------------------------------------------------- #
+
+def _call_events(iface) -> dict:
+    return {e["endpoint"]: e for e in iface["events"] if e["verb"] == "CALL"}
+
+
+def test_a_call_event_carries_its_arguments_by_position():
+    """`fields` drops a literal and splits `ADDRESS OF X` into words, so argument N was
+    not entry N; `arguments` keeps one entry per argument, null where no data item is
+    passed."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "examples" / "callargs.cbl").read_text()
+    calls = _call_events(build_machine(parse_program(src)).bundle()["interface"])
+    assert calls["P1"]["arguments"] == [None, "WS-A"]
+    assert calls["P2"]["arguments"] == ["WS-A", None, "WS-B"]
+    assert calls["P3"]["arguments"] == ["WS-B", None, "WS-C"]
+    assert calls["P4"]["arguments"] == ["WS-T", "WS-A"]
+    # `fields` is as it was
+    assert calls["P1"]["fields"] == ["WS-A"]
+
+
+def test_a_call_without_using_carries_no_arguments():
+    iface = _iface("       0000-MAIN.\n           CALL 'P'\n           GOBACK.\n")
+    assert "arguments" not in _call_events(iface)["P"]
+
+
+def test_calls_sharing_an_action_with_different_positions_publish_none():
+    """Two CALLs whose labels read the same (`CALL 'P' USING WS-A`) share one action; when
+    they pass their arguments in different positions one list would be wrong for the
+    other, so the action carries none, and says so."""
+    machine = build_machine(parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-A PIC X.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'P' USING 'X' WS-A\n"
+        "           CALL 'P' USING WS-A\n"
+        "           GOBACK.\n"))
+    calls = [e for e in machine.bundle()["interface"]["events"] if e["verb"] == "CALL"]
+    assert calls and all("arguments" not in e for e in calls)
+    assert any("different positions" in f["message"] for f in machine.flags)
+
+
+def test_a_call_spec_does_not_reach_the_runnable_machine():
+    """The spec only carries positions: the emitted module lists no CALL as an effect."""
+    from cobol_xstate.emitter import _build_ops
+    machine = build_machine(parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-A PIC X.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'P' USING WS-A\n"
+        "           GOBACK.\n"))
+    assert machine.semantics["actions"]["call_P"] == {"kind": "call", "arguments": ["WS-A"]}
+    ops, effects = _build_ops(machine, {})
+    assert "call_P" not in ops and "call_P" not in effects

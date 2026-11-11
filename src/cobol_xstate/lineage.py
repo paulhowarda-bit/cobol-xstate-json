@@ -243,6 +243,7 @@ class _Lineage:
         # and silently corrupt the other view, with no test failure, because those two
         # sites read only `h["direction"]`.
         self._classify_memo: Dict[str, List[dict]] = {}
+        self._exec_writes_memo: Dict[str, List[Tuple[str, List[str]]]] = {}
         self.flags: List[str] = []
         # Primitive provenance facts, recorded during the final (row-emitting) pass so a
         # backward query can answer "where did THIS item's value come from" for an item
@@ -794,6 +795,21 @@ class _Lineage:
             if not hits and spec:
                 made = [h for h in _iface._classify_dataflow(spec, self.linkage)
                         if h["direction"] == "create"]
+            # An EXEC statement's writes inside the program (FORMATTIME, Db2 SET /
+            # VALUES INTO). Their sources' origins are read now, before step 1 fills
+            # this statement's own targets: Db2 evaluates every expression first.
+            writes = []
+            if spec and spec.get("kind") in ("exec-cics", "exec-sql"):
+                ex = self._exec_writes_memo.get(aname)
+                if ex is None:
+                    ex = _iface._exec_writes(aname, cobol, spec)
+                    self._exec_writes_memo[aname] = ex
+                for tgt, srcs in ex:
+                    srcs = [s for s in srcs if s in self.known]
+                    acc: Set[Origin] = set()
+                    for s in srcs:
+                        acc |= set(cur.get(s, frozenset()))
+                    writes.append((tgt, srcs, acc))
 
             # 1. an INPUT event fills its fields: they originate HERE. A GROUP field
             # (a VARCHAR host structure, whose one host variable is the parent of a
@@ -868,6 +884,22 @@ class _Lineage:
                                     "baseState": self.origin_state.get(name, name),
                                     "line": line, "cobol": cobol, "action": aname,
                                 })
+
+            # 3b. the EXEC writes: dependency only, like step 3. A target this statement
+            # also read from the clock in step 1 (`CURRENT DATE - :N DAYS`) keeps that
+            # origin beside its sources'.
+            if writes:
+                filled = {f.upper() for h in got for f in h["fields"]}
+                for tgt, srcs, acc in writes:
+                    if tgt in filled:
+                        acc = acc | set(cur.get(tgt, frozenset()))
+                    cur[tgt] = frozenset(acc)
+                    if rows is not None:
+                        self.flow.append({
+                            "target": tgt, "sources": list(srcs), "state": name,
+                            "baseState": self.origin_state.get(name, name),
+                            "line": line, "cobol": cobol, "action": aname,
+                        })
 
             # 4. CALL ... USING is BY REFERENCE: the callee may rewrite an argument.
             for h in made:
