@@ -242,11 +242,21 @@ def build_artifacts(machine: Machine) -> dict:
     verbs: Dict[str, List[str]] = {}
     lines: Dict[str, List[int]] = {}
     cics_file: Dict[str, bool] = {}
+    # endpoint -> each mapless CICS RECEIVE of it: the area what was typed at the
+    # terminal arrives in. One entry per statement, never folded into `lines`, because a
+    # consumer holding the transaction definitions names what arrives in each area.
+    terminal_inputs: Dict[str, List[dict]] = {}
     for ev in iface["events"]:
         ep = ev["endpoint"]
         verbs.setdefault(ep, []).append(ev["verb"])
         if ev.get("line"):
             lines.setdefault(ep, []).append(ev["line"])
+        if "terminalInput" in ev:
+            entry = {"line": ev.get("line")}
+            if ev.get("fields"):
+                entry["into"] = ev["fields"][0]
+            entry.update(ev["terminalInput"])
+            terminal_inputs.setdefault(ep, []).append(entry)
         if ev["endpointType"] == "file" and str(ev.get("verb", "")).upper().startswith("CICS"):
             cics_file[ep] = True
 
@@ -426,6 +436,15 @@ def build_artifacts(machine: Machine) -> dict:
                     row["resolvedBy"] = "IBM subsystem runtime library"
                 row.pop("needs", None)
 
+        if terminal_inputs.get(name):
+            # A mapless RECEIVE has no map to resolve: what arrives is the transaction
+            # id a person typed and whatever they typed after it, so the artifact that
+            # names it is the TRANSACTION definition that runs this program.
+            row["resolvedBy"] = "CICS CSD (TRANSACTION -> PROGRAM)"
+            row["needs"] = ("the transaction definitions that run this program: each "
+                            "mapless RECEIVE (the manifest's 'terminalInputs') reads the transaction "
+                            "id a person typed and what they typed after it")
+
         artifacts.append(row)
 
     # A program CONTAINED in this source is part of this member, so what its own manifest
@@ -483,7 +502,7 @@ def build_artifacts(machine: Machine) -> dict:
         patterns.append(f"load: reads a file ({', '.join(ins)}) and writes Db2 "
                         f"({', '.join(tables)})")
 
-    return {
+    manifest = {
         "format": "cobol-xstate-artifacts",
         "formatVersion": VIEW_SCHEMA_VERSION,
         "program": machine.program_id,
@@ -509,3 +528,12 @@ def build_artifacts(machine: Machine) -> dict:
         "excluded": excluded,
         "flags": _dedup(flags),
     }
+    inputs = sorted((t for rows in terminal_inputs.values() for t in rows),
+                    key=lambda t: t["line"] or 0)
+    if inputs:
+        # Only when there is one, so a manifest with no mapless RECEIVE is unchanged.
+        # Each is an INPUT, not a second artifact: the area what a person typed at the
+        # terminal arrives in. A CICS-side binder names it from the TRANSACTION
+        # definitions that run this program (upstream ledger item 141).
+        manifest["terminalInputs"] = inputs
+    return manifest

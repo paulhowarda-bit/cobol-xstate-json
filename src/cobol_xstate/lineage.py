@@ -94,7 +94,15 @@ def _operands(expr: str, known: Set[str]) -> List[str]:
     return out
 
 
-_STRING_RE = re.compile(r"\bINTO\s+([A-Z0-9-]+)", re.I)
+_STRING_RE = re.compile(r"\bINTO\s+([A-Z0-9-]+)((?:\s*\([^()]*\))*)", re.I)
+_REFMOD = re.compile(r"\(([^():]*:[^():]*)\)\s*$")
+
+
+def _refmod(ref: str) -> Optional[str]:
+    """The reference-modification range of a store target (``X(1:10)``,
+    ``T(IX)(12:)``) as written, blanks dropped - ``"1:10"`` - or None."""
+    m = _REFMOD.search(ref or "")
+    return re.sub(r"\s+", "", m.group(1)) if m else None
 _UNSTRING_INTO = re.compile(r"\bINTO\b(.*?)(?:\bWITH\b|\bTALLYING\b|\bON\b|$)", re.I | re.S)
 _INSPECT_TALLY = re.compile(r"\bTALLYING\s+([A-Z0-9-]+)", re.I)
 
@@ -844,26 +852,58 @@ class _Lineage:
             if spec and spec.get("assignments"):
                 for a in spec["assignments"]:
                     tgt = (a.get("target") or "").upper()
-                    if not tgt or ":" in tgt:
-                        if ":" in tgt:
-                            self._flag(f"{tgt}: reference-modified store is not modeled; "
-                                       f"lineage through it is unknown")
-                            cur[tgt.split("(")[0]] = frozenset({(_UNKNOWN, True, None)})
+                    if not tgt:
                         continue
-                    base = tgt.split("(")[0]
+                    base = tgt.split("(")[0].strip()
+                    refmod = _refmod(tgt)
                     srcs = _operands(a.get("expr", ""), self.known)
                     acc: Set[Origin] = set()
                     for s in srcs:
                         acc |= set(cur.get(s, frozenset()))
                     if got:      # e.g. SELECT ... INTO: already set by the event above
                         continue
+                    if refmod:
+                        # a partial write: the bytes outside the range keep what the
+                        # field held, so its origins are the union, never a replacement
+                        acc |= set(cur.get(base, frozenset()))
                     cur[base] = frozenset(acc)
                     if rows is not None:
-                        self.flow.append({
+                        rec = {
                             "target": base, "sources": list(srcs), "state": name,
                             "baseState": self.origin_state.get(name, name),
                             "line": line, "cobol": cobol, "action": aname,
-                        })
+                        }
+                        if refmod:
+                            rec["refmod"] = refmod
+                        self.flow.append(rec)
+
+            # 2b. SET ADDRESS OF X TO P: X becomes the storage P points at. No value
+            # moves, so X is an ALIAS of what P addresses - never a value flow from the
+            # pointer, and never a caller output. Where P cannot be followed, say why.
+            if spec and spec.get("kind") == "address"                     and spec.get("pointer") not in ("NULL", "NULLS"):
+                ptr = spec.get("pointer") or ""
+                aliased, why = self._address_target(ptr)
+                acc = (set(self._origins_of(aliased, cur)) if aliased
+                       else {(_UNKNOWN, True, None)})
+                for x in spec.get("addressOf") or []:
+                    if x not in self.known:
+                        continue
+                    cur[x] = frozenset(acc)
+                    for leaf in self.dv.leaves(x):
+                        cur[leaf] = cur[x]
+                    if why:
+                        self._flag(f"SET ADDRESS OF {x} TO {ptr}: the storage {x} "
+                                   f"addresses cannot be followed - {why}")
+                    if rows is not None:
+                        rec = {
+                            "target": x, "sources": [aliased] if aliased else [],
+                            "alias": True, "state": name,
+                            "baseState": self.origin_state.get(name, name),
+                            "line": line, "cobol": cobol, "action": aname,
+                        }
+                        if why:
+                            rec["unknownReason"] = why
+                        self.flow.append(rec)
 
             # 3. opaque-but-traceable verbs: dependency only, value not modeled.
             if spec and spec.get("kind") == "effect":
@@ -874,16 +914,26 @@ class _Lineage:
                         acc = set()
                         for s in srcs:
                             acc |= set(cur.get(s, frozenset()))
+                        # STRING ... INTO X(a:b) is the same partial write a MOVE into
+                        # a range is, and is published the same way
+                        refmod = None
+                        if verb == "STRING":
+                            m = _STRING_RE.search(mask_literals(cobol.upper()))
+                            refmod = _refmod(m.group(2)) if m else None
                         for r in recv:
-                            cur[r] = frozenset(acc)
+                            held = set(cur.get(r, frozenset())) if refmod else set()
+                            cur[r] = frozenset(acc | held)
                             # the same record step 2 writes, so walking `flow` back
                             # from a field these verbs fill does not stop at it
                             if rows is not None:
-                                self.flow.append({
+                                rec = {
                                     "target": r, "sources": list(srcs), "state": name,
                                     "baseState": self.origin_state.get(name, name),
                                     "line": line, "cobol": cobol, "action": aname,
-                                })
+                                }
+                                if refmod:
+                                    rec["refmod"] = refmod
+                                self.flow.append(rec)
 
             # 3b. the EXEC writes: dependency only, like step 3. A target this statement
             # also read from the clock in step 1 (`CURRENT DATE - :N DAYS`) keeps that
@@ -940,6 +990,55 @@ class _Lineage:
                             "origins": self._origins_of(str(h["endpoint"]), cur),
                         })
         return cur
+
+    _ADDRESS_OF = re.compile(r"^ADDRESS\s+OF\s+([A-Z0-9-]+)$")
+    _CICS_SET_PTR = re.compile(r"\bSET\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+
+    def _address_target(self, ptr: str) -> Tuple[Optional[str], Optional[str]]:
+        """``(item, None)`` when the pointer operand of a SET ADDRESS OF provably
+        addresses one item of this program, else ``(None, reason)``. ``ptr`` is either
+        ``ADDRESS OF Y`` itself or a pointer P; P is followed only when every write to
+        it in the program is ``SET P TO ADDRESS OF`` one and the same item - the program
+        as a whole, not the path, so two different addresses are reported, not chosen
+        between."""
+        m = self._ADDRESS_OF.match(ptr)
+        if m:
+            y = m.group(1)
+            return (y, None) if y in self.known else (
+                None, f"{y} is not a data item of this program")
+        if getattr(self, "_ptr_index", None) is None:
+            addr: Dict[str, Set[str]] = {}
+            other: Dict[str, Set[str]] = {}
+            for aname, sp in self.actions.items():
+                for a in (sp or {}).get("assignments") or []:
+                    t = (a.get("target") or "").upper()
+                    e = re.sub(r"\s+", " ", (a.get("expr") or "").strip().upper())
+                    am = self._ADDRESS_OF.match(e)
+                    if am:
+                        addr.setdefault(t, set()).add(am.group(1))
+                    elif t:
+                        other.setdefault(t, set()).add(f"{sp.get('verb', '?')} {e}")
+                if (sp or {}).get("kind") == "exec-cics":
+                    text = mask_literals(
+                        (self.provenance.get(aname, {}).get("cobol") or "").upper())
+                    for pm in self._CICS_SET_PTR.finditer(text):
+                        other.setdefault(pm.group(1), set()).add(
+                            f"CICS {sp.get('verb', '?')} SET({pm.group(1)})")
+            self._ptr_index = (addr, other)
+        addr, other = self._ptr_index
+        p = ptr.split("(")[0].strip()
+        ys, others = sorted(addr.get(p, ())), sorted(other.get(p, ()))
+        if others:
+            return None, f"{p} is set by {'; '.join(others)}"
+        if len(ys) == 1:
+            return (ys[0], None) if ys[0] in self.known else (
+                None, f"{ys[0]} is not a data item of this program")
+        if ys:
+            return None, (f"{p} is set to the address of more than one item "
+                          f"({', '.join(ys)})")
+        if p in self.linkage:
+            return None, f"{p} is a LINKAGE item: the address arrives from the caller"
+        return None, f"{p} is never set to an address in this program"
 
     def _origins_of(self, field: str, cur: State) -> List[Origin]:
         """Origins reaching a field. A GROUP item has no assignments of its own - it is

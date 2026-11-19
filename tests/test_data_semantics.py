@@ -584,3 +584,57 @@ def test_initialize_replacing_clause_is_not_a_list_of_targets():
     op = parse_operation("INITIALIZE WS-REC REPLACING ALPHANUMERIC DATA BY 'A B'")
     assert [a["target"] for a in op["assignments"]] == ["WS-REC"]
     assert any("REPLACING" in n for n in op["notes"])
+
+
+# -- ledger item 121: every FILLER, and its VALUE, is in `data` ---------------
+
+_FILLERS = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. FILLERS.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  HEAD-LINE.
+           05  FILLER          PIC X(10) VALUE 'REPORT    '.
+           05  HEAD-DATE       PIC X(10).
+           05  FILLER          PIC X(10) VALUE '   PAGE   '.
+       01  NAME-DEFS.
+           05  FILLER          PIC X(12) VALUE '01NORMAL    '.
+           05  FILLER          PIC X(12) VALUE '02ERROR     '.
+       01  NAME-TABLE REDEFINES NAME-DEFS.
+           05  NAME-ENTRY      OCCURS 2 TIMES INDEXED BY XN.
+               10  NAME-CODE   PIC 99.
+               10  NAME-TEXT   PIC X(10).
+       01  WRAP.
+           05  FILLER.
+               10  X           PIC 9.
+               10  FILLER      PIC X VALUE '-'.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           MOVE HEAD-LINE TO NAME-TEXT (1)
+           STOP RUN.
+"""
+
+
+def test_every_filler_of_a_group_is_listed_with_its_value():
+    data = _machine(_FILLERS).data
+    assert [(f["line"], f["value"]) for f in data["NAME-DEFS"]["fillers"]] == [
+        (10, "'01NORMAL    '"), (11, "'02ERROR     '")]
+    assert [f["value"] for f in data["HEAD-LINE"]["fillers"]] == [
+        "'REPORT    '", "'   PAGE   '"]
+    f = data["NAME-DEFS"]["fillers"][0]
+    assert f["level"] == 5 and "parent" not in f
+    assert f["type"]["pic"] == "X(12)" and f["type"]["category"] == "alphanumeric"
+    assert "fillers" not in data["HEAD-DATE"] and "fillers" not in data["NAME-TABLE"]
+
+
+def test_a_filler_group_is_listed_in_its_parent_and_its_members_keep_their_parent():
+    data = _machine(_FILLERS).data
+    (grp,) = data["WRAP"]["fillers"]
+    assert grp["type"] == {"category": "group"}
+    assert [f["value"] for f in grp["fillers"]] == ["'-'"]
+    assert data["X"]["parent"] == "FILLER"
+
+
+def test_the_one_filler_key_is_as_it_was():
+    data = _machine(_FILLERS).data
+    assert data["FILLER"]["parent"] == "FILLER" and data["FILLER"]["value"] == "'-'"

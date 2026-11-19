@@ -273,6 +273,7 @@ def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
 
 def _run(args, timing_sink=None) -> int:
     search_paths = list(args.copybook_path)
+    source_path = None
     if args.source == "-":
         source = sys.stdin.read()
         source_name = "<stdin>"
@@ -286,6 +287,7 @@ def _run(args, timing_sink=None) -> int:
         source_name = path.name
         default_stem = path.stem  # <stem>.cbl -> <stem>.json by default
         search_paths.append(str(path.parent))  # look beside the source by default
+        source_path = str(path)   # ...but never find the source itself as a member
 
     if args.jcl or _looks_like_jcl(source_name, source):
         return _run_jcl(args, source, source_name, default_stem, search_paths,
@@ -372,7 +374,8 @@ def _run(args, timing_sink=None) -> int:
                           exts=tuple(args.copybook_ext), dest=args.gather_only,
                           unavailable=why, jobs=_jobs(args), timer=timer,
                           dependents=dependents,
-                          dependents_resolver=dependents_resolver)
+                          dependents_resolver=dependents_resolver,
+                          source_path=source_path)
         _log.info(f"[{source_name}] wrote estate bundle {gathered}")
         _log.info(f"[{source_name}] model from it with: --from-bundle "
                   f"{args.gather_only}")
@@ -388,7 +391,7 @@ def _run(args, timing_sink=None) -> int:
                            synonym_resolver=synonym_resolver,
                            dependents=dependents,
                            dependents_resolver=dependents_resolver,
-                           retrieve=not args.no_fetch)
+                           retrieve=not args.no_fetch, source_path=source_path)
     except JclSupportMissing as exc:
         _log.error(f"error: {exc}")
         return 2

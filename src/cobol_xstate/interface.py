@@ -61,6 +61,13 @@ _CICS_DELETE_NOT_A_FILE = re.compile(
     r"\b(?:ACTIVITY|CONTAINER|COUNTER|DCOUNTER|EVENT|TIMER)\s*\(")
 _CICS_TEXT = re.compile(r"\bTEXT\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
 _CICS_REPLY = re.compile(r"\bREPLY\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+# A RECEIVE with no MAP reads what was typed at the terminal (the transaction id and
+# whatever follows it) - unless CONVID/SESSION make it a conversation with a partner
+# program. Its options, for the terminal input it publishes (upstream ledger item 141).
+_CICS_MAP_OPERAND = re.compile(r"\bMAP\s*\(")
+_CICS_CONVERSATION = re.compile(r"\b(?:CONVID|SESSION)\s*\(")
+_CICS_BUFFER = re.compile(r"\bBUFFER\b")
+_CICS_LENGTH = re.compile(r"\bF?LENGTH\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
 _CICS_COMMAREA = re.compile(r"\bCOMMAREA\s*\(\s*([A-Z0-9_.$#@-]+)\s*\)", re.I)
 _CICS_OPT = re.compile(r"\b(INTO|FROM|RIDFLD|TRANSID|QUEUE|ABCODE|SET)\s*\(\s*'?"
                        r"([A-Z0-9_.$#@-]+)\s*'?\s*\)", re.I)
@@ -132,6 +139,7 @@ _ACCEPT_SYSTEM = re.compile(r"\bFROM\s+(DATE|DAY|DAY-OF-WEEK|TIME)\b", re.I)
 # operand; a Db2 SET / VALUES INTO stores a CURRENT DATE / TIME / TIMESTAMP register.
 # Both are the input `ACCEPT ... FROM TIME` is, so they get its endpoint.
 _CICS_ABSTIME = re.compile(r"\bABSTIME\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+_CICS_GETMAIN_SET = re.compile(r"\bSET\s*\(\s*ADDRESS\s+OF\s+([A-Z0-9][A-Z0-9-]*)\s*\)")
 _SQL_CLOCK = re.compile(r"\bCURRENT(?:\s+|_)(DATE|TIME|TIMESTAMP)\b")
 _CLOCK_ENDPOINT = {"DATE": "SYSTEM-DATE", "TIME": "SYSTEM-TIME", "TIMESTAMP": "SYSTEM-TIME"}
 # `SET :A = (SELECT ...)` assigns from a table, the read `SELECT ... INTO :A` is.
@@ -761,8 +769,24 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"
             params = _dedup([h for h in host_vars if h not in into_fields])
+            # A select-list slot that reads only a clock register (`SELECT CURRENT_DATE
+            # INTO :D FROM T`) fills its host variable from the clock, as `SET :D =
+            # CURRENT DATE` does - not from a column of T, which has none of that name.
+            by_reg: Dict[str, List[str]] = {}
+            for c in columns or ():
+                reg = str(c.get("register") or "").split(" ")[-1]
+                if reg in _CLOCK_ENDPOINT:
+                    by_reg.setdefault(reg, []).append(str(c["hostVar"]).upper())
+            clocked = {h for fs in by_reg.values() for h in fs}
+            if clocked:
+                into_fields = [f for f in into_fields if f.upper() not in clocked]
+                columns = [c for c in columns
+                           if str(c.get("hostVar", "")).upper() not in clocked]
             hits = [_note(_hit("get", _DB2, endpoint, verb, into_fields, params,
                                _qualify(columns, endpoint)), note, unresolved)]
+            hits += [_hit("get", _SYSTEM, _CLOCK_ENDPOINT[reg],
+                          f"{verb} CURRENT {reg}", fields)
+                     for reg, fields in by_reg.items()]
             change = _SQL_DATA_CHANGE.search(mup)
             if change:
                 # The inner statement WRITES the table the SELECT reads back: one
@@ -961,8 +985,21 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                                   rs, "MAP", "MAPSET")]
         if verb == "RECEIVE":
             ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
-            return [_mark_dynamic(_hit("get", _TERMINAL, ep, "CICS RECEIVE", into),
-                                  rs, "MAP", "MAPSET")]
+            hit = _mark_dynamic(_hit("get", _TERMINAL, ep, "CICS RECEIVE", into),
+                                rs, "MAP", "MAPSET")
+            if (not _CICS_MAP_OPERAND.search(mup)
+                    and not _CICS_CONVERSATION.search(mup)):
+                # Mapless: the area holds the raw terminal input. Say which area, how
+                # it is read and how long, so a consumer holding the transaction
+                # definitions can name what arrives in it.
+                terminal = {"buffer": bool(_CICS_BUFFER.search(mup))}
+                length = _CICS_LENGTH.search(mup)
+                if length:
+                    terminal["length"] = length.group(1)
+                if "SET" in opts:
+                    terminal["set"] = opts["SET"]
+                hit["terminalInput"] = terminal
+            return [hit]
         if verb == "WRITE" and _CICS_OPERATOR.search(mup):
             # WRITE OPERATOR: a message to the system console operator, not a record to
             # a file. REPLY brings the operator's answer back.
@@ -1018,6 +1055,13 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             # Without ABSTIME it refreshes only EIBDATE / EIBTIME, which no field holds.
             m = _CICS_ABSTIME.search(mup)
             return [_hit("get", _SYSTEM, "SYSTEM-TIME", "CICS ASKTIME",
+                         [m.group(1)])] if m else []
+        if verb == "GETMAIN":
+            # GETMAIN SET(ADDRESS OF X): X is fresh storage CICS hands the program,
+            # which then initialises it - its origin, not a caller's. SET(ptr) addresses
+            # no record yet; the SET ADDRESS OF that later uses ptr says so.
+            m = _CICS_GETMAIN_SET.search(mup)
+            return [_hit("get", _SYSTEM, "SYSTEM-STORAGE", "CICS GETMAIN",
                          [m.group(1)])] if m else []
         return []  # HANDLE (-> handler region), ADDRESS, FORMATTIME (internal), etc.
 
@@ -1513,6 +1557,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                 entry[k] = hit[k]
         if hit.get("secondaryTable"):
             entry["secondaryTable"] = True
+        if "terminalInput" in hit:
+            entry["terminalInput"] = hit["terminalInput"]  # a mapless CICS RECEIVE
         if "arguments" in hit:
             entry["arguments"] = hit["arguments"]       # a CALL's USING list, by position
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):

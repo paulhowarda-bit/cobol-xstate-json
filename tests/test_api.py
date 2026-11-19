@@ -187,3 +187,51 @@ def test_a_contained_programs_dynamic_call_candidates_say_whose_call_it_is():
            for r in a.fetch["artifacts"] if r.get("forDynamicCall")}
     assert got == {"OUTONE": ("WS-PGM", None), "OUTTWO": ("WS-PGM", None),
                    "INONE": ("WS-PGM", "INPICK"), "INTWO": ("WS-PGM", "INPICK")}
+
+
+# ledger item 137: COPY of a member named like the program never copies the program
+_SELFCOPY = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SELFCOPY.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WORK-AREAS.
+           05  WS-COUNT        PIC 9(4).
+       LINKAGE SECTION.
+       01  DFHCOMMAREA.
+           COPY SELFCOPY.
+       PROCEDURE DIVISION USING DFHCOMMAREA.
+       0000-MAIN.
+           MOVE CA-KEY TO WS-COUNT
+           GOBACK.
+"""
+_SELFCOPY_CPY = "           05  CA-KEY          PIC 9(4).\n"
+
+
+def _serving_selfcopy(name, type=None, copy=None):
+    if name.upper() == "SELFCOPY":
+        return {"found": True, "text": _SELFCOPY_CPY,
+                "source_location": "LIB(SELFCOPY)"}
+    return {"artifact_name": name, "found": False, "detected_type": None}
+
+
+def test_a_copy_of_the_programs_own_name_gets_the_member_not_the_source(tmp_path):
+    src = tmp_path / "SELFCOPY.cbl"
+    src.write_text(_SELFCOPY)
+    a = analyze(_SELFCOPY, source_name=src.name, paths=[str(tmp_path)],
+                fetcher=_serving_selfcopy, source_path=str(src))
+    data = a.machine.data
+    assert data["CA-KEY"]["section"] == "LINKAGE"
+    assert data["CA-KEY"]["member"] == "SELFCOPY"
+    assert data["WS-COUNT"]["section"] == "WORKING-STORAGE"
+    assert not [k for k, v in data.items()
+                if v.get("member") == "SELFCOPY" and k in ("WORK-AREAS", "WS-COUNT")]
+
+
+def test_without_the_source_path_the_old_self_copy_still_happens(tmp_path):
+    """The control: the path sweep finding the source is what the guard stops."""
+    src = tmp_path / "SELFCOPY.cbl"
+    src.write_text(_SELFCOPY)
+    a = analyze(_SELFCOPY, source_name=src.name, paths=[str(tmp_path)],
+                fetcher=_serving_selfcopy)
+    assert "CA-KEY" not in a.machine.data

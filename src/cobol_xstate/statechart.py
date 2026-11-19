@@ -317,6 +317,13 @@ class _BuildCtx:
         if spec is None:
             return
         self.action_sem[name] = spec
+        if spec.get("kind") == "address":
+            # The lineage view follows the alias; a runnable machine keeps one value per
+            # field, so a write through X never reaches the item X addresses.
+            self.flag(para, line,
+                      f"SET ADDRESS OF {', '.join(spec.get('addressOf') or [])} TO "
+                      f"{spec.get('pointer')} - storage aliasing is not modelled in the "
+                      f"runnable machine; verify")
         # A reference-modified store (MOVE x TO F(a:b)) is a substring write the data
         # model cannot express; the runnable machine fails loudly instead of writing a
         # phantom key - surface it here so a reviewer sees it without running.
@@ -686,6 +693,11 @@ class _ParaCompiler:
             spec["into"] = st.into
         if st.from_:
             spec["from"] = st.from_
+        if st.verb in ("WRITE", "REWRITE", "RELEASE") and st.from_ and st.file:
+            # WRITE rec FROM item is MOVE item TO rec, then the write: the record's
+            # value is the item's, and the lineage pass needs the store to carry it.
+            # (`file` is the record name for these three verbs.)
+            spec["assignments"] = [{"target": st.file, "expr": st.from_}]
         self.ctx.action_sem.setdefault(name, spec)
 
     def _perform_action(self, st: PerformStmt) -> str:
@@ -1385,7 +1397,17 @@ def _initial_value(item) -> object:
 
 
 def _data_dictionary(program: Program) -> Dict[str, dict]:
+    """``data``: one entry per item, keyed by name. Every FILLER has the same name, so
+    the key ``FILLER`` holds only the last one declared (kept as it always was); each
+    group entry also lists, in declaration order under ``fillers``, every FILLER it
+    directly contains - a value table or a report line is all FILLER ... VALUE, and
+    without the list those constants were not in the bundle at all. A FILLER's object
+    carries the keys a named item has, less ``parent`` (the list it is in says that);
+    a FILLER group's own FILLERs are listed on its object."""
     out: Dict[str, dict] = {}
+    # (level, name, entry) of the groups enclosing the current item, innermost last:
+    # the entry a FILLER's object goes into, even when that group is itself a FILLER.
+    open_groups: List[tuple] = []
     for it in program.data_items:
         if it.level == 88:
             entry88 = {"kind": "condition-name", "of": it.cond_parent,
@@ -1424,6 +1446,17 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
         elif it.type is not None:
             entry["type"] = it.type.to_dict()
         out[it.name] = entry
+        if it.level in (66, 77) or it.level == 1:
+            open_groups = []
+        else:
+            while open_groups and open_groups[-1][0] >= it.level:
+                open_groups.pop()
+        if it.name == "FILLER" and it.parent and open_groups                 and open_groups[-1][1] == it.parent:
+            filler = {k: v for k, v in entry.items() if k != "parent"}
+            open_groups[-1][2].setdefault("fillers", []).append(filler)
+            entry = filler
+        if it.is_group:
+            open_groups.append((it.level, it.name, entry))
     return out
 
 

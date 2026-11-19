@@ -201,7 +201,8 @@ def analyze(source: str, *, source_name: str = "<source>",
             synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
             dependents: Optional[Mapping[str, Sequence[dict]]] = None,
             dependents_resolver: Optional[Callable[..., Any]] = None,
-            timer: Optional[StageTimer] = None) -> Analysis:
+            timer: Optional[StageTimer] = None,
+            source_path: Optional[str] = None) -> Analysis:
     """Retrieve, parse and model one COBOL program.
 
     Four ways to reach the estate, all explicit:
@@ -228,8 +229,12 @@ def analyze(source: str, *, source_name: str = "<source>",
     (``(name) -> base | None``, see ``mainframe_artifacts.protocol.SynonymResolver``),
     asked at the point of need for whatever the map does not hold; a resolver that
     raises is a flagged failed lookup, never "not a synonym".
+
+    ``source_path`` is the file ``source`` was read from, when there is one. It is never
+    a member: ``COPY X.`` in ``X.cbl`` must not find ``X.cbl`` itself beside it.
     """
     timer = timer or StageTimer(_log, False, source_name)
+    exclude = (source_path,) if source_path else ()
     if parse is not None:
         parse.check_source(source, source_name=source_name)
         if fmt is not None and fmt != parse.fmt:
@@ -263,7 +268,8 @@ def analyze(source: str, *, source_name: str = "<source>",
     with timer.stage("prefetch"):
         pre = prefetch_cobol(source, fetcher, paths=paths, dest=dest, fmt=fmt,
                              source_name=source_name, unavailable=unavailable,
-                             exts=all_exts, jobs=jobs, producer=PRODUCER)
+                             exts=all_exts, jobs=jobs, producer=PRODUCER,
+                             exclude=exclude)
 
     if parse is not None:
         # The replay introduces no new branch downstream: the ONE call that differs is
@@ -278,6 +284,7 @@ def analyze(source: str, *, source_name: str = "<source>",
         resolver = CopybookResolver(
             paths=paths, exts=all_exts, fetcher=fetcher,
             store=pre.store,        # everything stage 1 retrieved, already paid for
+            exclude=exclude,
         )
         with timer.stage("parse"):
             program = parse_program(source, fmt, resolver=resolver)
@@ -340,7 +347,8 @@ def gather(source: str, *, source_name: str = "<source>",
            unavailable: Optional[str] = None,
            timer: Optional[StageTimer] = None,
            dependents: Optional[Mapping[str, Sequence[dict]]] = None,
-           dependents_resolver: Optional[Callable[..., Any]] = None) -> str:
+           dependents_resolver: Optional[Callable[..., Any]] = None,
+           source_path: Optional[str] = None) -> str:
     """Run the retrieval half where the estate is reachable, and keep what came off it.
 
     Both stages run - stage 2's plan needs the parse - but no view is written: the
@@ -358,7 +366,7 @@ def gather(source: str, *, source_name: str = "<source>",
     analysis = analyze(source, source_name=source_name, fmt=fmt, fetcher=recorder,
                        paths=paths, exts=exts, dest=dest, jobs=jobs,
                        unavailable=unavailable, timer=timer, dependents=dependents,
-                       dependents_resolver=reverse)
+                       dependents_resolver=reverse, source_path=source_path)
     return write_bundle(dest, subject_name=source_name, subject_text=source,
                         kind="cobol", prefetch=analysis.prefetch, answers=answers,
                         fetch=analysis.fetch, dependents=reverse_answers)

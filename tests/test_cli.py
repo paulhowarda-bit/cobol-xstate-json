@@ -716,3 +716,16 @@ def test_a_flat_paragraph_of_600_control_statements_publishes_every_view(tmp_pat
     assert run([str(src), "--outdir", str(out)]) == 0
     assert _names(out) >= {f"flatp{s}.json" for s in (
         "", ".business", ".lineage", ".reactive", ".artifacts", ".dynamic-calls")}
+
+
+def test_the_cli_never_copies_the_source_into_itself(tmp_path, monkeypatch):
+    """Ledger item 137: the CLI looks beside the source by default, and `.cbl` is among
+    the extensions tried, so `COPY SELFCOPY.` in SELFCOPY.cbl found SELFCOPY.cbl and
+    published its WORKING-STORAGE a second time, as LINKAGE."""
+    from test_api import _SELFCOPY
+    (tmp_path / "SELFCOPY.cbl").write_text(_SELFCOPY)
+    monkeypatch.chdir(tmp_path)
+    assert run(["SELFCOPY.cbl", "--no-fetch"]) == 0
+    data = json.loads((tmp_path / "out" / "SELFCOPY.json").read_text())["data"]
+    assert data["WS-COUNT"]["section"] == "WORKING-STORAGE"
+    assert "member" not in data["WS-COUNT"]

@@ -1185,3 +1185,238 @@ def test_a_db2_set_from_the_clock_and_a_field_keeps_both_origins():
         "SET :WS-DATE-1 = CURRENT DATE - :WS-A DAYS"))
     assert [f["field"] for f in d["fills"]].count("WS-DATE-1") == 1
     assert [f["sources"] for f in _flow_of(d, "WS-DATE-1")] == [["WS-A"]]
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 120: WRITE / REWRITE rec FROM item stores the item into the record
+# --------------------------------------------------------------------------- #
+
+_WRITE_FROM = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRFROM.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT IN-FILE ASSIGN TO INDD.
+           SELECT OUT-FILE ASSIGN TO OUTDD.
+       DATA DIVISION.
+       FILE SECTION.
+       FD  IN-FILE.
+       01  IN-REC.
+           05  IN-A            PIC X(10).
+           05  IN-B            PIC X(10).
+       FD  OUT-FILE.
+       01  OUT-REC.
+           05  OUT-A           PIC X(10).
+           05  OUT-B           PIC X(10).
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-A            PIC X(10).
+           05  WS-B            PIC X(10).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           READ IN-FILE
+           MOVE IN-A TO WS-A
+           MOVE IN-B TO WS-B
+           WRITE OUT-REC FROM WS-REC
+           REWRITE OUT-REC FROM WS-REC
+           STOP RUN.
+"""
+
+
+def test_write_and_rewrite_from_publish_the_record_store():
+    """`flow` held WS-A <- IN-A and WS-B <- IN-B and nothing for OUT-REC, so every field
+    of the record written read as written by nothing."""
+    d = _lin_src(_WRITE_FROM)
+    got = [(f["sources"], f["line"]) for f in _flow_of(d, "OUT-REC")]
+    assert got == [(["WS-REC"], 27), (["WS-REC"], 28)]
+
+
+def test_write_with_no_from_publishes_no_flow_record():
+    d = _lin_src(_WRITE_FROM.replace("    WRITE OUT-REC FROM WS-REC",
+                                     "    WRITE OUT-REC"))
+    assert [f["line"] for f in _flow_of(d, "OUT-REC")] == [28]   # the REWRITE only
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 122: a reference-modified store is a partial write, published
+# --------------------------------------------------------------------------- #
+
+_REFMOD_STORE = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. REFMOD.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT IN-FILE ASSIGN TO INDD.
+           SELECT OUT-FILE ASSIGN TO OUTDD.
+       DATA DIVISION.
+       FILE SECTION.
+       FD  IN-FILE.
+       01  IN-REC              PIC X(10).
+       FD  OUT-FILE.
+       01  OUT-REC             PIC X(40).
+       WORKING-STORAGE SECTION.
+       01  WS-A                PIC X(10).
+       01  WS-MSG              PIC X(40).
+       01  WS-CNT              PIC 9(4).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           READ IN-FILE INTO WS-A
+           MOVE WS-A TO WS-MSG (1:10)
+           MOVE WS-CNT TO WS-MSG (31:4)
+           WRITE OUT-REC FROM WS-MSG
+           STOP RUN.
+"""
+
+
+def test_a_reference_modified_move_publishes_a_flow_record_with_its_range():
+    d = _lin_src(_REFMOD_STORE)
+    assert [(f["sources"], f.get("refmod")) for f in _flow_of(d, "WS-MSG")] == [
+        (["WS-A"], "1:10"), (["WS-CNT"], "31:4")]
+    # the second store keeps what the first one wrote: origins are the union
+    assert _origins(_row(d, "OUT-REC")) == {"GET.FILE.IN-FILE"}
+    assert not [f for f in d["flags"] if "reference-modified" in str(f)]
+
+
+def test_string_into_a_range_publishes_the_same_shape_as_a_move_into_one():
+    d = _lin_src(_REFMOD_STORE.replace(
+        "MOVE WS-CNT TO WS-MSG (31:4)",
+        "STRING WS-CNT DELIMITED BY SIZE INTO WS-MSG (31:4)"))
+    assert [(f["sources"], f.get("refmod")) for f in _flow_of(d, "WS-MSG")] == [
+        (["WS-A"], "1:10"), (["WS-CNT"], "31:4")]
+    assert _origins(_row(d, "OUT-REC")) == {"GET.FILE.IN-FILE"}
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 138: SET ADDRESS OF is an alias, GETMAIN is fresh storage
+# --------------------------------------------------------------------------- #
+
+_SET_ADDRESS = """       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SETADDR.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PTR              USAGE POINTER.
+       01  WS-LOC              USAGE POINTER.
+       01  WS-LEN              PIC S9(8) COMP.
+       01  WS-AREA.
+           05  WS-AREA-KEY     PIC X(4).
+       01  WS-OUT              PIC X(4).
+       LINKAGE SECTION.
+       01  LS-AREA.
+           05  LS-KEY          PIC X(4).
+       01  LK-RESP.
+           05  LK-RESP-KEY     PIC X(4).
+       01  LK-DATA.
+           05  LK-DATA-KEY     PIC X(4).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           SET WS-PTR TO ADDRESS OF WS-AREA
+           SET ADDRESS OF LS-AREA TO WS-PTR
+           MOVE LS-KEY TO WS-OUT
+           EXEC CICS GETMAIN FLENGTH(WS-LEN) SET(ADDRESS OF LK-RESP)
+           END-EXEC
+           MOVE 'AB' TO LK-RESP-KEY
+           SET ADDRESS OF LK-DATA TO WS-LOC
+           MOVE LK-DATA-KEY TO WS-OUT
+           EXEC CICS RETURN END-EXEC.
+"""
+
+
+def _no_operand_words_or_caller_row_for_the_set(d, line):
+    assert not _flow_of(d, "ADDRESS") and not _flow_of(d, "OF")
+    assert not [r for r in d["rows"] if r["line"] == line
+                and r.get("event") == "CREATE.CALLER.CALLER"]
+
+
+def test_set_address_of_through_a_pointer_set_to_an_address_is_an_alias():
+    d = _lin_src(_SET_ADDRESS)
+    (rec,) = _flow_of(d, "LS-AREA")
+    assert (rec["sources"], rec["alias"], rec["line"]) == (["WS-AREA"], True, 21)
+    assert "unknownReason" not in rec
+    _no_operand_words_or_caller_row_for_the_set(d, 21)
+
+
+def test_getmain_set_address_of_fills_the_record_from_cics_storage():
+    d = _lin_src(_SET_ADDRESS)
+    assert [(f["field"], f["verb"]) for f in d["fills"]] == [("LK-RESP", "CICS GETMAIN")]
+    assert _origins(_row(d, "LK-RESP", "input")) == {"GET.SYSTEM.SYSTEM-STORAGE"}
+    _no_operand_words_or_caller_row_for_the_set(d, 23)
+
+
+def test_a_pointer_that_cannot_be_followed_is_said_so():
+    d = _lin_src(_SET_ADDRESS)
+    (rec,) = _flow_of(d, "LK-DATA")
+    assert rec["sources"] == [] and rec["alias"] is True
+    assert rec["unknownReason"] == "WS-LOC is never set to an address in this program"
+    assert any("SET ADDRESS OF LK-DATA TO WS-LOC" in f for f in d["flags"])
+    _no_operand_words_or_caller_row_for_the_set(d, 26)
+
+
+def test_a_pointer_set_to_two_addresses_is_not_chosen_between():
+    d = _lin_src(_SET_ADDRESS.replace(
+        "           SET ADDRESS OF LS-AREA TO WS-PTR\n",
+        "           SET ADDRESS OF LS-AREA TO WS-PTR\n"
+        "           SET WS-PTR TO ADDRESS OF WS-OUT\n"))
+    (rec,) = _flow_of(d, "LS-AREA")
+    assert rec["sources"] == [] and "more than one item (WS-AREA, WS-OUT)" in \
+        rec["unknownReason"]
+
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 124: no Db2 endpoint for a CTE, no column for a clock register
+# --------------------------------------------------------------------------- #
+
+_CTE_AND_CLOCK = (
+    '       IDENTIFICATION DIVISION.\n'
+    '       PROGRAM-ID. CTEPGM.\n'
+    '       DATA DIVISION.\n'
+    '       WORKING-STORAGE SECTION.\n'
+    '       01  WS-SEC-ID           PIC X(9).\n'
+    '       01  WS-SPEED            PIC 9(4).\n'
+    '       01  WS-CURRENT-DATE     PIC X(10).\n'
+    '       01  WS-PRIOR-DATE       PIC X(10).\n'
+    '       01  WS-CO               PIC X(4).\n'
+    '           EXEC SQL INCLUDE SQLCA END-EXEC.\n'
+    '           EXEC SQL\n'
+    '             DECLARE AGG_CURSOR CURSOR WITH HOLD\n'
+    '             WITH ROWSET POSITIONING FOR\n'
+    '             WITH ZZ_VIEW (SEC_ID, POSN_QTY) AS\n'
+    '               (SELECT SEC_ID, SUM(QTY) FROM T_ZZ_POSN GROUP BY SEC_ID)\n'
+    '             SELECT AGGR.SEC_ID, SPD.SPEED_N\n'
+    '               FROM ZZ_VIEW AGGR\n'
+    '               JOIN T_ZZ_SPEED SPD ON SPD.SEC_ID = AGGR.SEC_ID\n'
+    '           END-EXEC.\n'
+    '       PROCEDURE DIVISION.\n'
+    '       0000-MAIN.\n'
+    '           EXEC SQL OPEN AGG_CURSOR END-EXEC\n'
+    '           EXEC SQL FETCH AGG_CURSOR INTO :WS-SEC-ID, :WS-SPEED END-EXEC\n'
+    '           EXEC SQL SELECT CURRENT_DATE\n'
+    '                         , CURRENT_DATE - 1 YEAR\n'
+    '                    INTO :WS-CURRENT-DATE, :WS-PRIOR-DATE\n'
+    '                    FROM T_ZZ_DAY_TBL\n'
+    '                   WHERE UNITS_CO_N = :WS-CO\n'
+    '           END-EXEC\n'
+    '           DISPLAY WS-SEC-ID WS-SPEED WS-CURRENT-DATE WS-PRIOR-DATE\n'
+    '           GOBACK.\n'
+)
+
+
+def test_a_cursor_over_a_cte_publishes_no_endpoint_of_the_ctes_name():
+    d = _lin_src(_CTE_AND_CLOCK)
+    fill = next(f for f in d["fills"] if f["field"] == "WS-SEC-ID")
+    assert fill["endpoint"] == "T_ZZ_POSN"
+    assert {"table": "T_ZZ_POSN", "column": "SEC_ID", "hostVar": "WS-SEC-ID"} in         fill["columns"]
+    m = build_machine(parse_program(_CTE_AND_CLOCK), source_name="sub")
+    assert "ZZ_VIEW" not in {e["endpoint"] for e in m.interface()["endpoints"]}
+
+
+def test_a_select_of_a_clock_register_fills_from_the_clock_with_no_column():
+    d = _lin_src(_CTE_AND_CLOCK)
+    clock = [(f["field"], f["endpoint"], f["verb"], f["columns"]) for f in d["fills"]
+             if f["endpointType"] == "system"]
+    assert clock == [("WS-CURRENT-DATE", "SYSTEM-DATE", "SELECT CURRENT DATE", []),
+                     ("WS-PRIOR-DATE", "SYSTEM-DATE", "SELECT CURRENT DATE", [])]
+    assert not [c for f in d["fills"] for c in f["columns"]
+                if c.get("column") == "CURRENT_DATE"]

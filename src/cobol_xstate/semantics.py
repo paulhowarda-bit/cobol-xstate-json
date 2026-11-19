@@ -324,6 +324,17 @@ def _arith_div(core, spec):
 
 
 def _set(core, data, spec):
+    m = re.match(r"SET\s+((?:ADDRESS\s+OF\s+[A-Z0-9-]+\s*)+)TO\s+(.+)$", core, re.I)
+    if m:
+        # SET ADDRESS OF X TO P makes the record X the storage P points at: it moves no
+        # value, so it is no assignment - read as one, the operand's words ADDRESS and
+        # OF became targets and X a value sent back to the caller. The lineage view
+        # resolves P to what it addresses.
+        d = spec("address")
+        d["addressOf"] = [x.upper() for x in
+                          re.findall(r"ADDRESS\s+OF\s+([A-Z0-9-]+)", m.group(1), re.I)]
+        d["pointer"] = re.sub(r"\s+", " ", m.group(2).strip()).upper()
+        return d
     m = re.match(r"SET\s+(.+?)\s+TO\s+(.+)$", core, re.I)
     if m:
         targets = _operands(m.group(1))

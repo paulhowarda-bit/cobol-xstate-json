@@ -929,3 +929,42 @@ def test_a_contained_programs_unpinned_global_is_not_called_undeclared():
     row = dyn[("INNER", "WS-PGM")]
     assert "provisional" not in row
     assert "WS-PGM is declared GLOBAL in OUTER" in row["why"]
+
+
+# --------------------------------------------------------------------------- #
+# ledger item 141: a mapless RECEIVE INTO publishes the area what was typed lands in
+# --------------------------------------------------------------------------- #
+
+_MAPLESS_DATA = (
+    "       01  WS-TIOA-AREA.\n"
+    "           05  WS-TIOA-TASK-ID  PIC X(04).\n"
+    "           05  FILLER           PIC X(01).\n"
+    "           05  WS-TIOA-FUNCTION PIC X(05).\n"
+    "       01  WS-BUF               PIC X(1920).\n"
+    "       01  WS-MAPAREA           PIC X(80).\n"
+    "       01  WS-CONV              PIC X(80).\n"
+    "       01  WS-CONVID            PIC X(04).\n"
+    "       01  WS-L                 PIC S9(4) COMP.\n")
+
+
+def test_a_mapless_receive_publishes_its_area_as_a_terminal_input():
+    m = _artifacts_src(
+        "           EXEC CICS RECEIVE INTO(WS-TIOA-AREA) LENGTH(WS-L) END-EXEC\n"
+        "           EXEC CICS RECEIVE INTO(WS-BUF) BUFFER ASIS LENGTH(WS-L)\n"
+        "           END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n", _MAPLESS_DATA)
+    assert m["terminalInputs"] == [
+        {"line": 16, "into": "WS-TIOA-AREA", "buffer": False, "length": "WS-L"},
+        {"line": 17, "into": "WS-BUF", "buffer": True, "length": "WS-L"},
+    ]
+    assert _by_name(m)["terminal"]["resolvedBy"] == "CICS CSD (TRANSACTION -> PROGRAM)"
+
+
+def test_a_receive_map_and_a_conversation_receive_are_no_terminal_input():
+    m = _artifacts_src(
+        "           EXEC CICS RECEIVE MAP('ZZM1') MAPSET('ZZSET')\n"
+        "                INTO(WS-MAPAREA) END-EXEC\n"
+        "           EXEC CICS RECEIVE CONVID(WS-CONVID) INTO(WS-CONV)\n"
+        "                LENGTH(WS-L) END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n", _MAPLESS_DATA)
+    assert "terminalInputs" not in m
