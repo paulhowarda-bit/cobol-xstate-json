@@ -846,6 +846,19 @@ cobol-xstate prog.cbl --no-artifacts --outdir out       # -> out/prog.json (no m
 - **`dependency`** is `runtime` (an endpoint it touches when it runs) or `compile-time` (a
   copybook it is assembled from) — the two natures share one list without being confused.
 - **`io`** (runtime rows) is `read` / `write` / `read-write`, from the directions crossed.
+- **`terminal-map` rows are named by the mapset**, the name a BMS source member and a CSD
+  `MAPSET` definition carry. A `MAP` sent or received with a `MAPSET` it is not named
+  after is listed under **`maps`** on its mapset's row (one row per mapset however many
+  of its maps the program uses), and a map resolved through a data item keeps that item
+  under **`mapsVia`** (`{map: item}`). A `MAP` with no `MAPSET` is in the mapset of its
+  own name - the CICS default - so its row is unchanged. A map used through two or more
+  mapsets keeps its own name, lists them under **`mapsets`**, and is flagged. The row
+  named `terminal` is the terminal itself (a `SEND` or `RECEIVE` naming no map), resolved
+  by the TRANSACTION definitions that run the program.
+- **`terminalInputs`** (top level, only when there is one) lists each mapless
+  `RECEIVE INTO`: `line`, `into` (the area what a person typed arrives in), `buffer`, and
+  `length` / `set` when coded. A `RECEIVE` with `CONVID` or `SESSION` is a conversation,
+  not terminal input, and is not listed.
 - **copybook rows** carry `via` (`COPY` / `EXEC SQL INCLUDE`), `status`
   (`expanded` / `missing` / `skipped-cyclic`), `replacing`, and `contributes` (data items /
   paragraphs it brought in). A **missing** copybook — `COPY`d but not on the search path —
@@ -1416,6 +1429,8 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `fields` | **the data crossing in the event's direction** |
 | `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) — on **every** Db2 verb, not just `SELECT`: an `UPDATE`'s `WHERE` variable picks the row rather than writing a column, and a `DELETE` writes nothing at all, so all of its host variables are parameters |
 | `arguments` | on a `CALL … USING` event, **one entry per argument, in order**: the data name passed (`X` for `X`, `X OF G` and `ADDRESS OF X`), or `null` where the argument is no data item (a literal, `OMITTED`, `LENGTH OF X`). `fields` names what is passed; this is where each sits, so argument *N* joins the callee's `PROCEDURE DIVISION USING` item *N*. Absent on a CALL with no `USING`, and absent when two CALLs share one action (their labels read alike) but pass their arguments in different positions — flagged, since one list would be wrong for the other. Carried on the CALL action's spec (`kind: "call"`), which the runnable machine ignores |
+| `mapset` | on a CICS `SEND` / `RECEIVE MAP(...)` event that names its `MAPSET`: the mapset holding the map. The endpoint stays the map (the screen); absent when the `MAPSET` operand is an unresolved data item |
+| `terminalInput` | on a mapless CICS `RECEIVE`: `{buffer, length?, set?}` - the event behind a `terminalInputs` entry in the artifact manifest |
 | `columns` | for Db2 events, **which column fills which host variable** — see below |
 | `columnNote` | why `columns` is absent or partial — distinguishes "nothing to map here" (a literal slot, `SELECT *`, a missing DECLARE) from a recovery failure, which an absent key alone cannot |
 | `columnsUnresolved` | the same answer as a **stable token** to branch on, present only on a real recovery failure: `cursor-unidentified`, `cursor-declare-missing`, `count-mismatch`, `insert-no-column-list`, `insert-from-fullselect`, `values-unparseable`, `set-expression-unmapped`, `merge-not-correlated` (a `MERGE` none of whose host variables reaches a target column: its `USING` source is not a `VALUES` list, names no correlation columns, or no `WHEN` writes them into a named column), `common-table-expression` (a statement that begins `WITH`: its select list names the CTEs' columns, and which base column each one is is not traced through them, so the mapping is refused and flagged rather than stamped onto a base table). An unrecognised token is still a token: a consumer reports it verbatim rather than gating on a known list, so this set can grow without breaking one. A consumer skips the whole event on this instead of reporting each of its fields as separately unmapped — and a *residual* note (a derived slot, a literal-written column) carries no token, because those events did correlate. A cursor DECLAREd **FOR a PREPAREd statement** also carries no token: its select list is assembled at run time, so there is nothing to recover — an inherent unknown rather than a failure. It says so with `endpointType: "dynamic_sql"` and `dynamic: true`, the same shape the `PREPARE` end of the same statement already uses. **Reading a pre-VERSION-5 parse bundle:** it carries no FOR-form evidence at all, so a dynamic cursor in one degrades to `cursor-declare-missing` — absent means UNKNOWN, never "static". Re-parse to classify it; do not infer it |

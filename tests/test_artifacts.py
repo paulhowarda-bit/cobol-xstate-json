@@ -968,3 +968,71 @@ def test_a_receive_map_and_a_conversation_receive_are_no_terminal_input():
         "                LENGTH(WS-L) END-EXEC\n"
         "           EXEC CICS RETURN END-EXEC.\n", _MAPLESS_DATA)
     assert "terminalInputs" not in m
+
+
+# --------------------------------------------------------------------------- #
+# a MAP named with a MAPSET: the row is the mapset, the artifact a BMS member and a CSD
+# MAPSET definition are named; the map (the screen) is kept under `maps`
+# --------------------------------------------------------------------------- #
+
+_MAPSET_DATA = (
+    "       01  WS-AREA   PIC X(80).\n"
+    "       01  WS-MAP    PIC X(7) VALUE 'ZZM3'.\n"
+    "       01  WS-SET    PIC X(7).\n")
+
+
+def test_a_map_named_with_its_mapset_is_published_as_the_mapset():
+    m = _artifacts_src(
+        "           EXEC CICS SEND MAP('ZZM1') MAPSET('ZZSET') FROM(WS-AREA)\n"
+        "           END-EXEC\n"
+        "           EXEC CICS RECEIVE MAP('ZZM2') MAPSET('ZZSET') INTO(WS-AREA)\n"
+        "           END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n", _MAPSET_DATA)
+    rows = _by_name(m)
+    assert "ZZM1" not in rows and "ZZM2" not in rows
+    row = rows["ZZSET"]
+    assert row["kind"] == "terminal-map" and row["maps"] == ["ZZM1", "ZZM2"]
+    assert row["io"] == "read-write" and row["lines"] == [10, 12]
+
+
+def test_the_interface_keeps_the_map_and_names_its_mapset():
+    m = build_machine(parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n" + _MAPSET_DATA +
+        "       PROCEDURE DIVISION.\n"
+        "           EXEC CICS SEND MAPSET('ZZSET') MAP('ZZM1') END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n"))
+    (ev,) = [e for e in m.interface()["events"] if e["endpointType"] == "terminal"]
+    assert ev["endpoint"] == "ZZM1" and ev["mapset"] == "ZZSET"
+
+
+def test_a_map_with_no_mapset_and_a_resolved_map_keep_their_shape():
+    """MAPSET omitted: the map is in the mapset of its own name, so the row is unchanged.
+    A MAP resolved through a data item keeps that provenance under `mapsVia`."""
+    m = _artifacts_src(
+        "           EXEC CICS SEND MAP('ZZM1') END-EXEC\n"
+        "           EXEC CICS SEND MAP(WS-MAP) MAPSET('ZZSET') END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n", _MAPSET_DATA)
+    rows = _by_name(m)
+    assert "maps" not in rows["ZZM1"]
+    assert rows["ZZSET"]["maps"] == ["ZZM3"]
+    assert rows["ZZSET"]["mapsVia"] == {"ZZM3": "WS-MAP"} and "via" not in rows["ZZSET"]
+
+
+def test_one_map_through_two_mapsets_keeps_its_name_and_is_flagged():
+    m = _artifacts_src(
+        "           EXEC CICS SEND MAP('ZZM1') MAPSET('ZZSETA') END-EXEC\n"
+        "           EXEC CICS SEND MAP('ZZM1') MAPSET('ZZSETB') END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n", _MAPSET_DATA)
+    row = _by_name(m)["ZZM1"]
+    assert row["mapsets"] == ["ZZSETA", "ZZSETB"]
+    assert any("map ZZM1 is sent or received through 2 mapsets" in f for f in m["flags"])
+
+
+def test_an_unresolved_mapset_names_no_mapset():
+    m = _artifacts_src(
+        "           EXEC CICS SEND MAP('ZZM1') MAPSET(WS-SET) END-EXEC\n"
+        "           EXEC CICS RETURN END-EXEC.\n", _MAPSET_DATA)
+    assert "ZZM1" in _by_name(m) and "maps" not in _by_name(m)["ZZM1"]

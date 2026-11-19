@@ -230,6 +230,34 @@ def _copybook_rows(machine: Machine, flags: List[str]) -> List[dict]:
     return rows
 
 
+def _merge_mapset_rows(rows: List[dict]) -> List[dict]:
+    """One row per mapset. Two maps of one mapset are one artifact, so their rows - each
+    already renamed to the mapset - become one, with every map under ``maps``. A row
+    that needed no renaming (a map in the mapset of its own name) contributes its own
+    name as a map. Dynamic rows name a data item, not a mapset, and are left alone."""
+    out: List[dict] = []
+    first: Dict[str, dict] = {}
+    for row in rows:
+        if row["kind"] != "terminal-map" or row.get("dynamic"):
+            out.append(row)
+            continue
+        name = row[_ARTIFACT]
+        kept = first.get(name)
+        if kept is None:
+            first[name] = row
+            out.append(row)
+            continue
+        kept["verbs"] = _dedup(kept["verbs"] + row["verbs"])
+        if kept.get("lines") or row.get("lines"):
+            kept["lines"] = _dedup(sorted(kept.get("lines", []) + row.get("lines", [])))
+        if kept["io"] != row["io"]:
+            kept["io"] = "read-write"
+        kept["maps"] = sorted(set(kept.get("maps", [name]) + row.get("maps", [name])))
+        if row.get("mapsVia"):
+            kept["mapsVia"] = {**kept.get("mapsVia", {}), **row["mapsVia"]}
+    return out
+
+
 def build_artifacts(machine: Machine) -> dict:
     """Return the related-artifact manifest: one row per external artifact this program
     touches, with the resolution chain each program-local name still needs. Pure read
@@ -246,8 +274,13 @@ def build_artifacts(machine: Machine) -> dict:
     # terminal arrives in. One entry per statement, never folded into `lines`, because a
     # consumer holding the transaction definitions names what arrives in each area.
     terminal_inputs: Dict[str, List[dict]] = {}
+    # terminal endpoint -> the mapset each statement sends or receives it through. A MAP
+    # named with no MAPSET is in the mapset of its own name - the CICS default.
+    mapsets: Dict[str, List[str]] = {}
     for ev in iface["events"]:
         ep = ev["endpoint"]
+        if ev["endpointType"] == "terminal":
+            mapsets.setdefault(ep, []).append(ev.get("mapset") or ep)
         verbs.setdefault(ep, []).append(ev["verb"])
         if ev.get("line"):
             lines.setdefault(ep, []).append(ev["line"])
@@ -445,7 +478,25 @@ def build_artifacts(machine: Machine) -> dict:
                             "mapless RECEIVE (the manifest's 'terminalInputs') reads the transaction "
                             "id a person typed and what they typed after it")
 
+        if cls["kind"] == "terminal-map" and not ep.get("dynamic"):
+            homes = sorted(set(mapsets.get(name, [])))
+            if len(homes) == 1 and homes[0] != name:
+                # The map is a screen INSIDE a mapset; the mapset is the artifact - the
+                # BMS member and the CSD MAPSET definition both carry its name, never
+                # the map's. The map is kept under `maps`.
+                row[_ARTIFACT] = homes[0]
+                row["maps"] = [name]
+                if row.get("via"):
+                    row["mapsVia"] = {name: row.pop("via")}
+            elif len(homes) > 1:
+                row["mapsets"] = homes
+                flags.append(f"map {name} is sent or received through {len(homes)} "
+                             f"mapsets ({', '.join(homes)}): its row keeps the map's name, "
+                             f"since no one mapset is the artifact")
+
         artifacts.append(row)
+
+    artifacts = _merge_mapset_rows(artifacts)
 
     # A program CONTAINED in this source is part of this member, so what its own manifest
     # lists is this member's dependency too, and each row names the unit it came from.

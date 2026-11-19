@@ -263,6 +263,17 @@ def _mark_dynamic(hit: dict, rs: dict, *opts: str) -> dict:
     return hit
 
 
+def _with_mapset(hit: dict, rs: dict) -> dict:
+    """A ``MAP`` named with a ``MAPSET``: the endpoint stays the map - the screen - and
+    the hit says which mapset holds it, because the mapset, not the map, is what a BMS
+    source member and a CSD MAPSET definition are named. A mapset that is itself an
+    unresolved data item is not named: the endpoint already says the name is dynamic."""
+    mapset = rs.get("MAPSET")
+    if "MAP" in rs and mapset and mapset.get("name") and not mapset.get("dynamic"):
+        hit["mapset"] = mapset["name"]
+    return hit
+
+
 # --------------------------------------------------------------------------- #
 # data-dictionary helpers (record <-> file, group -> elementary fields)
 # --------------------------------------------------------------------------- #
@@ -981,12 +992,13 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
             return [_hit("create", _CALLER, "CALLER", v, commarea)]
         if verb == "SEND":
             ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
-            return [_mark_dynamic(_hit("create", _TERMINAL, ep, "CICS SEND", from_),
-                                  rs, "MAP", "MAPSET")]
+            return [_with_mapset(_mark_dynamic(
+                _hit("create", _TERMINAL, ep, "CICS SEND", from_), rs, "MAP", "MAPSET"),
+                rs)]
         if verb == "RECEIVE":
             ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
-            hit = _mark_dynamic(_hit("get", _TERMINAL, ep, "CICS RECEIVE", into),
-                                rs, "MAP", "MAPSET")
+            hit = _with_mapset(_mark_dynamic(
+                _hit("get", _TERMINAL, ep, "CICS RECEIVE", into), rs, "MAP", "MAPSET"), rs)
             if (not _CICS_MAP_OPERAND.search(mup)
                     and not _CICS_CONVERSATION.search(mup)):
                 # Mapless: the area holds the raw terminal input. Say which area, how
@@ -1559,6 +1571,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             entry["secondaryTable"] = True
         if "terminalInput" in hit:
             entry["terminalInput"] = hit["terminalInput"]  # a mapless CICS RECEIVE
+        if "mapset" in hit:
+            entry["mapset"] = hit["mapset"]             # the mapset a CICS MAP is in
         if "arguments" in hit:
             entry["arguments"] = hit["arguments"]       # a CALL's USING list, by position
         # Dynamic program-target status (CALL identifier / LINK PROGRAM(data-name)):
