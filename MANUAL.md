@@ -779,8 +779,24 @@ is a deposit.*
 - **Flow-sensitive**: only origins that actually reach that event. PERFORM is followed as
   a real call; loop self-references (`WS-TOTAL := WS-TOTAL + CUST-AMT`) collapse to the
   real source.
+- **A group store is a byte copy.** `MOVE WS-SRC TO WS-TGT` (or `WRITE REC FROM WS-TGT`)
+  between groups gives each target field exactly the origins of the source bytes laid over
+  it, placed through both records' byte layouts (`storage.record_layout`); target bytes past
+  the source's end are spaces and carry no origin, and the bytes a store lays over a
+  `FILLER` are kept, so a later write of the whole group still carries them. Where either
+  layout is not provable (a `REDEFINES`, an `OCCURS DEPENDING ON`, a `FILLER` group holding
+  named items) or the source is an expression rather than one data item, every field of
+  the target is given every origin of the source and a flag says `the store into group …
+  cannot be placed field by field`: a superset, never an empty answer.
 - **`CALL ... USING`** is by reference and the callee is another program, so its arguments
   get a `maybe` origin with `resolvedBy` naming the program that would settle it.
+- **LINKAGE the program addresses itself is not the caller's.** A record whose address is
+  set, every time, to this program's own storage — `SET ADDRESS OF LK-X TO ADDRESS OF
+  WS-Y`, a pointer provably holding such an address, or CICS `GETMAIN SET(ADDRESS OF
+  LK-X)` — is not passed by any caller, so a store into it is no `CREATE.CALLER.CALLER`
+  output and the interface does not list it among the `parameters`. A record in `USING`,
+  `DFHCOMMAREA`, or one addressed from a caller-supplied pointer (or by `EXEC CICS
+  ADDRESS`) stays the caller's.
 - **`conditionSetId`** indexes `conditionSets` (ids into `conditions`): the guards that
   hold on *every* path to the event, so each is true whenever it fires. `kind` separates a
   real decision (`business`) from loop and end-of-file plumbing (`control`) — filter to
@@ -1437,7 +1453,7 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `cursor` / `preparedStatement` | on a FETCH whose cursor was DECLAREd **FOR a PREPAREd statement**: which cursor, and which statement it reads. The endpoint is `<dynamic-sql>`, shared by every dynamic crossing in the program, so the identifying detail lives on the event. `cursor` is also on the first read an `OPEN` publishes for a cursor no `FETCH` reads (see above) |
 | `via` / `dynamic` / `candidates` / `evidence` / `hasVariableAssignment` | on a `CALL` or a CICS operand (`PROGRAM`, `TRANSID`, `QUEUE`, …) whose target is a **data item**. `via` names the item a resolved target was proved through (the endpoint is then the literal). `dynamic: true` means unresolved, and the endpoint is the item itself. When literals reach it, `candidates` lists them and two keys say how far to trust that list: `evidence` is `assigned` (a `MOVE` or `VALUE` provably stores each) or `declared-88` (only 88-level `VALUE`s name them — nothing visible stores one, so they are what the program allows, not what it does), and `hasVariableAssignment: true` means a variable `MOVE` reaches the item too, so the list is **not the whole set**. The endpoint and its artifact-manifest row carry the same keys, and a batch `CALL` and a CICS operand over one item publish the same answer. A CICS `PROGRAM()` operand is 8 characters whatever the item's PIC, so a longer literal names its first 8 (`PIC X(9) VALUE 'ABC40001C'` LINKs to `ABC40001`); a TS queue's `QUEUE()` is 8 too, and its `QNAME()` 16, so a group under `QNAME()` is read over its first 16 bytes (a TD queue's `QUEUE()` is not bounded) |
 | `rejectedCandidates` | literals that reach such an item but **cannot be the name it invokes**, each `{literal, reason}` with `reason` one of `length` (longer than the item's PIC), `space` (holds a blank), `wildcard` (holds `*` or `?`: a template or a placeholder) or `filler` (four or more of one character: an initialiser). Never counted in `candidates`, and never promotes one: a call a rejected literal also reaches stays flagged. Present with or without `candidates`, so "no literal could be a name" is not read as "no literal was found". When the rejections empty the list, 88-level values the item declares become the `candidates`, at `evidence: "declared-88"`. An undeclared item (its copybook missing) or a group has no length to test, so no literal is rejected for `length` |
-| `secondaryTable` | on a Db2 `get`: a **further table the statement names** — a joined or comma-listed table, a subquery's, an `INSERT ... SELECT` source, a `MERGE`'s `USING` source, or the second table of a cursor over a join. Every table an `OPEN` publishes for a cursor no `FETCH` reads is one too, the first included. The statement's first table after `FROM` (or its `INSERT`/`UPDATE`/`DELETE` target) keeps its own event unchanged; each further table is read inside Db2, so its event carries no `fields` and no `columns` — which of its columns reach which host variable is not recovered. The reactive view never waits on one: no row of it arrives as a delivery of its own |
+| `secondaryTable` | on a Db2 `get`: a **further table the statement names** — a joined or comma-listed table, a subquery's, an `INSERT ... SELECT` source, a `MERGE`'s `USING` source, or the second table of a cursor over a join. Every table an `OPEN` publishes for a cursor no `FETCH` reads is one too, the first included. The statement's first table after `FROM` (or its `INSERT`/`UPDATE`/`DELETE` target) keeps its own event unchanged; each further table is read inside Db2, so its event carries no `fields` and no `columns` — which of its columns reach which host variable is not recovered — except a column the select list **qualifies** to it: `B.COL2` over `FROM T1 A JOIN T2 B` is `T2`'s column, so the first table's event lists it in `columns` with `"table": "T2"`, and lineage and `dynamic-calls` name `T2` too. That holds for a `SELECT … INTO` and for a cursor's `FETCH` alike. An unqualified column in a multi-table statement still takes the first table (which table holds it is not stated in the SQL), and a qualifier the statement binds to two tables (a subquery reusing an alias) or to a common table expression is not attributed. A parse bundle older than VERSION 16 carries no per-slot tables, so replaying one gives the first table as before. The reactive view never waits on one: no row of it arrives as a delivery of its own |
 | `endpointUnresolved` | the endpoint is **not the resource's name**, as a token: `no-operand` — the statement names no resource this tool could read, and the endpoint is a placeholder (`<file>`, `<queue>`, `<program>`, `<table>` …; a CICS `WRITE JOURNALNAME` is one, having no type of its own); `record` — a `WRITE` / `REWRITE` / `RELEASE` names a record that no FD in the visible source declares or lists in its `DATA RECORD` clause, so its file is unknown. The endpoint and its manifest row carry it too; branch on it, never on the angle brackets |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |
@@ -1667,6 +1683,9 @@ machine's state nodes** as `meta.perimeter` / `meta.gets` / `meta.creates`.
 `DFHCOMMAREA` is present, and **each parameter record expanded to its elementary
 fields** — so the caller contract is field-level, not just record names. Surfaced as
 `get`/`create` against the caller (since `USING` is BY REFERENCE, the caller sees updates).
+`linkage` lists every LINKAGE record; with no `USING`, the parameter records in `fields`
+leave out the ones the program addresses to its own storage (`SET ADDRESS OF` to a
+WORKING-STORAGE item, CICS `GETMAIN SET`), which no caller passes.
 
 ### Response events
 

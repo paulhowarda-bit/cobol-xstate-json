@@ -477,6 +477,10 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         # What each DERIVED select-list slot is made of. Only carried when some slot IS
         # derived - an all-columns select list has nothing to say here.
         spec["selectDerivations"] = st.select_derivations
+    if st.select_tables:
+        # Per slot, the table a joined select's QUALIFIED column belongs to: a FETCH
+        # stamps it on that column, which otherwise takes the cursor's first table.
+        spec["selectTables"] = st.select_tables
     if st.expanded_structures:
         # The GROUP names the source wrote where the lists above now carry elementary
         # items, because that is what the Db2 precompiler sends. Carried so a reader can
@@ -1729,6 +1733,7 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
     from .interface import _SQL_FROM, _data_targets, _fetch_columns
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
     derivs_by_cursor: Dict[str, List[Optional[dict]]] = {}
+    tables_by_cursor: Dict[str, List[Optional[str]]] = {}
     table_by_cursor: Dict[str, str] = {}
     # cursor -> the PREPAREd statement name its DECLARE points at (None when the form
     # was recorded but the name was not). Keyed on the DECLARE's recorded FORM, never
@@ -1752,6 +1757,8 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             cols_by_cursor.setdefault(spec["cursor"], spec["selectList"])
             if spec.get("selectDerivations"):
                 derivs_by_cursor.setdefault(spec["cursor"], spec["selectDerivations"])
+            if spec.get("selectTables"):
+                tables_by_cursor.setdefault(spec["cursor"], spec["selectTables"])
             m = _SQL_FROM.search(mask_literals(str(spec.get("raw") or "").upper()))
             if m:
                 table_by_cursor.setdefault(spec["cursor"], m.group(1).upper())
@@ -1765,6 +1772,8 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             cols_by_cursor.setdefault(decl["cursor"], decl["selectList"])
             if decl.get("selectDerivations"):
                 derivs_by_cursor.setdefault(decl["cursor"], decl["selectDerivations"])
+            if decl.get("selectTables"):
+                tables_by_cursor.setdefault(decl["cursor"], decl["selectTables"])
         if decl.get("cursor") and decl.get("table"):
             table_by_cursor.setdefault(decl["cursor"],
                                        _base_table(str(decl["table"]).upper()))
@@ -1812,6 +1821,12 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             continue
         columns, note, unresolved = _fetch_columns(
             spec.get("cursor"), into, cols_by_cursor, derivs_by_cursor)
+        slot_tables = tables_by_cursor.get(spec.get("cursor")) or []
+        if columns and len(slot_tables) == len(columns):
+            # One entry per select-list slot, in order (`_fetch_columns` zips them).
+            for entry, tbl in zip(columns, slot_tables):
+                if tbl and "column" in entry:
+                    entry["table"] = tbl
         if columns:
             spec["columns"] = columns
         if note:

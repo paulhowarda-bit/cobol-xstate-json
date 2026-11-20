@@ -142,11 +142,24 @@ def _dead_ends(item: str, flow_by_target: Dict[str, List[dict]]) -> List[str]:
 
 def _column_of(fill: dict) -> Optional[str]:
     """The Db2 COLUMN a host variable was selected into, when the source proves it."""
+    col = _column_entry(fill)
+    return col.get("column") if col else None
+
+
+def _column_entry(fill: dict) -> Optional[dict]:
     for col in (fill.get("columns") or []):
         if isinstance(col, dict) and \
                 str(col.get("hostVar", "")).upper() == str(fill["field"]).upper():
-            return col.get("column")
+            return col
     return None
+
+
+def _table_of(fill: dict, endpoint: str) -> str:
+    """The table the field's column belongs to: its own ``table`` - a joined select's
+    column qualified to another table of the join is that table's - else the
+    statement's endpoint."""
+    col = _column_entry(fill)
+    return str((col or {}).get("table") or endpoint)
 
 
 def _artifact_row(manifest: Optional[dict], name: str) -> dict:
@@ -175,6 +188,7 @@ def _recipe(fill: dict, endpoint: str, data: dict) -> dict:
     them (see `storage.record_layout`)."""
     column = _column_of(fill)
     if column:
+        endpoint = _table_of(fill, endpoint)
         return {
             "kind": "sql",
             "run": f"SELECT DISTINCT {column} FROM {endpoint}",
@@ -263,7 +277,7 @@ def _source(site: dict, event: str, maybe: bool, resolver: Optional[str],
         }
 
     fill, steps = found
-    endpoint = fill["endpoint"]
+    endpoint = _table_of(fill, fill["endpoint"])
     how = {
         # HOW the data leaves the artifact: the verb, the statement, and the field the
         # value lands in - which is what to go and read inside the artifact.

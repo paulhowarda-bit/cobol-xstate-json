@@ -1420,3 +1420,154 @@ def test_a_select_of_a_clock_register_fills_from_the_clock_with_no_column():
                      ("WS-PRIOR-DATE", "SYSTEM-DATE", "SELECT CURRENT DATE", [])]
     assert not [c for f in d["fills"] for c in f["columns"]
                 if c.get("column") == "CURRENT_DATE"]
+
+
+# --------------------------------------------------------------------------- #
+# a group MOVE is a byte copy: each target field gets the source bytes laid over it
+# --------------------------------------------------------------------------- #
+
+_GROUP_MOVE = """       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ZZGRP.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT ZZOUT ASSIGN TO ZZOUTDD.
+       DATA DIVISION.
+       FILE SECTION.
+       FD  ZZOUT.
+       01  ZZ-OUT-REC           PIC X(20).
+       WORKING-STORAGE SECTION.
+       01  WS-SRC.
+           05  WS-SRC-A         PIC X(4).
+           05  WS-SRC-B         PIC X(4).
+       01  WS-TGT.
+           05  WS-TGT-A         PIC X(2).
+           05  FILLER           PIC X(4).
+           05  WS-TGT-B         PIC X(2).
+           05  FILLER           PIC X(5).
+           05  WS-TGT-C         PIC X(3).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           OPEN OUTPUT ZZOUT
+           ACCEPT WS-SRC-A
+           ACCEPT WS-SRC-B FROM DATE
+           MOVE WS-SRC TO WS-TGT
+           DISPLAY WS-TGT-A WS-TGT-B WS-TGT-C
+           WRITE ZZ-OUT-REC FROM WS-TGT
+           CLOSE ZZOUT
+           GOBACK.
+"""
+
+
+def _sysout(d: dict) -> dict:
+    return {r["field"]: _origins(r) for r in d["rows"]
+            if r["direction"] == "output" and r["event"] == "CREATE.CONSOLE.SYSOUT"}
+
+
+def test_a_group_move_places_each_source_field_over_the_target_bytes():
+    """WS-TGT-A (bytes 1-2) lies under WS-SRC-A; WS-TGT-B (7-8) under WS-SRC-B, once both
+    FILLERs are counted; WS-TGT-C (14-16) is past the 8-byte source, so it is spaces."""
+    d = _lin_src(_GROUP_MOVE)
+    out = _sysout(d)
+    assert out["WS-TGT-A"] == {"GET.CONSOLE.SYSIN"}
+    assert out["WS-TGT-B"] == {"GET.SYSTEM.SYSTEM-DATE"}
+    assert out["WS-TGT-C"] == set()
+    assert not [f for f in d["flags"] if "cannot be placed" in f]
+
+
+def test_a_write_from_a_group_carries_the_group_fields_origins():
+    d = _lin_src(_GROUP_MOVE)
+    assert _origins(_row(d, "ZZ-OUT-REC")) == {"GET.CONSOLE.SYSIN",
+                                               "GET.SYSTEM.SYSTEM-DATE"}
+
+
+def test_a_group_move_whose_bytes_cannot_be_placed_gives_every_field_every_origin():
+    """A REDEFINES in the source makes its layout unprovable: the superset, flagged."""
+    d = _lin_src(_GROUP_MOVE.replace(
+        "           05  WS-SRC-B         PIC X(4).\n",
+        "           05  WS-SRC-B         PIC X(4).\n"
+        "           05  WS-SRC-R REDEFINES WS-SRC-B PIC 9(4).\n"))
+    both = {"GET.CONSOLE.SYSIN", "GET.SYSTEM.SYSTEM-DATE"}
+    out = _sysout(d)
+    assert out["WS-TGT-A"] == both and out["WS-TGT-B"] == both
+    assert out["WS-TGT-C"] == both
+    assert any("the store into group WS-TGT cannot be placed field by field" in f
+               for f in d["flags"])
+
+
+def test_a_leaf_written_after_a_group_store_is_what_the_group_reads():
+    d = _lin_src(_GROUP_MOVE.replace(
+        "           MOVE WS-SRC TO WS-TGT\n",
+        "           MOVE WS-SRC TO WS-TGT\n"
+        "           ACCEPT WS-TGT-C FROM TIME\n"))
+    rec = _origins(_row(d, "ZZ-OUT-REC"))
+    assert {"GET.CONSOLE.SYSIN", "GET.SYSTEM.SYSTEM-DATE"} < rec
+    assert any("TIME" in o for o in rec)
+
+
+def test_the_bytes_a_group_move_lays_over_a_filler_still_reach_a_write_of_the_group():
+    """Bytes 3-6 of WS-TGT are a FILLER holding source bytes 3-6: the tail of WS-SRC-A
+    and the head of WS-SRC-B. Blanking both named fields leaves those bytes in the
+    record that is written."""
+    d = _lin_src(_GROUP_MOVE.replace(
+        "           MOVE WS-SRC TO WS-TGT\n",
+        "           MOVE WS-SRC TO WS-TGT\n"
+        "           MOVE SPACES TO WS-TGT-A WS-TGT-B\n"))
+    assert _origins(_row(d, "ZZ-OUT-REC")) == {"GET.CONSOLE.SYSIN",
+                                               "GET.SYSTEM.SYSTEM-DATE"}
+    blank = _lin_src(_GROUP_MOVE.replace(
+        "           MOVE WS-SRC TO WS-TGT\n",
+        "           MOVE WS-SRC TO WS-TGT\n"
+        "           MOVE SPACES TO WS-TGT\n"))
+    assert _origins(_row(blank, "ZZ-OUT-REC")) == set()
+
+
+# --------------------------------------------------------------------------- #
+# LINKAGE the program addresses itself is not the caller's storage
+# --------------------------------------------------------------------------- #
+
+_OWN_LINKAGE = """       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ZZOWN.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-AREA              PIC X(20).
+       LINKAGE SECTION.
+       01  LK-PARM              PIC X(10).
+       01  LK-PTR               USAGE POINTER.
+       01  LK-WORK.
+           05  LK-WORK-A        PIC X(10).
+       01  LK-BUF               PIC X(30).
+       01  LK-PASSED            PIC X(10).
+       PROCEDURE DIVISION USING LK-PARM LK-PTR.
+       0000-MAIN.
+           SET ADDRESS OF LK-WORK TO ADDRESS OF WS-AREA
+           MOVE LK-PARM TO LK-WORK-A
+           EXEC CICS GETMAIN SET(ADDRESS OF LK-BUF) LENGTH(30)
+           END-EXEC
+           MOVE 'X' TO LK-BUF
+           SET ADDRESS OF LK-PASSED TO LK-PTR
+           MOVE 'Z' TO LK-PASSED
+           MOVE 'Y' TO LK-PARM
+           GOBACK.
+"""
+
+
+def test_a_store_into_linkage_the_program_addresses_itself_is_no_caller_output():
+    """LK-WORK is WS-AREA and LK-BUF is GETMAIN storage. LK-PASSED's address came from
+    the caller's pointer, and LK-PARM is the caller's parameter - both stay outputs."""
+    d = _lin_src(_OWN_LINKAGE)
+    caller = {r["field"] for r in d["rows"]
+              if r["direction"] == "output" and r["event"] == "CREATE.CALLER.CALLER"}
+    assert {"LK-PARM", "LK-PASSED"} <= caller
+    assert not caller & {"LK-WORK", "LK-WORK-A", "LK-BUF"}
+
+
+def test_own_linkage_is_no_parameter_when_the_program_has_no_using():
+    from cobol_xstate.statechart import build_machine as _bm
+    iface = _bm(parse_program(_OWN_LINKAGE.replace(
+        "       PROCEDURE DIVISION USING LK-PARM LK-PTR.\n",
+        "       PROCEDURE DIVISION.\n"))).bundle()["interface"]
+    assert set(iface["parameters"]["fields"]) == {"LK-PARM", "LK-PTR", "LK-PASSED"}
+    crossing = {f for e in iface["events"] if e["endpointType"] == "caller"
+                for f in e["fields"]}
+    assert not crossing & {"LK-WORK", "LK-WORK-A", "LK-BUF"}

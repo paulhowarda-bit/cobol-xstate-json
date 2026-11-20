@@ -100,6 +100,38 @@ def _children(data: Dict[str, dict], parent: str) -> List[Tuple[str, dict]]:
             and str(entry.get("parent") or "").upper() == parent.upper()]
 
 
+_FILLER = "FILLER"
+
+
+def _members(data: Dict[str, dict], name: str, entry: dict,
+             blockers: List[str]) -> List[Tuple[str, dict]]:
+    """The items a group is laid out from, in declaration order.
+
+    FILLERs need care: the data dictionary keys every FILLER under the one name
+    ``FILLER``, so the ``FILLER`` key holds only the LAST one declared, under whichever
+    group that was - a group's other FILLERs are missing from its children, and their
+    bytes from any layout built on them, while the arithmetic still agrees with itself.
+    A group lists its own FILLERs, in order, under ``fillers``; those are used instead
+    (named children by ``parent``, FILLERs from the list, merged by source line). A
+    FILLER entry is not in the dictionary, so its members are its own ``fillers`` - and
+    a data item declared under a FILLER group records its parent as ``FILLER``, which
+    cannot say WHICH one: then a FILLER group's size is not provable.
+    """
+    if entry is not data.get(name):            # a FILLER, from a group's `fillers` list
+        if str((entry.get("type") or {}).get("category")) == "group" and any(
+                isinstance(e, dict) and str(e.get("parent") or "").upper() == _FILLER
+                for e in data.values()):
+            blockers.append(
+                "a FILLER group has named items whose parent is recorded only as "
+                "FILLER, so which FILLER holds them - and its size - is not known")
+        return [(_FILLER, f) for f in entry.get("fillers") or []]
+    if "fillers" not in entry:
+        return _children(data, name)           # a dictionary from before `fillers`
+    named = [(n, e) for n, e in _children(data, name) if n.upper() != _FILLER]
+    merged = named + [(_FILLER, f) for f in entry["fillers"]]
+    return sorted(merged, key=lambda pair: int(pair[1].get("line") or 0))
+
+
 def _sized(data: Dict[str, dict], name: str, entry: dict,
            blockers: List[str]) -> Optional[int]:
     """Total bytes for one item including OCCURS, appending any reason it is unknown."""
@@ -112,7 +144,7 @@ def _sized(data: Dict[str, dict], name: str, entry: dict,
             f"{name} is SYNCHRONIZED - the compiler inserts slack bytes to align it, "
             f"and how many depends on where the record itself starts")
 
-    kids = _children(data, name)
+    kids = _members(data, name, entry, blockers)
     if kids:
         total = 0
         for kid_name, kid in kids:
@@ -178,7 +210,7 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
         rows describe occurrence one (the only one whose position is fixed relative to
         the record); `occurs`/`elementLength` say how to step through the rest.
         """
-        kids = _children(data, name)
+        kids = _members(data, name, ent, blockers)
         if ent.get("redefines"):
             blockers.append(
                 f"{name} REDEFINES {ent['redefines']} - two names occupy the same "

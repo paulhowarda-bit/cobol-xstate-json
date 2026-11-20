@@ -682,3 +682,25 @@ def test_a_call_through_a_group_whose_values_spell_the_name_is_an_edge():
     assert programs["XQSD2FSW"] == "XQ2K-XQSD2FSW"
     assert "WS-XPGMA400" not in programs and "XQ2K-XQSD2FSW" not in programs
     assert [r["item"] for r in view["dynamicCalls"]] == ["WS-ERR-MSG"]
+
+
+def test_a_column_qualified_to_a_joined_table_is_read_from_that_table():
+    """`B.HANDLER` over `ZZKEYS A JOIN ZZROUTE B`: the query that lists the real targets
+    reads ZZROUTE, not the first table the statement names."""
+    _m, _art, view = _view("""\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DB2J.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM  PIC X(8).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           EXEC SQL SELECT B.HANDLER INTO :WS-PGM
+                FROM ZZKEYS A JOIN ZZROUTE B ON A.K = B.K END-EXEC
+           CALL WS-PGM
+           GOBACK.
+""")
+    src = _only(view)["sources"][0]
+    assert src["artifact"] == "ZZROUTE"
+    assert src["how"]["readAt"] == "ZZROUTE.HANDLER"
+    assert "FROM ZZROUTE" in src["extract"]["run"]

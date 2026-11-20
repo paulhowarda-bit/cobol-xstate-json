@@ -1350,6 +1350,94 @@ def _annotate_states(config: dict, perimeter: Dict[str, dict]) -> None:
         meta["creates"] = d["creates"]
 
 
+_ADDRESS_OF_EXPR = re.compile(r"^ADDRESS\s+OF\s+([A-Z0-9-]+)$")
+_CICS_SET_PTR = re.compile(r"\bSET\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+
+
+def address_index(actions: dict, provenance: dict
+                  ) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """``(pointer -> items SET to its address, pointer -> every other write to it)``,
+    over the whole program. A pointer is followed only when the first map holds one
+    item and the second holds nothing - two addresses, or any other write (a CICS
+    ``SET(ptr)``, a MOVE), and where it points is not provable here."""
+    addr: Dict[str, Set[str]] = {}
+    other: Dict[str, Set[str]] = {}
+    for aname, sp in actions.items():
+        for a in (sp or {}).get("assignments") or []:
+            t = (a.get("target") or "").upper()
+            e = re.sub(r"\s+", " ", (a.get("expr") or "").strip().upper())
+            am = _ADDRESS_OF_EXPR.match(e)
+            if am:
+                addr.setdefault(t, set()).add(am.group(1))
+            elif t:
+                other.setdefault(t, set()).add(f"{sp.get('verb', '?')} {e}")
+        if (sp or {}).get("kind") == "exec-cics":
+            text = mask_literals(((provenance.get(aname) or {}).get("cobol") or "").upper())
+            for pm in _CICS_SET_PTR.finditer(text):
+                other.setdefault(pm.group(1), set()).add(
+                    f"CICS {sp.get('verb', '?')} SET({pm.group(1)})")
+    return addr, other
+
+
+def own_linkage(data: Optional[dict], semantics: Optional[dict], provenance: dict,
+                using: Optional[Sequence[str]]) -> Set[str]:
+    """LINKAGE items that are this program's OWN storage, not the caller's: every name
+    under a record whose address the program itself sets, every time, to storage that
+    is not the caller's - ``SET ADDRESS OF X TO ADDRESS OF Y`` (directly, or through a
+    pointer that provably holds only that address) with Y outside LINKAGE, or a CICS
+    command handing it storage with ``SET(ADDRESS OF X)`` (GETMAIN, a READ / RECEIVE /
+    GET CONTAINER ... SET). A store into such a field changes no byte the caller
+    passed, so it is no caller output, and a read of it is no caller input.
+
+    A record in ``PROCEDURE DIVISION USING`` and DFHCOMMAREA arrive FROM the caller,
+    so they are never own. A record also given an address that is not provably own -
+    an unfollowable pointer, a LINKAGE target, ``EXEC CICS ADDRESS SET`` - stays the
+    caller's: it may be, and that is the safe direction for an output contract."""
+    data = data or {}
+    actions = (semantics or {}).get("actions", {})
+    linkage = {n.upper() for n, it in data.items()
+               if isinstance(it, dict) and it.get("section") == "LINKAGE"}
+    if not linkage:
+        return set()
+    callers = {u.upper() for u in (using or ())} | {"DFHCOMMAREA"}
+    addr, other = address_index(actions, provenance)
+    verdicts: Dict[str, Set[bool]] = {}
+    for aname, sp in actions.items():
+        sp = sp or {}
+        if sp.get("kind") == "address":
+            ptr = re.sub(r"\s+", " ", (sp.get("pointer") or "").strip().upper())
+            if ptr in ("NULL", "NULLS"):
+                continue
+            m = _ADDRESS_OF_EXPR.match(ptr)
+            if m:
+                ys = [m.group(1)]
+            else:
+                p = ptr.split("(")[0].strip()
+                ys = [] if other.get(p) else sorted(addr.get(p, ()))
+            own = len(ys) == 1 and ys[0] in data and ys[0] not in linkage
+            for x in sp.get("addressOf") or []:
+                verdicts.setdefault(str(x).upper(), set()).add(own)
+        elif sp.get("kind") == "exec-cics":
+            own = str(sp.get("verb") or "").upper() != "ADDRESS"
+            text = mask_literals(((provenance.get(aname) or {}).get("cobol") or "").upper())
+            for sm in _CICS_GETMAIN_SET.finditer(text):
+                verdicts.setdefault(sm.group(1), set()).add(own)
+    roots = sorted(x for x, v in verdicts.items()
+                   if v == {True} and x in linkage and x not in callers)
+    children: Dict[str, List[str]] = {}
+    for n, it in data.items():
+        if isinstance(it, dict) and it.get("parent"):
+            children.setdefault(str(it["parent"]).upper(), []).append(n.upper())
+    out: Set[str] = set()
+    stack = list(roots)
+    while stack:
+        n = stack.pop()
+        if n not in out:
+            out.add(n)
+            stack.extend(children.get(n, ()))
+    return out
+
+
 def _linkage_records(data: Optional[dict]) -> List[str]:
     """Top-level (01/77) items in the LINKAGE SECTION - the program's parameter records
     (COMMAREA / passed parameters), independent of any USING list."""
@@ -1518,8 +1606,11 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     cursor_derivs = _cursor_derivations(semantics)
     cursor_refs = _cursor_table_refs(provenance)
     seed_cursor_maps(cursors, cursor_cols, cursor_derivs, sql_cursors, cursor_refs)
+    # LINKAGE whose storage the program addresses itself is not the caller's: reading it
+    # is no request, writing it no response.
+    own = own_linkage(data, semantics, provenance, using)
     linkage_all = {n.upper() for n, it in (data or {}).items()
-                   if isinstance(it, dict) and it.get("section") == "LINKAGE"}
+                   if isinstance(it, dict) and it.get("section") == "LINKAGE"} - own
     # Guard-scanned response/input items: SQLCODE-style registers, EIB inputs, and
     # each file's FILE STATUS field (the file subsystem's response register).
     status_fields = {v["statusField"]: k for k, v in files.items()
@@ -1684,8 +1775,10 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     using = [u.upper() for u in (using or [])]
     linkage = _linkage_records(data)
     commarea = [n for n in linkage if n.upper() == "DFHCOMMAREA"]
-    # Parameters received from the caller: the USING list, else the COMMAREA/LINKAGE record.
-    inbound = using or commarea or linkage
+    # Parameters received from the caller: the USING list, else the COMMAREA/LINKAGE
+    # records - less those the program addresses itself, which no caller passes.
+    params = [n for n in linkage if n.upper() not in own]
+    inbound = using or commarea or params
     if inbound:
         add(entry, program,
             _hit("get", _CALLER, "CALLER", "PROCEDURE DIVISION USING", list(inbound)),
@@ -1720,6 +1813,6 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             "commarea": bool(commarea),
             # Each parameter record expanded to its elementary fields (PIC-typed in
             # 'data'), so the caller contract is field-level, not just record names.
-            "fields": {rec: dv.leaves(rec) for rec in (using or linkage)},
+            "fields": {rec: dv.leaves(rec) for rec in (using or params)},
         },
     }

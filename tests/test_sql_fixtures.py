@@ -1226,14 +1226,15 @@ def test_the_first_table_keeps_its_hit_and_each_further_table_is_a_bare_read():
         assert further["fields"] == []
         assert "columns" not in further and "params" not in further
         assert further["secondaryTable"] is True
-    # The primary hit is untouched: its column mapping is exactly what it was.
+    # The primary hit carries the column mapping, and a column QUALIFIED to a further
+    # table of the join (`B.COL2`) names that table, not the first one.
     cols = {evs[0]["endpoint"]: [(c["table"], c["column"], c["hostVar"])
                                  for c in evs[0].get("columns") or []] for evs in stmts}
     assert cols["T_COMMA_FIRST"] == [("T_COMMA_FIRST", "COL1", "WS-A"),
-                                     ("T_COMMA_FIRST", "COL2", "WS-B")]
+                                     ("T_COMMA_SECOND", "COL2", "WS-B")]
     assert cols["T_UPD_TARGET"] == [("T_UPD_TARGET", "COL1", "WS-A")]
     assert cols["T_CUR_FIRST"] == [("T_CUR_FIRST", "COL1", "WS-A"),
-                                   ("T_CUR_FIRST", "COL2", "WS-B")]
+                                   ("T_CUR_JOINED", "COL2", "WS-B")]
 
 
 def test_the_manifest_lists_every_table_and_the_further_ones_as_read():

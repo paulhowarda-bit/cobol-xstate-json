@@ -168,3 +168,37 @@ def test_no_offsets_are_left_behind_when_a_blocker_appears_late():
 """), "CTL-REC")
     assert layout["provable"] is False
     assert all("offset" not in f for f in layout["fields"])
+
+
+# --------------------------------------------------------------------------- #
+# FILLERs: the data dictionary keys every FILLER under one name, so the layout reads a
+# group's own FILLERs from its `fillers` list - or refuses
+# --------------------------------------------------------------------------- #
+
+def test_every_filler_of_a_group_occupies_its_bytes():
+    """Two FILLERs in one group: the dictionary's single FILLER key held only the last,
+    so the first FILLER's 4 bytes went missing from every offset after it."""
+    layout = record_layout(_data(
+        "       01  ZZ-REC.\n"
+        "           05  ZZ-A    PIC X(2).\n"
+        "           05  FILLER  PIC X(4).\n"
+        "           05  ZZ-B    PIC X(2).\n"
+        "           05  FILLER  PIC X(5).\n"
+        "           05  ZZ-C    PIC X(3).\n"), "ZZ-REC")
+    assert layout["provable"] and layout["size"] == 16
+    assert [(f["name"], f["offset"], f["length"]) for f in layout["fields"]
+            if f["name"] != "ZZ-REC"] == [
+        ("ZZ-A", 1, 2), ("FILLER", 3, 4), ("ZZ-B", 7, 2), ("FILLER", 9, 5),
+        ("ZZ-C", 14, 3)]
+
+
+def test_a_filler_group_holding_named_items_is_not_provable():
+    """`05 FILLER. 10 ZZ-IN ...`: ZZ-IN records its parent only as FILLER, so which
+    FILLER holds it - and how big that FILLER is - is not known."""
+    layout = record_layout(_data(
+        "       01  ZZ-REC.\n"
+        "           05  FILLER.\n"
+        "               10  ZZ-IN  PIC X(1).\n"
+        "           05  ZZ-B       PIC X(2).\n"), "ZZ-REC")
+    assert not layout["provable"]
+    assert "parent is recorded only as FILLER" in layout["reason"]

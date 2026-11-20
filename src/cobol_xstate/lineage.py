@@ -56,6 +56,7 @@ from .emitter import (
     perform_target as _perform_target, segment_entry,
 )
 from .statechart import Machine
+from .storage import record_layout
 
 # An origin: (event name, maybe?, program that would resolve a `maybe`).
 Origin = Tuple[str, bool, Optional[str]]
@@ -199,6 +200,10 @@ def _entry_key(entry: dict) -> str:
     return json.dumps(entry, sort_keys=True, default=str)
 
 
+_FILLER = "FILLER"
+_FILLER_KEY = "#FILLER"      # a group's FILLER bytes: `<group>#FILLER` (never a COBOL name)
+
+
 class _Lineage:
     def __init__(self, machine: Machine, timer=None):
         # `timer`: a StageTimer, only from the --timing run that builds this - it splits
@@ -213,15 +218,46 @@ class _Lineage:
                                 and it.get("kind") != "condition-name"}
         # LINKAGE items (the caller's parameter records / COMMAREA). A write into one is
         # a caller-visible OUTPUT the event classifier does not recognize - see `_apply`.
+        # Less the LINKAGE the program addresses itself (SET ADDRESS OF / CICS SET):
+        # that storage is not the caller's, so it is neither a request nor a response.
+        self.own_linkage: Set[str] = _iface.own_linkage(
+            self.data, machine.semantics, machine.provenance,
+            getattr(machine, "using", None))
         self.linkage: Set[str] = {n.upper() for n, it in self.data.items()
                                   if isinstance(it, dict)
-                                  and it.get("section") == "LINKAGE"}
+                                  and it.get("section") == "LINKAGE"} - self.own_linkage
         self.ordered = machine.paragraph_order
         self.sections = getattr(machine, "sections", {}) or {}
         # Built once: PERFORM targets are resolved through it, never by list scans.
         self._index = order_index(self.ordered)
         self.files = getattr(machine, "files", {}) or {}
         self.dv = _iface._DataView(self.data, machine.fd_records)
+        # group -> its elementary fields. A group's value IS those fields' bytes, so
+        # every read and write of a group goes through them (`_read` / `_store`).
+        self.groups: Dict[str, List[str]] = {}
+        for n in self.known:
+            if n == _FILLER:
+                continue
+            leaves = [l for l in self.dv.leaves(n) if l != n]
+            if leaves or (self.data.get(n) or {}).get("fillers"):
+                self.groups[n] = [l for l in leaves if l != _FILLER]
+        # FILLER bytes. Every FILLER shares the one dictionary key, so a FILLER's bytes
+        # are kept per GROUP instead, under `<group>#FILLER` - a FILLER cannot be named,
+        # so it is only ever written or read through a group. A store into a group writes
+        # its own and every nested group's filler key (`sub_fillers`); a read of a group
+        # sees those and its enclosing groups' (`group_reads`), whose stores may have
+        # laid bytes over its FILLERs.
+        self.sub_fillers: Dict[str, List[str]] = {}
+        anc: Dict[str, List[str]] = {}
+        for n in self.groups:
+            sub = [g for g in self._subgroups(n) if g in self.groups]
+            self.sub_fillers[n] = [g + _FILLER_KEY for g in sub]
+            for g in sub:
+                if g != n:
+                    anc.setdefault(g, []).append(n + _FILLER_KEY)
+        self.group_reads: Dict[str, List[str]] = {
+            n: leaves + self.sub_fillers[n] + anc.get(n, [])
+            for n, leaves in self.groups.items()}
         self.cursors = _iface._cursor_tables(self.provenance)
         # A FETCH's host-variable <-> Db2 COLUMN correlation, recovered from the cursor's
         # DECLARE. Only the interface build passed this to `_classify`, so every FETCH row
@@ -816,7 +852,7 @@ class _Lineage:
                     srcs = [s for s in srcs if s in self.known]
                     acc: Set[Origin] = set()
                     for s in srcs:
-                        acc |= set(cur.get(s, frozenset()))
+                        acc |= self._read(s, cur)
                     writes.append((tgt, srcs, acc))
 
             # 1. an INPUT event fills its fields: they originate HERE. A GROUP field
@@ -859,14 +895,19 @@ class _Lineage:
                     srcs = _operands(a.get("expr", ""), self.known)
                     acc: Set[Origin] = set()
                     for s in srcs:
-                        acc |= set(cur.get(s, frozenset()))
+                        acc |= self._read(s, cur)
                     if got:      # e.g. SELECT ... INTO: already set by the event above
                         continue
                     if refmod:
                         # a partial write: the bytes outside the range keep what the
                         # field held, so its origins are the union, never a replacement
-                        acc |= set(cur.get(base, frozenset()))
-                    cur[base] = frozenset(acc)
+                        acc |= self._read(base, cur)
+                        self._store(base, frozenset(acc), cur)
+                    elif base in self.groups:
+                        self._group_store(base, a.get("expr", ""), srcs, acc, cur,
+                                          line)
+                    else:
+                        cur[base] = frozenset(acc)
                     if rows is not None:
                         rec = {
                             "target": base, "sources": list(srcs), "state": name,
@@ -913,7 +954,7 @@ class _Lineage:
                     if recv:
                         acc = set()
                         for s in srcs:
-                            acc |= set(cur.get(s, frozenset()))
+                            acc |= self._read(s, cur)
                         # STRING ... INTO X(a:b) is the same partial write a MOVE into
                         # a range is, and is published the same way
                         refmod = None
@@ -921,8 +962,8 @@ class _Lineage:
                             m = _STRING_RE.search(mask_literals(cobol.upper()))
                             refmod = _refmod(m.group(2)) if m else None
                         for r in recv:
-                            held = set(cur.get(r, frozenset())) if refmod else set()
-                            cur[r] = frozenset(acc | held)
+                            held = self._read(r, cur) if refmod else set()
+                            self._store(r, frozenset(acc | held), cur)
                             # the same record step 2 writes, so walking `flow` back
                             # from a field these verbs fill does not stop at it
                             if rows is not None:
@@ -942,8 +983,8 @@ class _Lineage:
                 filled = {f.upper() for h in got for f in h["fields"]}
                 for tgt, srcs, acc in writes:
                     if tgt in filled:
-                        acc = acc | set(cur.get(tgt, frozenset()))
-                    cur[tgt] = frozenset(acc)
+                        acc = acc | self._read(tgt, cur)
+                    self._store(tgt, frozenset(acc), cur)
                     if rows is not None:
                         self.flow.append({
                             "target": tgt, "sources": list(srcs), "state": name,
@@ -959,8 +1000,11 @@ class _Lineage:
                         fu = f.upper()
                         if fu not in self.known:
                             continue
-                        cur[fu] = frozenset(set(cur.get(fu, frozenset()))
-                                            | {(ev, True, h["endpoint"])})
+                        # every field of a group argument: the callee may rewrite any
+                        for x in ([fu] + self.groups.get(fu, [])
+                                  + self.sub_fillers.get(fu, [])):
+                            cur[x] = frozenset(set(cur.get(x, frozenset()))
+                                               | {(ev, True, h["endpoint"])})
 
             # 5. an OUTPUT event emits fields: report what reaches it.
             if rows is not None:
@@ -991,8 +1035,7 @@ class _Lineage:
                         })
         return cur
 
-    _ADDRESS_OF = re.compile(r"^ADDRESS\s+OF\s+([A-Z0-9-]+)$")
-    _CICS_SET_PTR = re.compile(r"\bSET\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+    _ADDRESS_OF = _iface._ADDRESS_OF_EXPR
 
     def _address_target(self, ptr: str) -> Tuple[Optional[str], Optional[str]]:
         """``(item, None)`` when the pointer operand of a SET ADDRESS OF provably
@@ -1007,24 +1050,7 @@ class _Lineage:
             return (y, None) if y in self.known else (
                 None, f"{y} is not a data item of this program")
         if getattr(self, "_ptr_index", None) is None:
-            addr: Dict[str, Set[str]] = {}
-            other: Dict[str, Set[str]] = {}
-            for aname, sp in self.actions.items():
-                for a in (sp or {}).get("assignments") or []:
-                    t = (a.get("target") or "").upper()
-                    e = re.sub(r"\s+", " ", (a.get("expr") or "").strip().upper())
-                    am = self._ADDRESS_OF.match(e)
-                    if am:
-                        addr.setdefault(t, set()).add(am.group(1))
-                    elif t:
-                        other.setdefault(t, set()).add(f"{sp.get('verb', '?')} {e}")
-                if (sp or {}).get("kind") == "exec-cics":
-                    text = mask_literals(
-                        (self.provenance.get(aname, {}).get("cobol") or "").upper())
-                    for pm in self._CICS_SET_PTR.finditer(text):
-                        other.setdefault(pm.group(1), set()).add(
-                            f"CICS {sp.get('verb', '?')} SET({pm.group(1)})")
-            self._ptr_index = (addr, other)
+            self._ptr_index = _iface.address_index(self.actions, self.provenance)
         addr, other = self._ptr_index
         p = ptr.split("(")[0].strip()
         ys, others = sorted(addr.get(p, ())), sorted(other.get(p, ()))
@@ -1036,23 +1062,106 @@ class _Lineage:
         if ys:
             return None, (f"{p} is set to the address of more than one item "
                           f"({', '.join(ys)})")
-        if p in self.linkage:
+        if p in self.linkage or p in self.own_linkage:
             return None, f"{p} is a LINKAGE item: the address arrives from the caller"
         return None, f"{p} is never set to an address in this program"
 
     def _origins_of(self, field: str, cur: State) -> List[Origin]:
         """Origins reaching a field. A GROUP item has no assignments of its own - it is
         the union of its elementary children (moving a group moves all of them)."""
-        fu = field.upper()
-        if fu in cur:
-            return sorted(cur[fu])
-        leaves = [l for l in self.dv.leaves(fu) if l != fu]
-        if leaves:
+        return sorted(self._read(field, cur))
+
+    def _read(self, name: str, cur: State) -> Set[Origin]:
+        """The origins a read of ``name`` sees. A group's value is its fields' bytes, so
+        a group reads as the union over its leaves: every write to a group also writes
+        its leaves (``_store``), so a leaf rewritten since is never hidden behind an
+        older entry for the group. A group none of whose leaves was ever written reads
+        its own entry, if it has one."""
+        fu = name.upper()
+        keys = self.group_reads.get(fu)
+        if keys and any(k in cur for k in keys):
             acc: Set[Origin] = set()
-            for l in leaves:
-                acc |= set(cur.get(l, frozenset()))
-            return sorted(acc)
-        return []
+            for k in keys:
+                acc |= cur.get(k, frozenset())
+            return acc
+        return set(cur.get(fu, frozenset()))
+
+    def _subgroups(self, name: str) -> List[str]:
+        """``name`` and every item nested under it (FILLERs and 88-levels aside)."""
+        out: List[str] = []
+        seen: Set[str] = set()
+        stack = [name]
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            out.append(n)
+            stack.extend(k for k in self.dv.children.get(n, ()) if k != _FILLER)
+        return out
+
+    def _store(self, name: str, origins: OriginSet, cur: State) -> None:
+        """Write ``origins`` to ``name`` and, for a group, to every field under it - the
+        coarse write, for a value whose bytes cannot be placed field by field."""
+        cur[name] = origins
+        for leaf in self.groups.get(name, ()):
+            cur[leaf] = origins
+        for key in self.sub_fillers.get(name, ()):
+            cur[key] = origins
+
+    _BARE_REF = re.compile(r"^([A-Z0-9][A-Z0-9-]*)(?:\s+(?:OF|IN)\s+[A-Z0-9][A-Z0-9-]*)*$")
+
+    def _group_store(self, tgt: str, expr: str, srcs: List[str], acc: Set[Origin],
+                     cur: State, line: int) -> None:
+        """A store into a GROUP. COBOL moves a group byte for byte, so each field of
+        the target receives exactly the source bytes laid over it: placed through both
+        byte layouts (``storage.record_layout``) when both are provable, and target bytes
+        past the source's end are spaces - no origin. Where the bytes cannot be placed
+        (a layout refused, or a source that is not one data item), every field of the
+        target is given every origin of the source, and a flag says so: a superset is
+        the safe direction for provenance, but it is not the answer, and must not look
+        like one."""
+        m = self._BARE_REF.match(re.sub(r"\s+", " ", (expr or "").strip().upper()))
+        if not srcs:
+            self._store(tgt, frozenset(), cur)        # a literal or figurative constant
+            return
+        why = None
+        if m and m.group(1) == srcs[0] and len(srcs) == 1:
+            placed, why = self._place_bytes(srcs[0], tgt, cur)
+            if placed is not None:
+                cur[tgt] = frozenset(acc)
+                for leaf in self.groups[tgt]:
+                    cur[leaf] = placed.get(leaf, frozenset())
+                for key in self.sub_fillers[tgt]:
+                    cur[key] = placed.get(_FILLER, frozenset())
+                return
+        else:
+            why = "the source is an expression, not one data item"
+        self._store(tgt, frozenset(acc), cur)
+        self._flag(f"line {line}: the store into group {tgt} cannot be placed field by "
+                   f"field - {why} - so every field of {tgt} is given every origin of "
+                   f"{', '.join(srcs)}")
+
+    def _place_bytes(self, src: str, tgt: str,
+                     cur: State) -> Tuple[Optional[Dict[str, OriginSet]], Optional[str]]:
+        """``({target leaf: origins}, None)`` from the two byte layouts, or ``(None,
+        why)`` when either layout is refused."""
+        lay_s, lay_t = record_layout(self.data, src), record_layout(self.data, tgt)
+        for lay in (lay_s, lay_t):
+            if not lay.get("provable"):
+                return None, f"the byte layout of {lay['record']} is not provable " \
+                             f"({lay.get('reason', 'no reason given')})"
+        spans = [(f["offset"], f["offset"] + f["length"],
+                  frozenset(self._read(f["name"], cur))) for f in lay_s["fields"]]
+        placed: Dict[str, OriginSet] = {}
+        for f in lay_t["fields"]:
+            lo, hi = f["offset"], f["offset"] + f["length"]
+            acc: Set[Origin] = set()
+            for s_lo, s_hi, origins in spans:
+                if s_lo < hi and lo < s_hi:
+                    acc |= origins
+            placed[f["name"]] = placed.get(f["name"], frozenset()) | frozenset(acc)
+        return placed, None
 
     def _changed_by(self, field: str) -> List[dict]:
         """Assignments writing this field; for a group, those writing any child.
@@ -1163,7 +1272,8 @@ class _Lineage:
         caller = _iface._event("get", "caller", "CALLER")
         for n, it in self.data.items():
             if isinstance(it, dict) and it.get("section") == "LINKAGE" \
-                    and it.get("kind") != "condition-name":
+                    and it.get("kind") != "condition-name" \
+                    and n.upper() not in self.own_linkage:
                 seed[n.upper()] = frozenset({(caller, False, None)})
         return seed
 
