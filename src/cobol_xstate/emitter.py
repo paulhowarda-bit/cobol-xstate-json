@@ -39,6 +39,8 @@ import re
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from mainframe_artifacts.output import dumps as _dumps_json
+
 from .data_division import expand_pic
 from .statechart import Machine
 
@@ -982,7 +984,7 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     out.append(f"import {{ {', '.join(_HELPERS)} }} from {_js_str(runtime_import)};")
     out.append("")
 
-    out.append("export const FIELDS = " + json.dumps(fields, indent=2) + ";")
+    out.append("export const FIELDS = " + _dumps_json(fields, indent=2) + ";")
     out.append("")
 
     # data actions: (context) => partial context
@@ -1028,7 +1030,7 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     # onDone. The shared `actors` object is filled before use (XState also resolves the
     # string `src` lazily, so order is not load-bearing).
     out.append("const actors = {};")
-    out.append("export const actorConfigs = " + json.dumps(actor_configs, indent=2) + ";")
+    out.append("export const actorConfigs = " + _dumps_json(actor_configs, indent=2) + ";")
     out.append("function wireInvokes(states) {")
     out.append("  for (const k in states) {")
     out.append("    const inv = states[k].invoke;")
@@ -1048,7 +1050,7 @@ def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) ->
     out.append("}")
     out.append("")
 
-    out.append("export const machineConfig = " + json.dumps(config, indent=2) + ";")
+    out.append("export const machineConfig = " + _dumps_json(config, indent=2) + ";")
     out.append("wireInvokes(machineConfig.states);")
     out.append("")
     out.append("export const machine = setup({ actions, guards, actors })"

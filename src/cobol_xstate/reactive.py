@@ -35,6 +35,8 @@ import copy
 import json
 from typing import Dict, List, Optional, Tuple
 
+from mainframe_artifacts.output import dumps as _dumps_json
+
 from . import VIEW_SCHEMA_VERSION
 from . import interface as _iface
 from .errors import ReactiveLoweringError
@@ -700,7 +702,7 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
     out.append(f"import {{ {', '.join(_HELPERS)} }} from {_js_str(runtime_import)};")
     out.append("")
 
-    out.append("export const FIELDS = " + json.dumps(fields, indent=2) + ";")
+    out.append("export const FIELDS = " + _dumps_json(fields, indent=2) + ";")
     out.append("")
 
     # data ops: (context) => partial context
@@ -761,7 +763,7 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
     out.append("")
 
     # The deployment contract: which events to feed in, which to expect out, the caveats.
-    out.append("export const manifest = " + json.dumps(lo.manifest, indent=2) + ";")
+    out.append("export const manifest = " + _dumps_json(lo.manifest, indent=2) + ";")
     out.append("")
 
     out.append("const actions = {};")
@@ -784,7 +786,7 @@ def emit_reactive_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT)
     out.append("}")
     out.append("")
 
-    out.append("export const machineConfig = " + json.dumps(config, indent=2) + ";")
+    out.append("export const machineConfig = " + _dumps_json(config, indent=2) + ";")
     out.append("export const machine = setup({ actions, guards })"
                ".createMachine(machineConfig);")
     out.append("export default machine;")

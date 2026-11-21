@@ -24,6 +24,7 @@ from mainframe_artifacts.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
 from mainframe_artifacts.logging_setup import configure_logging
 from mainframe_artifacts.output import make_run_dir as _make_run_dir
 from mainframe_artifacts.output import run_dir as _run_dir_of
+from mainframe_artifacts.output import dumps as _dumps_json
 from mainframe_artifacts.output import write_json, write_text
 from mainframe_artifacts.profiling import StageTimer
 from mainframe_artifacts.report import report_stages as _report_stages
@@ -194,7 +195,7 @@ def _run_jcl(args, source: str, source_name: str, default_stem: Optional[str],
                         (".jcl.prefetch.json", pre.report()),
                         (".jcl.fetch.json", fetched)):
         path = run_dir / f"{base}{suffix}"
-        path.write_text(_json.dumps(obj, indent=args.indent) + "\n", encoding="utf-8")
+        path.write_text(_dumps_json(obj, indent=args.indent) + "\n", encoding="utf-8")
         _log.info(f"[{source_name}] wrote {path}")
     _report_stages(_log, source_name, pre, fetched)
 

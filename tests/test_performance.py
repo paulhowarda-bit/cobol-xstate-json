@@ -4,6 +4,8 @@ clock, which would be flaky on shared CI."""
 
 from collections import deque
 
+import pytest
+
 import cobol_xstate.interface as iface_mod
 import cobol_xstate.lineage as lineage_mod
 import cobol_xstate.statechart as statechart_mod
@@ -500,14 +502,14 @@ def test_origins_fixpoint_answer_does_not_depend_on_visit_order():
         if IN[s] is not None and merged == IN[s]:
             continue
         IN[s] = merged
-        new_out = ref._apply(s, ref.states[s], merged, None)
+        new_out = ref._apply(s, ref.states[s], lineage_mod._Tracked.of(merged), None)
         if OUT[s] is None or new_out != OUT[s]:
             OUT[s] = new_out
             work.extend(t for t in ref.succs.get(s, []) if t in ref.states)
     expected = []
     for s in ref.states:
         if IN[s] is not None:
-            ref._apply(s, ref.states[s], IN[s], expected)
+            ref._apply(s, ref.states[s], lineage_mod._Tracked.of(IN[s]), expected)
 
     assert _Lineage(m).run()["rows"] == expected
     assert expected, "the fixture must actually produce lineage rows to compare"
@@ -1017,3 +1019,19 @@ def test_group_move_layouts_are_computed_once_not_per_visit(monkeypatch):
     build_lineage(build_machine(parse_program(_GROUP_MOVE_LOOP)))
     assert len(placed) > 2                 # the loop really revisits both MOVEs
     assert sorted(laid_out) == ["A-REC", "B-REC"]
+
+
+@pytest.mark.parametrize("walk, hops", [(0, 1), (0, 10_000), (10_000, 1), (10_000, 10_000)])
+def test_change_chain_maps_answer_the_same_whatever_their_shortcuts(monkeypatch, walk,
+                                                                    hops):
+    """The fixpoint keeps each state's origin map as the keys it changed (`_Node`), with
+    two shortcuts: a full snapshot every `_HOPS` nodes, and joins / equality tests that
+    diff against the common ancestor unless it is more than `_WALK` steps away, when
+    they fall back to whole maps. Neither may change an answer - so force each path,
+    on shapes with joins, loops and group MOVEs, and compare whole views."""
+    machines = [_wide_fields_machine(24, 40), _converging_handlers_machine(6, 4, 8),
+                build_machine(parse_program(_GROUP_MOVE_LOOP))]
+    expected = [_Lineage(m).run() for m in machines]
+    monkeypatch.setattr(lineage_mod, "_WALK", walk)
+    monkeypatch.setattr(lineage_mod, "_HOPS", hops)
+    assert [_Lineage(m).run() for m in machines] == expected

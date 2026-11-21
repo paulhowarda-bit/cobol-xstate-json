@@ -64,6 +64,82 @@ OriginSet = FrozenSet[Origin]
 # field -> the origins reaching it at a program point.
 State = Dict[str, OriginSet]
 
+
+class _Tracked(dict):
+    """A state's working map that remembers what each written key held before its
+    first write (``None``: absent), so the keys a state changed fall out of `_apply`
+    without comparing the whole map. Only ``cur[k] = v`` is tracked - which is the one
+    way `_apply` and its helpers write - and reads stay plain C-level dict reads."""
+    __slots__ = ("old",)
+
+    @classmethod
+    def of(cls, origins: State) -> "_Tracked":
+        """A private, tracked copy of ``origins``."""
+        out = cls(origins)
+        out.old = {}
+        return out
+
+    def __setitem__(self, key, value):
+        old = self.old
+        if key not in old:
+            old[key] = dict.get(self, key)
+        dict.__setitem__(self, key, value)
+
+    def put(self, values: State) -> None:
+        """``cur[k] = v`` for every item, in one C-level update."""
+        old, get = self.old, dict.get
+        for k in values:
+            if k not in old:
+                old[k] = get(self, k)
+        dict.update(self, values)
+
+    def changes(self) -> Tuple[Dict[str, OriginSet], Dict[str, Optional[OriginSet]]]:
+        """The written keys whose value really changed: ``(new values, old values)``."""
+        new, old = {}, {}
+        for k, was in self.old.items():
+            now = dict.__getitem__(self, k)
+            if now is not was and now != was:
+                new[k] = now
+                old[k] = was
+        return new, old
+
+
+class _Node:
+    """One program point's origin map, stored as the keys it changed from ``base``.
+
+    The fixpoint used to keep a full field -> origins dict per state; on a wide record
+    layout that is thousands of entries per state while a state changes about a dozen
+    (median 12 of 2,285 on an 11k-line program), so copying, merging and comparing
+    whole maps was the cost of the pass and a full map per state its memory. A node
+    keeps only ``delta``, plus a ``full`` snapshot once it is ``_HOPS`` nodes from the
+    last one, so a value is never more than ``_HOPS`` lookups away. Nodes are never
+    mutated once built, so ``base`` links can be shared freely.
+
+    ``h`` is an order-independent fingerprint of the WHOLE map (a sum over its entries),
+    kept up to date from each delta: two maps whose fingerprints differ differ, which
+    settles most "did this state's map change" tests at once. Equal fingerprints are
+    always confirmed key by key, so no answer rests on a hash."""
+    __slots__ = ("base", "delta", "depth", "hops", "full", "h")
+
+    def __init__(self, base: Optional["_Node"], delta: Dict[str, OriginSet],
+                 old: Dict[str, Optional[OriginSet]], full: Optional[dict] = None):
+        self.base = base
+        self.delta = delta
+        self.depth = base.depth + 1 if base is not None else 0
+        self.full = full
+        self.hops = 0 if full is not None else base.hops + 1
+        h = base.h if base is not None else 0
+        for k, v in delta.items():
+            was = old.get(k)
+            h += hash((k, v)) - (hash((k, was)) if was is not None else 0)
+        self.h = h
+
+
+_HOPS = 16          # a full snapshot at least every this many nodes down a chain
+_WALK = 32          # a common-ancestor walk longer than this falls back to full maps
+_MISSING = object()
+_NO_ORIGINS: OriginSet = frozenset()
+
 # A condition: (guard name, is it the NEGATED sense?). Negation is first-class because
 # the else / WHEN OTHER branch carries no guard of its own - its condition is precisely
 # the negation of the branches before it, and that negation is usually the business rule
@@ -295,6 +371,7 @@ class _Lineage:
         self._classify_memo: Dict[str, List[dict]] = {}
         self._exec_writes_memo: Dict[str, List[Tuple[str, List[str]]]] = {}
         self.flags: List[str] = []
+        self._flag_set: Set[str] = set()      # `flags` as a set: the dedup test
         # Primitive provenance facts, recorded during the final (row-emitting) pass so a
         # backward query can answer "where did THIS item's value come from" for an item
         # that never crosses the boundary itself - a dynamic CALL target being the case
@@ -395,7 +472,8 @@ class _Lineage:
         return out, origin
 
     def _flag(self, msg: str) -> None:
-        if msg not in self.flags:
+        if msg not in self._flag_set:
+            self._flag_set.add(msg)
             self.flags.append(msg)
 
     # -- path conditions ----------------------------------------------------
@@ -815,11 +893,12 @@ class _Lineage:
         return succ
 
     # -- transfer -----------------------------------------------------------
-    def _apply(self, name: str, st: dict, incoming: State,
+    def _apply(self, name: str, st: dict, cur: State,
                rows: Optional[List[dict]]) -> State:
-        """Run a state's entry actions over the origin map. When ``rows`` is given,
-        emit a row for every field of every event the state performs."""
-        cur: State = dict(incoming)
+        """Run a state's entry actions over the origin map ``cur`` - a private copy the
+        caller materialized (`_materialize`), updated in place and returned. When
+        ``rows`` is given, emit a row for every field of every event the state
+        performs."""
         for aname in st.get("entry", []) or []:
             prov = self.provenance.get(aname, {})
             cobol = prov.get("cobol", "")
@@ -1082,15 +1161,16 @@ class _Lineage:
         a group reads as the union over its leaves: every write to a group also writes
         its leaves (``_store``), so a leaf rewritten since is never hidden behind an
         older entry for the group. A group none of whose leaves was ever written reads
-        its own entry, if it has one."""
+        its own entry, if it has one. Callers only read the result: a field's own
+        (immutable) entry is returned as it is, not copied."""
         fu = name.upper()
         keys = self.group_reads.get(fu)
         if keys and any(k in cur for k in keys):
             acc: Set[Origin] = set()
             for k in keys:
-                acc |= cur.get(k, frozenset())
+                acc |= cur.get(k, _NO_ORIGINS)
             return acc
-        return set(cur.get(fu, frozenset()))
+        return cur.get(fu, _NO_ORIGINS)
 
     def _subgroups(self, name: str) -> List[str]:
         """``name`` and every item nested under it (FILLERs and 88-levels aside)."""
@@ -1109,11 +1189,12 @@ class _Lineage:
     def _store(self, name: str, origins: OriginSet, cur: State) -> None:
         """Write ``origins`` to ``name`` and, for a group, to every field under it - the
         coarse write, for a value whose bytes cannot be placed field by field."""
-        cur[name] = origins
+        values = {name: origins}
         for leaf in self.groups.get(name, ()):
-            cur[leaf] = origins
+            values[leaf] = origins
         for key in self.sub_fillers.get(name, ()):
-            cur[key] = origins
+            values[key] = origins
+        cur.put(values)
 
     _BARE_REF = re.compile(r"^([A-Z0-9][A-Z0-9-]*)(?:\s+(?:OF|IN)\s+[A-Z0-9][A-Z0-9-]*)*$")
 
@@ -1135,11 +1216,13 @@ class _Lineage:
         if m and m.group(1) == srcs[0] and len(srcs) == 1:
             placed, why = self._place_bytes(srcs[0], tgt, cur)
             if placed is not None:
-                cur[tgt] = frozenset(acc)
+                values = {tgt: frozenset(acc)}
                 for leaf in self.groups[tgt]:
-                    cur[leaf] = placed.get(leaf, frozenset())
+                    values[leaf] = placed.get(leaf, _NO_ORIGINS)
+                filler = placed.get(_FILLER, _NO_ORIGINS)
                 for key in self.sub_fillers[tgt]:
-                    cur[key] = placed.get(_FILLER, frozenset())
+                    values[key] = filler
+                cur.put(values)
                 return
         else:
             why = "the source is an expression, not one data item"
@@ -1158,13 +1241,17 @@ class _Lineage:
         sources, overlaps, why = plan
         if why is not None:
             return None, why
-        origins = [frozenset(self._read(n, cur)) for n in sources]
+        # `sources`: (name, is a group) - a field's own entry is already a frozenset
+        origins = [frozenset(self._read(n, cur)) if grp else cur.get(n, _NO_ORIGINS)
+                   for n, grp in sources]
         placed: Dict[str, OriginSet] = {}
         for name, hits in overlaps:
-            acc: Set[Origin] = set()
-            for i in hits:
-                acc |= origins[i]
-            placed[name] = placed.get(name, frozenset()) | frozenset(acc)
+            if len(hits) == 1:                # the usual case: one source field
+                acc = origins[hits[0]]
+            else:
+                acc = frozenset().union(*(origins[i] for i in hits))
+            prev = placed.get(name)
+            placed[name] = acc if prev is None else prev | acc
         return placed, None
 
     def _placement(self, src: str, tgt: str):
@@ -1191,7 +1278,8 @@ class _Lineage:
             lo, hi = f["offset"], f["offset"] + f["length"]
             overlaps.append((f["name"], [i for i, (s_lo, s_hi) in enumerate(spans)
                                          if s_lo < hi and lo < s_hi]))
-        return [f["name"] for f in lay_s["fields"]], overlaps, None
+        return ([(f["name"].upper(), f["name"].upper() in self.group_reads)
+                 for f in lay_s["fields"]], overlaps, None)
 
     def _changed_by(self, field: str) -> List[dict]:
         """Assignments writing this field; for a group, those writing any child.
@@ -1445,6 +1533,143 @@ class _Lineage:
             return "reached-predecessor-not-propagated"
         return "cascade"
 
+    # -- origin maps as change chains (see `_Node`) --------------------------------
+
+    @staticmethod
+    def _node(base: _Node, delta: Dict[str, OriginSet],
+              old: Dict[str, Optional[OriginSet]],
+              full: Optional[dict] = None) -> _Node:
+        """``base`` with ``delta`` applied (``old``: those keys' values in ``base``) -
+        or ``base`` itself when nothing changed. ``full``, when the caller already
+        holds the whole map, becomes the snapshot if this node is due one."""
+        if not delta:
+            return base
+        node = _Node(base, delta, old)
+        if node.hops >= _HOPS:
+            if full is None:
+                full = _Lineage._materialize(node)
+            full.old = None
+            node.full, node.hops = full, 0
+        return node
+
+    @staticmethod
+    def _materialize(node: _Node) -> _Tracked:
+        """The whole map at ``node``, as a fresh, private, write-tracked dict."""
+        chain = []
+        while node.full is None:
+            chain.append(node.delta)
+            node = node.base
+        out = _Tracked.of(node.full)
+        for delta in reversed(chain):
+            dict.update(out, delta)
+        return out
+
+    @staticmethod
+    def _get(node: _Node, key: str) -> Optional[OriginSet]:
+        while node.full is None:
+            delta = node.delta
+            if key in delta:
+                return delta[key]
+            node = node.base
+        return node.full.get(key)
+
+    @staticmethod
+    def _ancestor(a: _Node, b: _Node) -> Optional[_Node]:
+        """The nearest node both descend from, or None past `_WALK` steps."""
+        steps = 0
+        while a.depth > b.depth:
+            a, steps = a.base, steps + 1
+            if steps > _WALK:
+                return None
+        while b.depth > a.depth:
+            b, steps = b.base, steps + 1
+            if steps > _WALK:
+                return None
+        while a is not b:
+            a, b, steps = a.base, b.base, steps + 2
+            if steps > _WALK:
+                return None
+        return a
+
+    @staticmethod
+    def _path(node: _Node, top: _Node) -> Dict[str, OriginSet]:
+        """Every key changed between ``top`` and ``node``, with its value at ``node``."""
+        vals: Dict[str, OriginSet] = {}
+        while node is not top:
+            for k, v in node.delta.items():
+                if k not in vals:
+                    vals[k] = v
+            node = node.base
+        return vals
+
+    def _merge(self, nodes: List[_Node]) -> _Node:
+        """The union of several maps: a key's origins at a join are every
+        predecessor's. Only the keys changed since the predecessors' common ancestor
+        can differ between them, so only those are unioned; the rest is the ancestor's
+        map, shared. A common ancestor further than `_WALK` steps up (a loop's back
+        edge round a long body) merges the whole maps instead."""
+        top: Optional[_Node] = nodes[0]
+        for n in nodes[1:]:
+            top = self._ancestor(top, n)
+            if top is None:
+                return self._merge_full(nodes)
+        paths = [self._path(n, top) for n in nodes]
+        keys: Dict[str, None] = {}
+        for p in paths:
+            keys.update(dict.fromkeys(p))
+        delta: Dict[str, OriginSet] = {}
+        old: Dict[str, Optional[OriginSet]] = {}
+        for k in keys:
+            at_top = _MISSING
+            union = None
+            for p in paths:
+                v = p.get(k, _MISSING)
+                if v is _MISSING:
+                    if at_top is _MISSING:
+                        at_top = self._get(top, k)
+                    v = at_top
+                if v is None:
+                    continue
+                union = v if union is None else (union if union is v else union | v)
+            if at_top is _MISSING:
+                at_top = self._get(top, k)
+            if union is not at_top and union != at_top:
+                delta[k] = union
+                old[k] = at_top
+        return self._node(top, delta, old)
+
+    def _merge_full(self, nodes: List[_Node]) -> _Node:
+        merged = self._materialize(nodes[0])
+        for n in nodes[1:]:
+            for k, v in self._materialize(n).items():
+                prev = merged.get(k)
+                if prev is None:
+                    merged[k] = v
+                elif prev is not v:
+                    merged[k] = prev | v
+        delta, old = merged.changes()
+        return self._node(nodes[0], delta, old, merged)
+
+    def _same(self, a: _Node, b: _Node) -> bool:
+        """Whether two maps hold the same origins for every key."""
+        if a is b:
+            return True
+        if a.h != b.h:
+            return False
+        top = self._ancestor(a, b)
+        if top is None:
+            return dict(self._materialize(a)) == dict(self._materialize(b))
+        pa, pb = self._path(a, top), self._path(b, top)
+        for k in pa.keys() | pb.keys():
+            va, vb = pa.get(k, _MISSING), pb.get(k, _MISSING)
+            if va is _MISSING or vb is _MISSING:
+                at_top = self._get(top, k)
+                va = at_top if va is _MISSING else va
+                vb = at_top if vb is _MISSING else vb
+            if va is not vb and va != vb:
+                return False
+        return True
+
     def run(self, timer=None) -> dict:
         # Solved once per instance. The dynamic-call view wants the primitive facts this
         # pass records (`fills`/`flow`/`dynamic_sites`) and the lineage table wants the
@@ -1466,11 +1691,15 @@ class _Lineage:
                 if t in preds:
                     preds[t].append(s)
 
-        seed = self._seed()
+        # Every map is a chain of changes down from one empty root (see `_Node`), so
+        # any two maps have a common ancestor to diff and merge against.
+        empty = _Node(None, {}, {}, full={})
+        seed_map = self._seed()
+        seed = self._node(empty, dict(seed_map), {}, _Tracked.of(seed_map))
         # None = not yet computed, which is NOT the same as "computed and empty" - the
         # distinction is what lets an all-empty prefix still propagate to successors.
-        IN: Dict[str, Optional[State]] = {s: None for s in self.states}
-        OUT: Dict[str, Optional[State]] = {s: None for s in self.states}
+        IN: Dict[str, Optional[_Node]] = {s: None for s in self.states}
+        OUT: Dict[str, Optional[_Node]] = {s: None for s in self.states}
         # ORDER is what this pass costs. A state already queued is not queued again (the
         # reasons `_cond_flow` sets out above apply here with more force: a visit re-runs
         # `_apply` over a whole entry run), but dedup alone is not enough. A plain FIFO
@@ -1534,33 +1763,27 @@ class _Lineage:
             # Merging every predecessor's whole map, one `frozenset() | o` per field, was
             # the cost of the pass: 17.4M dict.get calls on a 4,236-line CICS program,
             # 8.7 of its 12 s, because a group input's fill seeds every leaf of a real
-            # copybook record (mean map width 341 fields there). Yet 81% of its states
-            # have exactly ONE predecessor, whose map can simply be shared - `_apply`
-            # copies its input, OUT entries are only ever reassigned, and the origin
-            # sets are frozen - and where there are several, the first writer of a
-            # field needs no union at all. Measured 2.9x on that corpus, byte-identical.
+            # copybook record (mean map width 341 fields there). 81% of its states have
+            # exactly ONE predecessor, whose map is simply shared; since group stores
+            # write every leaf (3ee1ee0) maps are wider still, so a join now unions only
+            # the keys its predecessors changed since their common ancestor (`_merge`),
+            # and "did it change" compares only those keys too (`_same`).
             live = [OUT[p] for p in preds.get(s, []) if OUT[p] is not None]
-            merged: State
             if s in entryset:
-                merged = dict(seed)
-            elif len(live) == 1:
+                live.insert(0, seed)
+            if len(live) == 1:
                 merged = live[0]
-                live = ()
             elif live:
-                # the first map needs no union - what merging it into {} would build
-                merged = dict(live[0])
-                live = live[1:]
+                merged = self._merge(live)
             else:
-                merged = {}
-            for om in live:
-                for f, o in om.items():
-                    prev = merged.get(f)
-                    merged[f] = o if prev is None else (prev if prev is o else prev | o)
-            if IN[s] is not None and merged == IN[s]:
+                merged = empty
+            if IN[s] is not None and self._same(merged, IN[s]):
                 continue                      # input unchanged - nothing to redo
             IN[s] = merged
-            new_out = self._apply(s, self.states[s], merged, None)
-            if OUT[s] is None or new_out != OUT[s]:
+            work_map = self._apply(s, self.states[s], self._materialize(merged), None)
+            delta, old = work_map.changes()
+            new_out = self._node(merged, delta, old, work_map)
+            if OUT[s] is None or not self._same(new_out, OUT[s]):
                 OUT[s] = new_out
                 for t in self.succs.get(s, []):
                     if t in self.states and t not in queued:
@@ -1590,7 +1813,7 @@ class _Lineage:
                         "events": lost,
                     })
                 continue
-            self._apply(s, self.states[s], IN[s], rows)
+            self._apply(s, self.states[s], self._materialize(IN[s]), rows)
 
         for u in unreached:
             n = sum(len(e["fields"]) for e in u["events"])
@@ -1676,6 +1899,9 @@ class _Lineage:
             }
         if timer is not None:
             timer.since("lineage:rows", t_rows)
+        # Only the solve reads these, and the view above is all that is asked for again;
+        # the Machine keeps this instance cached, so do not keep them alive with it.
+        self._kids, self._layouts, self._placements = None, {}, {}
         return self._view
 
 

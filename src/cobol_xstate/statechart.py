@@ -35,6 +35,7 @@ from decimal import Decimal
 from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from cobol_parser.analysis import _SOURCE_NAME
+from mainframe_artifacts.output import dumps as _dumps_json
 from mainframe_artifacts.synonyms import FROM_RESOLVER, SynonymLookup
 
 from . import VIEW_SCHEMA_VERSION
@@ -236,7 +237,7 @@ class Machine:
             obj: dict = {"machine": bundle["machine"], "charts": bundle["charts"]}
         else:
             obj = bundle
-        return json.dumps(obj, indent=indent)
+        return _dumps_json(obj, indent=indent)
 
 
 # --------------------------------------------------------------------------- #
