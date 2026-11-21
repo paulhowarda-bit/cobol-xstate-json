@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import VIEW_SCHEMA_VERSION
 from . import interface as _iface
+from .errors import ViewBudgetExceeded
 from .emitter import (
     _para_of, _target_owner, edge_target, iter_transitions, order_index,
     perform_target as _perform_target,
@@ -118,8 +119,23 @@ def _successors(st: dict) -> List[Tuple[dict, str]]:
     return out
 
 
+#: How many walk steps one business view may take before it is refused, by default.
+#:
+#: The collapse walk can need exponentially many steps: a technical region whose paragraphs
+#: are both PERFORMed and fallen into doubles its distinct stacks at every level, and a
+#: program whose PERFORMs could recurse is walked per whole stack (`_call_sites`). One
+#: count covers both - every step costs about 10 us and at most about 1 KB while its walk
+#: is live - so 250,000 is a few seconds and at most a couple of hundred MB. No example
+#: program needs more than 35, and an 11,000-line generated one needs 5,614.
+#:
+#: Exceeding it is a FAILURE of this view, never a shorter answer: a cut-off walk would
+#: return a transition list that reads as complete, and nothing downstream could tell.
+#: `ViewBudgetExceeded` says how far it got and how to lift the limit; 0 means none.
+BUSINESS_BUDGET = 250_000
+
+
 class _BusinessView:
-    def __init__(self, machine: Machine):
+    def __init__(self, machine: Machine, budget: int = BUSINESS_BUDGET):
         self.machine = machine
         self.config = machine.config
         self.states: Dict[str, dict] = self.config.get("states", {})
@@ -148,8 +164,16 @@ class _BusinessView:
         self.finals = {n for n, st in self.states.items() if st.get("type") == "final"}
         self.flags: List[str] = []
         self._business_memo: Dict[str, bool] = {}
+        self._quiet = False           # the call-site pre-pass steps without flagging
+        self._under_memo: Dict[tuple, tuple] = {}
+        self._budget = budget
+        self._steps = 0
+        self._found: List[dict] = []         # the flow's transitions, for the refusal
+        self._contexts = 0
 
     def _flag(self, msg: str) -> None:
+        if self._quiet:
+            return
         if msg not in self.flags:
             self.flags.append(msg)
 
@@ -217,8 +241,12 @@ class _BusinessView:
         return {"name": name, "condition": tree, "field": _guard_field(tree),
                 "kind": "control" if self._control_guard(name) else "business"}
 
-    def _step(self, state: str, stack: tuple):
-        """Yield ``(label, (next_state, next_stack))`` for one control step from a config."""
+    def _step(self, state: str, stack: tuple, check_recursion: bool = True):
+        """Yield ``(label, (next_state, next_stack))`` for one control step from a config.
+
+        ``check_recursion=False`` is for the call-site walk, which runs only once
+        `_call_sites` has shown that no PERFORM can land inside a range already on the
+        stack - so the check could never fire, and it would need the whole stack."""
         st = self.states.get(state, {})
         if state in self.finals:                       # program end, or a return
             if stack and stack[-1][1] is not None:
@@ -236,7 +264,7 @@ class _BusinessView:
                 self._flag(f"PERFORM {name}: target unresolved; call not followed")
                 if cont is not None:
                     yield ({}, (cont, stack))
-            elif any(owner & fo for fo, _ in stack):
+            elif check_recursion and any(owner & fo for fo, _ in stack):
                 self._flag(f"recursive PERFORM {name}; not followed")
                 if cont is not None:
                     yield ({}, (cont, stack))
@@ -256,18 +284,187 @@ class _BusinessView:
             else:
                 yield (lab, (target, stack))
 
-    # A technical region can hold exponentially many distinct configurations even after
-    # the subsumption below - a paragraph that is both PERFORMed and fallen into gives
-    # every level two continuations - so unlike lineage's fixpoint bound this CANNOT be a
-    # proof. It is an admitted policy, and the honest part is the flag: it names the
-    # region and says how much it did recover, so a short list is never mistaken for a
-    # complete one. Costs about a second when fully spent; the largest example program
-    # needs 25 steps for its entire build, so the headroom is four orders of magnitude.
-    # A legitimately huge program could still be truncated here - it would also have more
-    # business edges than anyone can read, and it would be told so.
-    _WALK_STEPS = 100_000
+    def _call_sites(self):
+        """What can sit under each PERFORM frame - or ``None`` when the per-stack walk
+        has to be kept.
 
-    def _next_business(self, cfg: tuple) -> List[dict]:
+        A frame is a call site: (the range it owns, where it returns to). This is
+        reachability over (state, top frame) from the initial state, and while it runs
+        it records, for every frame pushed, which frame was on top at the time. Those
+        records are the whole truth about the stacks: a stack is realizable exactly when
+        each frame in it was pushed on top of the one beneath it somewhere, because
+        nothing a PERFORMed range does before it returns depends on what is under it.
+        So a state reached with a given top frame is reached under EVERY stack that frame
+        can sit on, and the business walk can carry the top frame alone. The count of
+        (state, top frame) pairs is at most states times call sites, where the count of
+        stacks was exponential in the nesting depth.
+
+        "Nothing depends on what is under it" has one exception: the recursion check,
+        which refuses a PERFORM of a range that overlaps one already on the stack. If any
+        realizable stack could trigger it, this returns ``None`` and the flow keeps the
+        per-stack walk, whose answer it would otherwise change.
+        """
+        initial = self.config.get("initial")
+        below: Dict[tuple, Dict[Optional[tuple], None]] = {}
+        returned: Dict[tuple, None] = {}    # frames some walk returns out of
+        seen = set()
+        work: List[tuple] = []
+
+        def reach(state, top):
+            if (state, top) not in seen:
+                seen.add((state, top))
+                work.append((state, top))
+
+        reach(initial, None)
+        self._quiet = True
+        try:
+            while work:
+                state, top = work.pop()
+                stack = () if top is None else (top,)
+                for _, (nxt, nstack) in self._step(state, stack, False):
+                    if len(nstack) > len(stack):                  # a PERFORM
+                        frame = nstack[-1]
+                        lows = below.setdefault(frame, {})
+                        if top not in lows:
+                            lows[top] = None
+                            if frame in returned:
+                                reach(frame[1], top)
+                        reach(nxt, frame)
+                    elif len(nstack) < len(stack):                # its return
+                        returned[top] = None
+                        for low in below.get(top, ()):
+                            reach(nxt, low)
+                    else:
+                        reach(nxt, top)
+        finally:
+            self._quiet = False
+        return None if self._may_recurse(below) else below
+
+    @staticmethod
+    def _may_recurse(below) -> bool:
+        """Could some realizable stack hold two frames whose ranges overlap?
+
+        Asked over the ranges rather than the frames: an edge X -> Y says a range Y was
+        PERFORMed while range X was on top. That graph only adds paths (two frames with
+        the same range but different call sites become one node), so a "yes" can be
+        spurious - which costs speed, never correctness - and a "no" is a proof.
+        Overlap happens on a cycle, or between two distinct ranges sharing a paragraph
+        (a THRU span and a paragraph inside it, say) with a path from one to the other.
+        """
+        up: Dict[frozenset, Dict[frozenset, None]] = {}
+        nodes: Dict[frozenset, None] = {}
+        for frame, lows in below.items():
+            nodes[frame[0]] = None
+            for low in lows:
+                if low is not None:
+                    up.setdefault(low[0], {})[frame[0]] = None
+                    nodes[low[0]] = None
+        colour: Dict[frozenset, int] = {}                 # 1 on the path, 2 finished
+        for root in nodes:
+            if root in colour:
+                continue
+            colour[root] = 1
+            path = [(root, iter(up.get(root, ())))]
+            while path:
+                node, it = path[-1]
+                nxt = next(it, None)
+                if nxt is None:
+                    colour[node] = 2
+                    path.pop()
+                elif colour.get(nxt) == 1:
+                    return True                           # a cycle: a range in itself
+                elif nxt not in colour:
+                    colour[nxt] = 1
+                    path.append((nxt, iter(up.get(nxt, ()))))
+        owners: Dict[str, List[frozenset]] = {}
+        for node in nodes:
+            for para in node:
+                owners.setdefault(para, []).append(node)
+        reach_memo: Dict[frozenset, set] = {}
+
+        def reaches(src):
+            got = reach_memo.get(src)
+            if got is None:
+                got, todo = set(), [src]
+                while todo:
+                    for n in up.get(todo.pop(), ()):
+                        if n not in got:
+                            got.add(n)
+                            todo.append(n)
+                reach_memo[src] = got
+            return got
+
+        for nodes_here in owners.values():
+            for i, x in enumerate(nodes_here):
+                for y in nodes_here[i + 1:]:
+                    if y in reaches(x) or x in reaches(y):
+                        return True
+        return False
+
+    def _next_business(self, cfg: tuple, below=None) -> List[dict]:
+        """`_walk` from a config, in the call-site form when ``below`` is given.
+
+        In that form a config's stack is its top frame alone, standing for every stack
+        that frame can sit on (`_call_sites`). A walk can run on that, because nothing it
+        does depends on what is under the top frame - until it returns out of it. So it
+        runs with the bottom frame *hidden*, and if it ever returns out of it, the walk is
+        thrown away and run again once per frame that can sit there (``None``: nothing),
+        now one frame deeper. Every walk that finishes is therefore exactly the walk from
+        each real stack it stands for - same visiting order, same pruning, same results -
+        and only the walks that genuinely need more of the stack pay for it.
+
+        Without ``below`` this is the walk from the config's whole stack.
+        """
+        if below is None:
+            return self._walk(cfg[0], cfg[1], False, None)
+        state, stack = cfg
+        results: List[dict] = []
+        contexts: List[tuple] = [(stack, bool(stack))]
+        while contexts:
+            ctx, hidden = contexts.pop()
+            got = self._walk(state, ctx, hidden, below)
+            if got is None:
+                # Pushed in reverse so they run in `below`'s order.
+                deeper = []
+                for low in below.get(ctx[0], ()):
+                    if low is None:
+                        deeper.append((ctx, False))
+                    else:
+                        chain, more = self._unique_under(low, below)
+                        deeper.append((chain + (low,) + ctx, more))
+                contexts.extend(reversed(deeper))
+            else:
+                results.extend(got)
+        return results
+
+    def _unique_under(self, frame: tuple, below) -> tuple:
+        """``(chain, hidden)``: the frames that MUST be under ``frame``, bottom first,
+        down to the first one with a choice of callers (``hidden``) or none at all.
+
+        A restarted walk takes that chain whole. Knowing more of the stack never changes
+        a walk until it returns that far, and a frame with one possible caller offers no
+        choice to restart over. Without this a 400-deep PERFORM chain restarted its walk
+        400 times, one level deeper each time. Memoized: ``below`` is fixed for the run.
+        """
+        got = self._under_memo.get(frame)
+        if got is None:
+            chain: List[tuple] = []
+            hidden, f = True, frame
+            while True:
+                lows = below.get(f, ())
+                if len(lows) != 1:
+                    break
+                low = next(iter(lows))
+                if low is None:
+                    hidden = False
+                    break
+                chain.append(low)
+                f = low
+            got = self._under_memo[frame] = (tuple(reversed(chain)), hidden)
+        return got
+
+    def _walk(self, src_state: str, src_stack: tuple, hidden: bool, below) -> \
+            Optional[List[dict]]:
         """From a business config, walk through technical configs (following calls/returns)
         to the next business / terminal configs, accumulating guards, events, and via-states.
 
@@ -302,9 +499,12 @@ class _BusinessView:
         # from a LATER business state must also reach, and each of those is a real edge.
         arrived: Dict[tuple, List[frozenset]] = {}
 
-        src_state, src_stack = cfg
         if (src_state in self.finals) and not src_stack:
             return results
+        # `hidden`: src_stack[0] stands for whatever is under it, so returning out of it
+        # is a question this walk cannot answer - it answers None, and is run again
+        # deeper (`_next_business`). The stack never drops below that frame otherwise:
+        # a return out of a pushed frame leaves it in place.
 
         # `via` and `guards` ride as CONS CHAINS - (head, rest) - rather than lists.
         # Extending a list copies it, so a walk whose paths grow long paid for the whole
@@ -321,23 +521,22 @@ class _BusinessView:
         # breadth-first reaches the loop's exits immediately.
         heap: List[tuple] = []
         seq = 0
-        for lab, nxt in self._step(src_state, src_stack):
+        for lab, nxt in self._step(src_state, src_stack, below is None):
+            if hidden and not nxt[1]:
+                return None
             g0 = (self._guard_dict(lab["guard"]), None) if lab.get("guard") else None
             e0 = (lab["event"],) if lab.get("event") else ()
             names = frozenset([lab["guard"]] if lab.get("guard") else [])
             heapq.heappush(heap, (len(names), seq, nxt, names, g0, e0, None))
             seq += 1
 
-        steps = 0
         while heap:
-            steps += 1
-            if steps > self._WALK_STEPS:
-                self._flag(f"{src_state}: the collapsed region below it has more distinct "
-                           f"paths than this view enumerates; "
-                           f"{len(results) or 'NO'} outgoing business edge(s) recovered "
-                           f"before the budget ran out - INCOMPLETE, read the faithful "
-                           f"machine for this part of the program")
-                break
+            self._steps += 1
+            if self._budget and self._steps > self._budget:
+                raise ViewBudgetExceeded(
+                    "business", self._budget, "walk steps", "--business-budget",
+                    f"stopped walking from {src_state} after {self._contexts:,} call "
+                    f"context(s) and {len(self._found):,} business transition(s)")
             _, _, c, names, guards, events, via = heapq.heappop(heap)
             state, stack = c
             prior = arrived.setdefault((state, stack, events), [])
@@ -345,11 +544,15 @@ class _BusinessView:
                 continue
             prior.append(names)
             if ((state in self.finals) and not stack) or self._is_business(state):
-                results.append({"to": state, "to_config": c, "guards": _chain(guards),
+                results.append({"to": state,
+                                "to_config": c if below is None else (state, stack[-1:]),
+                                "guards": _chain(guards),
                                 "events": list(events), "via": _chain(via)})
                 continue
             via2 = (state, via)
-            for lab, nxt in self._step(state, stack):
+            for lab, nxt in self._step(state, stack, below is None):
+                if hidden and not nxt[1]:
+                    return None
                 g2 = (self._guard_dict(lab["guard"]), guards) if lab.get("guard") else guards
                 e2 = events + (lab["event"],) if lab.get("event") else events
                 n2 = names | {lab["guard"]} if lab.get("guard") else names
@@ -360,19 +563,25 @@ class _BusinessView:
     def _build_flow(self) -> Tuple[List[dict], List[dict]]:
         """Collapse the machine into (entry edges, business transitions) by reachability over
         configurations from the initial state - so a technical initial (a loop head) and every
-        performed paragraph are followed correctly."""
+        performed paragraph are followed correctly.
+
+        A configuration's stack is its top PERFORM frame alone when `_call_sites` allows
+        it, the whole stack otherwise. The transitions are the same set either way; the
+        call-site form can find them in a different order, and keep a different one of
+        several collapsed paths (`via`) for the same edge."""
         initial = self.config.get("initial")
         entry: List[dict] = []
-        transitions: List[dict] = []
+        transitions: List[dict] = self._found
         if initial not in self.states:
             return entry, transitions
 
+        below = self._call_sites()
         worklist: List[tuple] = []
         if self._is_business(initial):
             entry.append({"to": initial, "guards": [], "events": [], "via": []})
             worklist.append((initial, ()))
         else:
-            for nb in self._next_business((initial, ())):
+            for nb in self._next_business((initial, ()), below):
                 entry.append({"to": nb["to"], "guards": nb["guards"],
                               "events": nb["events"], "via": nb["via"]})
                 worklist.append(nb["to_config"])
@@ -384,10 +593,11 @@ class _BusinessView:
             if cfg in seen_cfg:
                 continue
             seen_cfg.add(cfg)
+            self._contexts = len(seen_cfg)
             state, stack = cfg
             if (state in self.finals) and not stack:
                 continue
-            for nb in self._next_business(cfg):
+            for nb in self._next_business(cfg, below):
                 k = (state, nb["to"], tuple(g["name"] for g in nb["guards"]),
                      tuple(nb["events"]))
                 if k not in tr_seen:
@@ -649,6 +859,9 @@ class _BusinessView:
         return cfg
 
 
-def build_business_view(machine: Machine) -> dict:
-    """Return the business-view distillation overlay for ``machine`` (pure read; see module)."""
-    return _BusinessView(machine).build()
+def build_business_view(machine: Machine, budget: int = BUSINESS_BUDGET) -> dict:
+    """Return the business-view distillation overlay for ``machine`` (pure read; see module).
+
+    Raises `ViewBudgetExceeded` when the walk needs more than ``budget`` steps (0: no
+    limit) - see `BUSINESS_BUDGET`."""
+    return _BusinessView(machine, budget).build()

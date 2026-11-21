@@ -8,6 +8,8 @@ labelling, internal-action stripping, and the honest PERFORM flag.
 
 import json
 
+import pytest
+
 from cobol_xstate.business import build_business_view, _is_control_guard
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
@@ -443,3 +445,130 @@ def test_a_working_storage_cursor_names_its_real_table_here_too():
     blob = json.dumps(view)
     assert "<cursor ACCT_CSR>" not in blob
     assert "T_DMAA_ACC_ANAL" in blob
+
+
+def _layered(depth, width=4, calls=3):
+    """Paragraphs in `depth` levels, each PERFORMing `calls` paragraphs of the level
+    below from separate states, each with a business decision: calls**depth call paths."""
+    a = lambda s: "       " + s
+    lines = [a("IDENTIFICATION DIVISION."), a("PROGRAM-ID. LAYERS."), a("DATA DIVISION."),
+             a("WORKING-STORAGE SECTION.")]
+    lines += [a(f"01 X{i}-{j} PIC 9(4) VALUE 0.")
+              for i in range(depth + 1) for j in range(width)]
+    lines += [a("PROCEDURE DIVISION."), a("0000-MAIN.")]
+    for j in range(width):
+        lines += [a(f"    PERFORM L0-{j}."), a(f"    IF X0-{j} > 5 ADD 1 TO X0-{j} END-IF.")]
+    lines.append(a("    STOP RUN."))
+    for i in range(depth + 1):
+        for j in range(width):
+            lines += [a(f"L{i}-{j}."), a(f"    IF X{i}-{j} > 0"),
+                      a(f"        COMPUTE X{i}-{j} = X{i}-{j} + 1"), a("    END-IF.")]
+            if i < depth:
+                for k in range(calls):
+                    t = (j + k) % width
+                    lines += [a(f"    PERFORM L{i + 1}-{t}."),
+                              a(f"    IF X{i}-{j} > {k} ADD 1 TO X{i}-{t} END-IF.")]
+    return "\n".join(lines) + "\n"
+
+
+def _fan(levels):
+    """Each paragraph PERFORMs the next and then falls into it, so every level doubles
+    the distinct stacks a single walk through the technical region has to cover."""
+    a = lambda s: "       " + s
+    lines = [a("IDENTIFICATION DIVISION."), a("PROGRAM-ID. FAN."), a("DATA DIVISION."),
+             a("WORKING-STORAGE SECTION."), a("01 X PIC 9(4) VALUE 0."),
+             a("01 Y PIC 9(4) VALUE 0."), a("PROCEDURE DIVISION."), a("0000-MAIN."),
+             a("    COMPUTE X = X + 1."), a("    PERFORM P00."), a("    DISPLAY X."),
+             a("    STOP RUN.")]
+    for i in range(levels):
+        lines += [a(f"P{i:02d}."), a("    MOVE X TO Y.")]
+        if i + 1 < levels:
+            lines.append(a(f"    PERFORM P{i + 1:02d}."))
+    return "\n".join(lines) + "\n"
+
+
+def test_a_view_over_its_budget_is_refused_not_cut_short():
+    """Past its budget the business view is NOT produced. A walk cut off where the
+    budget ran out returns a transition list that reads as complete, and nothing
+    downstream could tell; so the refusal is an exception that names the budget, says
+    how far the walk got, and how to lift it. Lifting it gives the full answer."""
+    from cobol_xstate import ViewBudgetExceeded
+    machine = build_machine(parse_program(_fan(12)), source_name="fan.cbl")
+    with pytest.raises(ViewBudgetExceeded) as caught:
+        build_business_view(machine, budget=500)
+    exc = caught.value
+    assert (exc.view, exc.limit, exc.unit, exc.knob) == \
+        ("business", 500, "walk steps", "--business-budget")
+    assert "Nothing partial was written" in str(exc)
+    assert "--business-budget 0 for no limit" in str(exc)
+    full = build_business_view(machine, budget=0)
+    assert full["transitions"] and full == build_business_view(machine)
+
+
+def _edges(view):
+    return sorted((t["from"], t["to"], json.dumps(t["guards"]), tuple(t["events"]))
+                  for t in view["transitions"])
+
+
+def test_nested_performs_are_walked_per_call_site_not_per_call_path(monkeypatch):
+    """Twelve levels of PERFORM, three call sites each, is 3^12 = 531,441 distinct call
+    stacks. Walked per stack that is hours and gigabytes; walked per top call site it is
+    a few hundred contexts - with every transition still there, not cut off."""
+    from cobol_xstate.business import _BusinessView
+    walked = []
+    real = _BusinessView._walk
+
+    def counting(self, *a):
+        walked.append(1)
+        return real(self, *a)
+
+    monkeypatch.setattr(_BusinessView, "_walk", counting)
+    view = build_business_view(build_machine(parse_program(_layered(12)),
+                                             source_name="layers.cbl"))
+    assert len(walked) < 2_000
+    # 4 paragraphs per level, each with 1 + 3 decisions; every one of them is a source.
+    assert len(view["transitions"]) == 792
+
+
+def test_the_call_site_walk_finds_exactly_the_per_stack_transitions(monkeypatch):
+    """The call-site form is a speed-up, not a new answer: on every example and on a
+    nested program it yields the same set of business transitions as walking each whole
+    PERFORM stack, and the same entry edges and flags. Only the order, and which of
+    several collapsed paths is kept as `via`, may differ."""
+    from cobol_xstate.business import _BusinessView
+    sources = [(n.name, n.read_text()) for n in sorted(EXAMPLES.glob("*.cbl"))]
+    sources.append(("layers.cbl", _layered(4)))
+    # Returns out of a frame and then PERFORMs the very same call site again, reaching
+    # a stack it already reached. A walk that merged the stacks it could be standing on
+    # into one walk, rather than restarting per stack, kept a third, P06 -> P06 edge
+    # here: its route was one the per-stack walk prunes as redundant.
+    a = lambda s: "       " + s
+    sources.append(("reenter.cbl", "\n".join(a(s) for s in [
+        "IDENTIFICATION DIVISION.", "PROGRAM-ID. REENTER.", "DATA DIVISION.",
+        "WORKING-STORAGE SECTION.", "01 X0 PIC 9(4) VALUE 0.", "01 X3 PIC 9(4) VALUE 0.",
+        "PROCEDURE DIVISION.", "0000-MAIN.", "    PERFORM P01.", "    STOP RUN.",
+        "P01.", "    PERFORM P05 UNTIL X3 > 0.", "P05.", "    PERFORM P06 UNTIL X0 > 0.",
+        "P06.", "    COMPUTE X0 = X3 + 1."]) + "\n"))
+    for name, src in sources:
+        machine = build_machine(parse_program(src), source_name=name)
+        fast = build_business_view(machine)
+        with monkeypatch.context() as m:
+            m.setattr(_BusinessView, "_call_sites", lambda self: None)
+            slow = build_business_view(machine)
+        assert _edges(fast) == _edges(slow), name
+        assert fast["entry"] == slow["entry"], name
+        assert sorted(fast["flags"]) == sorted(slow["flags"]), name
+
+
+def test_a_perform_that_could_recurse_keeps_the_per_stack_walk():
+    """The call-site form relies on nothing below the top frame mattering - and the
+    recursion check, which refuses a PERFORM of a range already on the stack, reads the
+    whole stack. Where it could fire the flow keeps walking whole stacks, so it still
+    reports the recursion rather than following it."""
+    from cobol_xstate.business import _BusinessView
+    src = (EXAMPLES / "recur.cbl").read_text()
+    machine = build_machine(parse_program(src), source_name="recur.cbl")
+    assert _BusinessView(machine)._call_sites() is None
+    assert any("recursive PERFORM" in f for f in build_business_view(machine)["flags"])
+    layered = build_machine(parse_program(_layered(3)), source_name="layers.cbl")
+    assert _BusinessView(layered)._call_sites() is not None

@@ -33,7 +33,8 @@ from mainframe_artifacts.profiling import StageTimer
 
 from . import PRODUCER
 from .artifacts import build_artifacts
-from .business import build_business_view
+from .business import BUSINESS_BUDGET, build_business_view
+from .errors import ViewBudgetExceeded
 from .dependents import build_dependents
 from .dynamic_calls import annotate_artifacts, build_dynamic_calls
 from .emitter import emit_setup_module
@@ -73,6 +74,11 @@ class Analysis:
     #: door, and then :meth:`dependents` is None too, because "nobody told us" is not
     #: "nothing calls this program".
     dependents_lookup: Optional[Any] = None
+
+    #: Walk steps the business view may take before it is refused (0: no limit). See
+    #: ``business.BUSINESS_BUDGET``: past it the view raises ``ViewBudgetExceeded``
+    #: rather than return a shorter answer that would read as complete.
+    business_budget: int = BUSINESS_BUDGET
 
     _art: Optional[dict] = field(default=None, repr=False)
     _dyn: Optional[dict] = field(default=None, repr=False)
@@ -124,9 +130,12 @@ class Analysis:
         """Scaffolding collapsed to boundary, decision and calculation states.
 
         The only one of the three that genuinely recomputed end to end: it builds a fresh
-        _BusinessView every call, over a Machine-cached interface."""
+        _BusinessView every call, over a Machine-cached interface.
+
+        Raises ``ViewBudgetExceeded`` when the walk needs more than ``business_budget``
+        steps; the view is then not produced at all, and asking again raises again."""
         if self._bus is None:
-            self._bus = build_business_view(self.machine)
+            self._bus = build_business_view(self.machine, self.business_budget)
         return self._bus
 
     def reactive(self) -> dict:
@@ -202,7 +211,8 @@ def analyze(source: str, *, source_name: str = "<source>",
             dependents: Optional[Mapping[str, Sequence[dict]]] = None,
             dependents_resolver: Optional[Callable[..., Any]] = None,
             timer: Optional[StageTimer] = None,
-            source_path: Optional[str] = None) -> Analysis:
+            source_path: Optional[str] = None,
+            business_budget: int = BUSINESS_BUDGET) -> Analysis:
     """Retrieve, parse and model one COBOL program.
 
     Four ways to reach the estate, all explicit:
@@ -232,6 +242,10 @@ def analyze(source: str, *, source_name: str = "<source>",
 
     ``source_path`` is the file ``source`` was read from, when there is one. It is never
     a member: ``COPY X.`` in ``X.cbl`` must not find ``X.cbl`` itself beside it.
+
+    ``business_budget`` caps the walk steps of the business view (0: no limit). A view
+    that needs more is refused with ``ViewBudgetExceeded`` - never cut short - and lifting
+    the cap for that one program gets the full answer.
     """
     timer = timer or StageTimer(_log, False, source_name)
     exclude = (source_path,) if source_path else ()
@@ -319,7 +333,8 @@ def analyze(source: str, *, source_name: str = "<source>",
                if (dependents or dependents_resolver is not None) else None)
     analysis = Analysis(machine=machine, program=program, prefetch=pre,
                         source_name=source_name, bind_jobs=tuple(bind_jobs),
-                        copybook_errors=copybook_errors, dependents_lookup=reverse)
+                        copybook_errors=copybook_errors, dependents_lookup=reverse,
+                        business_budget=business_budget)
     if reverse is not None:
         # Built here rather than at write time: building it is what ASKS the host, the
         # point of need is the run, and a gather run has to make the asks to record them.
@@ -462,8 +477,11 @@ def write_views(analysis: Analysis, dest, *, base: Optional[str] = None,
     Per-view failures are isolated exactly as the CLI isolates them. A companion that
     CRASHES is a warning naming the view; a ``reactive`` view the lowering REFUSES is a
     note, because the refusal is a fact about the program rather than a failure of the
-    run. Either way that name is absent from the returned mapping and the rest of the
-    run's artifacts are still written. The bundle and the two retrieval reports are not
+    run. A view refused for exceeding its budget (``ViewBudgetExceeded``) is an ERROR
+    naming the budget and how to lift it, and nothing partial is written for it - even
+    under ``debug``, since there is no defect to show a traceback for. In every case that
+    name is absent from the returned mapping and the rest of the run's artifacts are
+    still written. The bundle and the two retrieval reports are not
     isolated - they are the run's product, and a failure there is the run's failure.
     ``debug=True`` re-raises instead of isolating (what ``--debug`` does).
     """
@@ -516,6 +534,13 @@ def write_views(analysis: Analysis, dest, *, base: Optional[str] = None,
                     else:
                         write_json(path, _view(name), indent)
         except Exception as exc:
+            if isinstance(exc, ViewBudgetExceeded) and name in _ISOLATED:
+                # Not a crash and not a fact about the program: the view needed more work
+                # than it is allowed. Nothing partial is written - a shortened view would
+                # read as complete - so this is an ERROR the caller can see, naming how
+                # to lift the limit. The run's other artifacts are unaffected.
+                _log.error(f"[{analysis.source_name}] ERROR: {exc}")
+                continue
             if name == "reactive" and isinstance(exc, NotImplementedError):
                 # The lowering REFUSES some programs (CICS handler regions, recursive
                 # PERFORM). That is a fact about the program rather than a failure of the

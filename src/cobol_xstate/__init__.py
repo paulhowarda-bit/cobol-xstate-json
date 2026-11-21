@@ -53,6 +53,7 @@ from .errors import (
     CopybookError,
     ParseError,
     ReactiveLoweringError,
+    ViewBudgetExceeded,
     SourceFormatError,
 )
 from .normalizer import normalize, CodeLine, SourceFormat
@@ -94,6 +95,7 @@ __all__ = [
     "ParseError",
     "CopybookError",
     "ReactiveLoweringError",
+    "ViewBudgetExceeded",
     "RuntimeAssetMissing",
 ]
 

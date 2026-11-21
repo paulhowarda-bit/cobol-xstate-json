@@ -32,8 +32,9 @@ from mainframe_artifacts.report import report_stages as _report_stages
 from . import PACKAGE_LOGGER
 from .api import analyze, artifact_base, gather, write_views
 from .bind import JclSupportMissing
+from .business import BUSINESS_BUDGET
 from .bind import jcl_api as _jcl_api
-from .errors import CobolXstateError
+from .errors import CobolXstateError, ViewBudgetExceeded
 from .normalizer import SourceFormat
 from .runtime_assets import read_runtime_asset
 
@@ -69,6 +70,17 @@ def _artifact_base(args, default_stem: Optional[str], program_id: str) -> str:
 def _resolve_out_path(args, base: str, run_dir: Path) -> Path:
     """Where this run's primary artifact goes."""
     return run_dir / f"{base}{_TARGET_EXT.get(args.target, '.json')}"
+
+
+def _budget(text: str) -> int:
+    """A budget: a whole number of steps, 0 meaning no limit."""
+    try:
+        n = int(text)
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a step count (0 = no limit)")
+    return n
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,6 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-business", action="store_true",
                    help="skip the companion <name>.business.json that the default run "
                         "writes alongside the bundle")
+    p.add_argument("--business-budget", type=_budget, default=BUSINESS_BUDGET,
+                   metavar="STEPS",
+                   help=f"walk steps the business view may take (default "
+                        f"{BUSINESS_BUDGET:,}; 0 = no limit). A view that needs more is "
+                        f"NOT written - never a shortened one - and the run logs an "
+                        f"ERROR saying so; the other artifacts are unaffected. Raise it, "
+                        f"or pass 0, to get that program's full business view.")
     p.add_argument("--no-reactive", action="store_true",
                    help="skip the companion <name>.reactive.json that the default run "
                         "writes alongside the bundle")
@@ -392,7 +411,8 @@ def _run(args, timing_sink=None) -> int:
                            synonym_resolver=synonym_resolver,
                            dependents=dependents,
                            dependents_resolver=dependents_resolver,
-                           retrieve=not args.no_fetch, source_path=source_path)
+                           retrieve=not args.no_fetch, source_path=source_path,
+                           business_budget=args.business_budget)
     except JclSupportMissing as exc:
         _log.error(f"error: {exc}")
         return 2
@@ -444,11 +464,17 @@ def _run(args, timing_sink=None) -> int:
         # An explicit --target is the PRODUCT of the run, so it is written here and not
         # through write_views: a crash building it is the run failing, not one view of
         # several failing, and it must reach the exit code.
-        with timer.stage(f"view:{args.target}"):
-            obj = (analysis.lineage() if args.target == "lineage"
-                   else analysis.artifacts() if args.target == "artifacts"
-                   else analysis.business())
-            write_json(out_path, obj, args.indent)
+        try:
+            with timer.stage(f"view:{args.target}"):
+                obj = (analysis.lineage() if args.target == "lineage"
+                       else analysis.artifacts() if args.target == "artifacts"
+                       else analysis.business())
+                write_json(out_path, obj, args.indent)
+        except ViewBudgetExceeded as exc:
+            # The view this run was asked for exceeded its budget: the run failed, and
+            # says how to lift the limit. Nothing partial was written.
+            _log.error(f"[{source_name}] ERROR: {exc}")
+            return 3
         _log.info(f"[{source_name}] wrote {out_path}")
         # The field-lineage table travels with any machine view: the rows reference the
         # machine's events and fields, so the two are read together.

@@ -39,3 +39,24 @@ class ReactiveLoweringError(CobolXstateError, NotImplementedError):
     """The reactive lowering refuses this program (CICS handler regions, recursive
     PERFORM, ...). Kept a ``NotImplementedError`` as well, so pre-existing
     ``except NotImplementedError`` handlers continue to catch it."""
+
+
+class ViewBudgetExceeded(CobolXstateError):
+    """A view needed more work than its budget allows, so it was NOT produced.
+
+    Deliberately a failure rather than a shorter view: a view cut off at its budget reads
+    as complete, and a consumer cannot tell the difference. The rest of the run is
+    unaffected - `api.write_views` leaves this one view out and logs an ERROR naming the
+    budget - and the limit can be lifted (``knob`` 0 means none) to get the full answer.
+
+    ``view``, ``limit``, ``unit`` and ``knob`` are attributes, so an embedding caller can
+    record the failure without parsing the message.
+    """
+
+    def __init__(self, view: str, limit: int, unit: str, knob: str, progress: str):
+        self.view, self.limit, self.unit, self.knob = view, limit, unit, knob
+        self.progress = progress
+        super().__init__(
+            f"{view} view not produced: it needs more than its budget of {limit:,} "
+            f"{unit} ({progress}). Nothing partial was written. Re-run with {knob} 0 for "
+            f"no limit, or a larger number.")

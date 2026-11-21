@@ -113,7 +113,7 @@ def test_targets_bundle_only_does_not_compute_business(tmp_path, monkeypatch):
 
 def test_a_crashing_companion_is_a_warning_and_the_rest_still_land(tmp_path, monkeypatch,
                                                                    caplog):
-    def _boom(machine):
+    def _boom(machine, budget=None):
         raise RuntimeError("view exploded")
 
     monkeypatch.setattr(cobol_xstate.api, "build_business_view", _boom)
@@ -127,7 +127,7 @@ def test_a_crashing_companion_is_a_warning_and_the_rest_still_land(tmp_path, mon
 
 
 def test_debug_re_raises_a_companion_failure(tmp_path, monkeypatch):
-    def _boom(machine):
+    def _boom(machine, budget=None):
         raise RuntimeError("view exploded")
 
     monkeypatch.setattr(cobol_xstate.api, "build_business_view", _boom)
@@ -155,7 +155,7 @@ def test_a_not_implemented_error_from_another_view_is_a_crash_not_a_refusal(tmp_
                                                                             caplog):
     """Only `reactive` has a refusal. Elsewhere NotImplementedError is a defect, and takes
     the ordinary companion boundary rather than being reported as a refused view."""
-    def _boom(machine):
+    def _boom(machine, budget=None):
         raise NotImplementedError("business is not done yet")
 
     monkeypatch.setattr(cobol_xstate.api, "build_business_view", _boom)
@@ -234,3 +234,37 @@ def test_an_embedding_caller_reproduces_a_cli_run_byte_for_byte(tmp_path):
     for name in views:
         theirs = (tmp_path / "cli" / written[name].name).read_bytes()
         assert theirs == written[name].read_bytes(), name
+
+
+def test_a_business_view_over_its_budget_is_an_error_and_nothing_partial(tmp_path, caplog,
+                                                                         monkeypatch):
+    """A view that needs more walk steps than its budget is not written at all - a
+    shortened one would read as complete - and the run says so at ERROR, naming how to
+    lift the limit. Everything else the run writes still lands. The same holds under
+    debug: there is no defect to show a traceback for."""
+    from cobol_xstate import ViewBudgetExceeded
+    # A CLI run earlier in the session (configure_logging) stops the package logger
+    # propagating, which would hide its records from caplog's root handler.
+    monkeypatch.setattr(logging.getLogger("cobol_xstate"), "propagate", True)
+    analysis = analyze(SOURCE, source_name="custrpt.cbl", retrieve=False,
+                       business_budget=1)
+    with pytest.raises(ViewBudgetExceeded):
+        analysis.business()
+    for debug in (False, True):
+        out = tmp_path / str(debug)
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger="cobol_xstate.api"):
+            written = write_views(analysis, out, debug=debug)
+        assert "business" not in written
+        assert not (out / "custrpt.business.json").exists()
+        assert tuple(written) == tuple(t for t in DEFAULT_TARGETS
+                                       if t not in ("business", "dependents"))
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "business view not produced" in errors[0].message
+        assert "--business-budget 0 for no limit" in errors[0].message
+
+
+def test_lifting_the_budget_gives_the_view_the_default_gives(tmp_path):
+    lifted = analyze(SOURCE, source_name="custrpt.cbl", retrieve=False, business_budget=0)
+    assert lifted.business() == _analysis().business()

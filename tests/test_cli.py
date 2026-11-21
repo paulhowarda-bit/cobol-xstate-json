@@ -8,6 +8,9 @@ a file anywhere else, which is the property these tests exist to hold.
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -407,6 +410,38 @@ def test_stage_timer_records_and_reports_when_enabled():
     assert "parse" in text and "views" in text and "measured" in text
 
 
+def test_stage_timer_reports_the_process_peak_memory_per_stage():
+    """Each row carries the process's peak resident memory as it stood when the stage
+    ended - the OS high-water mark, so it never falls, and the stage it first jumps on is
+    the one that drove the run's memory up. Windows, Linux and macOS all have a counter;
+    the test runs on one of them, so a None here would mean the reader is broken.
+
+    In a fresh interpreter: this process's high-water mark is whatever the suite's
+    biggest test left behind, which a 64 MB ballast need not even reach."""
+    probe = textwrap.dedent("""
+        import json
+        from mainframe_artifacts.profiling import StageTimer
+        class Log:
+            msgs = []
+            def info(self, m): self.msgs.append(m)
+        log = Log()
+        t = StageTimer(log, enabled=True, source_name="x.cbl")
+        with t.stage("small"):
+            pass
+        with t.stage("grow"):
+            ballast = bytearray(64 << 20)
+            ballast[::4096] = b"x" * len(ballast[::4096])     # touch every page
+        t.report()
+        print(json.dumps([t.timings(), log.msgs]))
+    """)
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         check=True, env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+    (small, grow), msgs = json.loads(out.stdout)
+    assert isinstance(small["peakMB"], float) and small["peakMB"] > 0
+    assert grow["peakMB"] >= small["peakMB"] + 60
+    assert sum(" MB" in m for m in msgs) == 2
+
+
 def test_stage_timer_is_a_no_op_when_disabled():
     """Disabled, it must record nothing and emit nothing - the normal-run code path is
     then byte-for-byte the same as before the flag existed."""
@@ -487,8 +522,9 @@ def test_timing_sink_receives_structured_rows_without_the_flag(tmp_path, capsys)
     assert run([EXAMPLES_CBL, "--outdir", str(tmp_path)], timing_sink=got.append) == 0
     assert len(got) == 1, "the sink is called exactly once, on a completed run"
     rows = got[0]
-    assert rows and all(set(r) == {"stage", "ms"} for r in rows)
+    assert rows and all(set(r) == {"stage", "ms", "peakMB"} for r in rows)
     assert all(isinstance(r["ms"], float) for r in rows)
+    assert all(isinstance(r["peakMB"], float) for r in rows)
     names = [r["stage"] for r in rows]
     # A sink-only caller measures the same stages the flag reports - including the two
     # pre-warmed analyses, which are the numbers worth logging.
@@ -729,3 +765,31 @@ def test_the_cli_never_copies_the_source_into_itself(tmp_path, monkeypatch):
     data = json.loads((tmp_path / "out" / "SELFCOPY.json").read_text())["data"]
     assert data["WS-COUNT"]["section"] == "WORKING-STORAGE"
     assert "member" not in data["WS-COUNT"]
+
+
+def test_business_budget_refusal_reaches_the_cli(tmp_path, capsys):
+    """Over budget, a default run still writes every other artifact and exits 0, with an
+    ERROR line naming the budget; asked for the business view alone, the run fails with
+    exit 3. Neither writes a partial business view. --business-budget 0 lifts it."""
+    out = tmp_path / "default"
+    assert run([EXAMPLES_CBL, "--outdir", str(out), "--business-budget", "1"]) == 0
+    assert not (out / "banktran.business.json").exists()
+    assert (out / "banktran.json").exists() and (out / "banktran.lineage.json").exists()
+    assert "ERROR: business view not produced" in capsys.readouterr().err
+
+    alone = tmp_path / "alone"
+    assert run([EXAMPLES_CBL, "--outdir", str(alone), "--target", "business",
+                "--business-budget", "1"]) == 3
+    assert not (alone / "banktran.business.json").exists()
+    assert "--business-budget 0 for no limit" in capsys.readouterr().err
+
+    lifted = tmp_path / "lifted"
+    assert run([EXAMPLES_CBL, "--outdir", str(lifted), "--target", "business",
+                "--business-budget", "0"]) == 0
+    assert (lifted / "banktran.business.json").exists()
+
+
+def test_business_budget_must_be_a_step_count(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        run([EXAMPLES_CBL, "--outdir", str(tmp_path), "--business-budget", "-1"])
+    assert "not a step count" in capsys.readouterr().err

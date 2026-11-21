@@ -104,6 +104,27 @@ read together: the business view shows *which steps matter*, the lineage table s
   flagged.
 - **Recursive PERFORM**, **multiple PERFORMs in one state**, and **unresolved PERFORM targets**
   are flagged and the call is not followed.
+- **Nested PERFORMs are walked per call site, not per call path.** Distinct stacks of
+  PERFORMs multiply — k call sites per level, d levels deep, is k^d of them — so the flow
+  carries only the top PERFORM of each stack. A pre-pass records which call site can sit
+  under which. A walk runs without knowing what is under its top frame, and if it ever
+  returns out of that frame, it is rerun once for each frame that can sit there. So
+  every finished walk is exactly the walk from each real stack it stands for. The
+  transitions are the same set as walking every stack, but their order may differ, and
+  so may which of several collapsed paths is kept as an edge's `via`. A 387-line program
+  nesting 8 levels with 3 call sites each went from 157,457 walks (12 s, 65 MB) to 737
+  (0.1 s, 1 MB), and 16 levels takes 0.3 s.
+
+  The one exception is a program where a PERFORM could land inside a range already on the
+  stack: the recursion check reads the whole stack, so such a program keeps the per-stack
+  walk.
+- **A view that needs too much work is refused, not cut short.** The walk has a budget
+  of 250,000 steps (`--business-budget`, `analyze(business_budget=)`; `0` means no
+  limit). A view that needs more raises `ViewBudgetExceeded`, and nothing partial is
+  written: a view cut off at its budget would read as complete. The run logs an ERROR
+  saying how far the walk got, the other artifacts are written as usual, and re-running
+  with the budget lifted gives the full view. It is a count rather than a memory reading,
+  so the refusal lands at the same place on every machine.
 - **Naming is not inferred** — `suggestedName` / `label` are always `null`. A pure-calculation
   program (no boundary crossings, no business decisions) correctly distills to ~no business
   states: it has no business *state* changes, only data transformation.

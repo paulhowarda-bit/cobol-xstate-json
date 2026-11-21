@@ -151,7 +151,7 @@ cobol-xstate [-h] [--outdir DIR]
              [--synonym-map FILE] [--synonym-resolver MODULE:FUNC]
              [--dependents-map FILE] [--dependents-resolver MODULE:FUNC]
              [--no-lineage] [--no-business] [--no-reactive] [--no-artifacts]
-             [--no-dynamic-calls] [--bind-jcl FILE]
+             [--no-dynamic-calls] [--bind-jcl FILE] [--business-budget STEPS]
              [--machine-only] [--jobs N] [--indent N] [--summary] [--timing]
              source
 ```
@@ -233,6 +233,33 @@ a failure of the run, so the other five views still land.
 `.dynamic-calls.json` is written even when it is empty: "this program has no unresolvable
 dynamic calls" is a real and reassuring answer, and a missing file would be ambiguous
 between that and the view not having run.
+
+### `--business-budget STEPS`
+
+The most walk steps the business view may take. Default 250,000; `0` means no limit.
+
+Collapsing a program to its business flow can, on some programs, need exponentially many
+steps. One case is a technical region whose paragraphs are both PERFORMed and fallen into,
+which doubles the paths to cover at every level. The other is a program whose PERFORMs
+could recurse, which is walked one whole PERFORM stack at a time. A step costs about
+10 µs, and at most about 1 KB while its walk is live, so the default is a few seconds
+and at most a couple of hundred MB. No example program needs more than 35 steps; an
+11,000-line generated program needs 5,614.
+
+A business view that needs more than the budget is **not written** — never a shortened
+one, which would read as complete. Instead:
+
+- the run logs `ERROR: business view not produced: it needs more than its budget of N
+  walk steps (...)`, saying how far the walk got and how to lift the limit;
+- every other artifact of the run is written as usual, and a default run exits 0;
+- with `--target business` the business view is the whole run, so it exits 3;
+- through the API, `Analysis.business()` raises `ViewBudgetExceeded` (with `view`,
+  `limit`, `unit` and `knob` attributes), and `write_views` leaves `business` out of the
+  mapping it returns.
+
+Re-running that program with `--business-budget 0`, or with
+`analyze(..., business_budget=0)`, gives its full business view: the same answer it
+would have had with no budget at all, at whatever time and memory that takes.
 
 ### `--target {json,js,reactive,business,lineage,artifacts}`
 
@@ -598,6 +625,13 @@ their total `lineage-fixpoint`,
 `--target`) — each covering that view's build, serialization and write — and `views`,
 their total. `measured` is the sum of every line. `--gather-only --timing` reports the
 retrieval stages of the gather run.
+
+Each line also ends `peak N MB`: the process's peak resident memory as it stood when
+that stage ended — the operating system's own high-water mark (`getrusage` on Linux,
+macOS and z/OS USS; `PeakWorkingSetSize` on Windows), so it counts every allocation and
+never falls. The stage whose line it first jumps on is the one that drove the run's
+memory up. Reading it is one system call per stage and slows nothing. A `timing_sink`
+row carries the same number as `peakMB` (`None` on a platform with no counter).
 
 ### `--summary`
 
