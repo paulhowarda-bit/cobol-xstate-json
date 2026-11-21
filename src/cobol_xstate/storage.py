@@ -93,18 +93,27 @@ def item_size(entry: dict) -> Tuple[Optional[int], Optional[str]]:
     return positions, None
 
 
-def _children(data: Dict[str, dict], parent: str) -> List[Tuple[str, dict]]:
-    """Immediate children of a group, in source order (the dict preserves it)."""
-    return [(name, entry) for name, entry in data.items()
-            if isinstance(entry, dict)
-            and str(entry.get("parent") or "").upper() == parent.upper()]
+_Kids = Dict[str, List[Tuple[str, dict]]]
+
+
+def children_index(data: Dict[str, dict]) -> _Kids:
+    """Every group's immediate children, in source order (the dict preserves it),
+    keyed by the upper-cased parent name, in ONE pass over the dictionary: a scan of the
+    whole dictionary per group node made a layout O(nodes x items). A caller laying out
+    many records of one dictionary builds it once and passes it to each layout."""
+    kids: _Kids = {}
+    for name, entry in data.items():
+        if isinstance(entry, dict):
+            kids.setdefault(str(entry.get("parent") or "").upper(), []).append(
+                (name, entry))
+    return kids
 
 
 _FILLER = "FILLER"
 
 
 def _members(data: Dict[str, dict], name: str, entry: dict,
-             blockers: List[str]) -> List[Tuple[str, dict]]:
+             blockers: List[str], kids_of: _Kids) -> List[Tuple[str, dict]]:
     """The items a group is laid out from, in declaration order.
 
     FILLERs need care: the data dictionary keys every FILLER under the one name
@@ -118,22 +127,22 @@ def _members(data: Dict[str, dict], name: str, entry: dict,
     cannot say WHICH one: then a FILLER group's size is not provable.
     """
     if entry is not data.get(name):            # a FILLER, from a group's `fillers` list
-        if str((entry.get("type") or {}).get("category")) == "group" and any(
-                isinstance(e, dict) and str(e.get("parent") or "").upper() == _FILLER
-                for e in data.values()):
+        if str((entry.get("type") or {}).get("category")) == "group" \
+                and kids_of.get(_FILLER):
             blockers.append(
                 "a FILLER group has named items whose parent is recorded only as "
                 "FILLER, so which FILLER holds them - and its size - is not known")
         return [(_FILLER, f) for f in entry.get("fillers") or []]
+    kids = kids_of.get(name.upper(), [])
     if "fillers" not in entry:
-        return _children(data, name)           # a dictionary from before `fillers`
-    named = [(n, e) for n, e in _children(data, name) if n.upper() != _FILLER]
+        return list(kids)                      # a dictionary from before `fillers`
+    named = [(n, e) for n, e in kids if n.upper() != _FILLER]
     merged = named + [(_FILLER, f) for f in entry["fillers"]]
     return sorted(merged, key=lambda pair: int(pair[1].get("line") or 0))
 
 
 def _sized(data: Dict[str, dict], name: str, entry: dict,
-           blockers: List[str]) -> Optional[int]:
+           blockers: List[str], kids_of: _Kids) -> Optional[int]:
     """Total bytes for one item including OCCURS, appending any reason it is unknown."""
     if entry.get("occursDependingOn"):
         blockers.append(
@@ -144,7 +153,7 @@ def _sized(data: Dict[str, dict], name: str, entry: dict,
             f"{name} is SYNCHRONIZED - the compiler inserts slack bytes to align it, "
             f"and how many depends on where the record itself starts")
 
-    kids = _members(data, name, entry, blockers)
+    kids = _members(data, name, entry, blockers, kids_of)
     if kids:
         total = 0
         for kid_name, kid in kids:
@@ -155,7 +164,7 @@ def _sized(data: Dict[str, dict], name: str, entry: dict,
                     f"{kid_name} REDEFINES {kid['redefines']} - two names occupy the "
                     f"same bytes, so a single offset would not describe both")
                 continue
-            size = _sized(data, kid_name, kid, blockers)
+            size = _sized(data, kid_name, kid, blockers, kids_of)
             if size is None:
                 return None
             total += size
@@ -168,14 +177,18 @@ def _sized(data: Dict[str, dict], name: str, entry: dict,
     return total * int(occurs) if occurs else total
 
 
-def record_layout(data: Dict[str, dict], record: str) -> dict:
+def record_layout(data: Dict[str, dict], record: str, *,
+                  children: Optional[_Kids] = None) -> dict:
     """The byte layout of ``record``: its fields in order, with offsets when provable.
 
     Returns ``{record, provable, fields: [{name, offset?, length?, pic, level}],
     size?, reason?}``. ``offset`` is 1-based, the way a mainframe reader counts columns
     ("bytes 5-12"), and every field carries its PICTURE either way - the layout alone is
     still enough to count by hand, which is the point of emitting it when the arithmetic
-    is refused."""
+    is refused.
+
+    ``children`` is ``children_index(data)``, for a caller laying out many records of
+    the one dictionary; without it the index is built here."""
     entry = data.get(record.upper())
     if not isinstance(entry, dict):
         return {"record": record, "provable": False, "fields": [],
@@ -183,6 +196,7 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
 
     blockers: List[str] = []
     fields: List[dict] = []
+    kids_of = children_index(data) if children is None else children
 
     def _repeat(name: str, ent: dict) -> Optional[int]:
         """How many times `ent` occupies its bytes: OCCURS n, or 1. ``None`` if the
@@ -210,7 +224,7 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
         rows describe occurrence one (the only one whose position is fixed relative to
         the record); `occurs`/`elementLength` say how to step through the rest.
         """
-        kids = _members(data, name, ent, blockers)
+        kids = _members(data, name, ent, blockers, kids_of)
         if ent.get("redefines"):
             blockers.append(
                 f"{name} REDEFINES {ent['redefines']} - two names occupy the same "
@@ -241,7 +255,7 @@ def record_layout(data: Dict[str, dict], record: str) -> dict:
         return offset + (cur - offset) * n
 
     end = walk(record.upper(), entry, 1)
-    total = _sized(data, record.upper(), entry, blockers)
+    total = _sized(data, record.upper(), entry, blockers, kids_of)
 
     # Two independent computations of the same number: `walk` accumulates field by
     # field, `_sized` sums the tree. If they disagree, one of them is wrong and we

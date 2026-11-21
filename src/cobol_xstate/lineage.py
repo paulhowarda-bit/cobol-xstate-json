@@ -56,7 +56,7 @@ from .emitter import (
     perform_target as _perform_target, segment_entry,
 )
 from .statechart import Machine
-from .storage import record_layout
+from .storage import children_index, record_layout
 
 # An origin: (event name, maybe?, program that would resolve a `maybe`).
 Origin = Tuple[str, bool, Optional[str]]
@@ -258,6 +258,12 @@ class _Lineage:
         self.group_reads: Dict[str, List[str]] = {
             n: leaves + self.sub_fillers[n] + anc.get(n, [])
             for n, leaves in self.groups.items()}
+        # The dictionary is fixed for the whole run, so a record's byte layout, and which
+        # source bytes each target field of a group MOVE overlaps, are computed once -
+        # not at every visit of every group MOVE (`_place_bytes` / `_placement`).
+        self._kids = None
+        self._layouts: Dict[str, dict] = {}
+        self._placements: Dict[Tuple[str, str], tuple] = {}
         self.cursors = _iface._cursor_tables(self.provenance)
         # A FETCH's host-variable <-> Db2 COLUMN correlation, recovered from the cursor's
         # DECLARE. Only the interface build passed this to `_classify`, so every FETCH row
@@ -1146,22 +1152,46 @@ class _Lineage:
                      cur: State) -> Tuple[Optional[Dict[str, OriginSet]], Optional[str]]:
         """``({target leaf: origins}, None)`` from the two byte layouts, or ``(None,
         why)`` when either layout is refused."""
-        lay_s, lay_t = record_layout(self.data, src), record_layout(self.data, tgt)
+        plan = self._placements.get((src, tgt))
+        if plan is None:
+            plan = self._placements[(src, tgt)] = self._placement(src, tgt)
+        sources, overlaps, why = plan
+        if why is not None:
+            return None, why
+        origins = [frozenset(self._read(n, cur)) for n in sources]
+        placed: Dict[str, OriginSet] = {}
+        for name, hits in overlaps:
+            acc: Set[Origin] = set()
+            for i in hits:
+                acc |= origins[i]
+            placed[name] = placed.get(name, frozenset()) | frozenset(acc)
+        return placed, None
+
+    def _placement(self, src: str, tgt: str):
+        """Which source fields' bytes each target field overlaps, by index into the
+        source fields - ``(source names, [(target name, [i, ...])], None)`` - or
+        ``(None, None, why)`` when either layout is refused. The layouts and so the
+        overlaps are fixed for the run: computed once per (source, target) pair, never
+        at each visit of the store (re-deriving them per visit was a layout - a scan
+        of the whole data dictionary per group node - at every group MOVE the fixpoint
+        ran, which took a 2,172-line program's lineage from 0.05 s to 20 s)."""
+        if self._kids is None:
+            self._kids = children_index(self.data)
+        for rec in (src, tgt):
+            if rec not in self._layouts:
+                self._layouts[rec] = record_layout(self.data, rec, children=self._kids)
+        lay_s, lay_t = self._layouts[src], self._layouts[tgt]
         for lay in (lay_s, lay_t):
             if not lay.get("provable"):
-                return None, f"the byte layout of {lay['record']} is not provable " \
-                             f"({lay.get('reason', 'no reason given')})"
-        spans = [(f["offset"], f["offset"] + f["length"],
-                  frozenset(self._read(f["name"], cur))) for f in lay_s["fields"]]
-        placed: Dict[str, OriginSet] = {}
+                return None, None, (f"the byte layout of {lay['record']} is not provable "
+                                    f"({lay.get('reason', 'no reason given')})")
+        spans = [(f["offset"], f["offset"] + f["length"]) for f in lay_s["fields"]]
+        overlaps = []
         for f in lay_t["fields"]:
             lo, hi = f["offset"], f["offset"] + f["length"]
-            acc: Set[Origin] = set()
-            for s_lo, s_hi, origins in spans:
-                if s_lo < hi and lo < s_hi:
-                    acc |= origins
-            placed[f["name"]] = placed.get(f["name"], frozenset()) | frozenset(acc)
-        return placed, None
+            overlaps.append((f["name"], [i for i, (s_lo, s_hi) in enumerate(spans)
+                                         if s_lo < hi and lo < s_hi]))
+        return [f["name"] for f in lay_s["fields"]], overlaps, None
 
     def _changed_by(self, field: str) -> List[dict]:
         """Assignments writing this field; for a group, those writing any child.
@@ -1516,6 +1546,10 @@ class _Lineage:
             elif len(live) == 1:
                 merged = live[0]
                 live = ()
+            elif live:
+                # the first map needs no union - what merging it into {} would build
+                merged = dict(live[0])
+                live = live[1:]
             else:
                 merged = {}
             for om in live:

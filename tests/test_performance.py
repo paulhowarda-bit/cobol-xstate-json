@@ -970,3 +970,50 @@ def test_condition_bitmasks_round_trip_to_the_conditions_they_stand_for():
         pick = {lin.cond_list[0], lin.cond_list[1]}
         mask = sum(1 << lin.cond_list.index(c) for c in pick)
         assert lin._conds(mask) == pick
+
+
+_GROUP_MOVE_LOOP = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. GRPLOOP.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 A-REC.\n"
+    "          05 A-1 PIC X(4).\n"
+    "          05 A-2 PIC X(4).\n"
+    "       01 B-REC.\n"
+    "          05 B-1 PIC X(2).\n"
+    "          05 B-2 PIC X(6).\n"
+    "       01 WS-N PIC 9 VALUE 0.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           ACCEPT A-1\n"
+    "           PERFORM UNTIL WS-N > 3\n"
+    "               MOVE A-REC TO B-REC\n"
+    "               MOVE B-REC TO A-REC\n"
+    "               ADD 1 TO WS-N\n"
+    "           END-PERFORM\n"
+    "           DISPLAY A-REC.\n"
+)
+
+
+def test_group_move_layouts_are_computed_once_not_per_visit(monkeypatch):
+    """A group MOVE places bytes through both records' layouts, and a layout scans the
+    data dictionary. Re-deriving it at every visit of the store took a 2,172-line
+    program's lineage from 0.05 s to 20 s (3ee1ee0). The dictionary is fixed for the
+    run, so each record is laid out once however often the fixpoint revisits its MOVEs."""
+    laid_out, placed = [], []
+    real_layout, real_place = lineage_mod.record_layout, _Lineage._place_bytes
+
+    def counting_layout(data, record, **kw):
+        laid_out.append(record)
+        return real_layout(data, record, **kw)
+
+    def counting_place(self, src, tgt, cur):
+        placed.append((src, tgt))
+        return real_place(self, src, tgt, cur)
+
+    monkeypatch.setattr(lineage_mod, "record_layout", counting_layout)
+    monkeypatch.setattr(_Lineage, "_place_bytes", counting_place)
+    build_lineage(build_machine(parse_program(_GROUP_MOVE_LOOP)))
+    assert len(placed) > 2                 # the loop really revisits both MOVEs
+    assert sorted(laid_out) == ["A-REC", "B-REC"]
