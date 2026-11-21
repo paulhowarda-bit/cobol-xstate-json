@@ -371,7 +371,7 @@ def test_a_predicate_is_stored_once_however_many_sites_repeat_it():
 
     mentions, distinct = 0, set()
     for r in d["rows"]:
-        for node in [r, *r.get("changedBy", [])]:
+        for node in [r, *_writes(d, r)]:
             for c in _conds(d, node):
                 mentions += 1
                 distinct.add((c["guard"], c["negated"]))
@@ -389,7 +389,7 @@ def test_every_condition_reference_resolves():
             assert members, f"{name}: set {sid} is empty - it should have been omitted"
             assert all(str(m) in ids for m in members), f"{name}: set {sid} dangles"
         for r in d["rows"]:
-            for node in [r, *r.get("changedBy", [])]:
+            for node in [r, *_writes(d, r)]:
                 sid = node.get("conditionSetId")
                 assert sid is None or str(sid) in d["conditionSets"], \
                     f"{name}: conditionSetId {sid} does not resolve"
@@ -403,12 +403,32 @@ def test_the_document_declares_its_format_version():
     assert _lin("banktran.cbl")["formatVersion"] == VIEW_SCHEMA_VERSION
 
 
+def _writes(d: dict, row: dict) -> list:
+    """A row's write sites: the document's per-field `changedBy` table, under its field."""
+    return d["changedBy"][row["field"]] if row["changedByProgram"] else []
+
+
+def test_write_sites_are_stated_once_per_field_not_per_row():
+    """`changedBy` is a fact about the FIELD - the same list in every row about it - and
+    repeated per row it was 70% of a large lineage file. It is stated once, in the
+    document's table, for exactly the fields a row marks `changedByProgram`, and no row
+    carries a copy."""
+    for name in ("condlin.cbl", "banktran.cbl", "custrpt.cbl", "lineage.cbl",
+                 "sqlvarchar.cbl"):
+        d = _lin(name)
+        assert not any("changedBy" in r for r in d["rows"]), name
+        changed = {r["field"] for r in d["rows"] if r["changedByProgram"]}
+        assert set(d["changedBy"]) == changed, name
+        assert all(d["changedBy"][f] for f in changed), f"{name}: an empty write list"
+        assert list(d["changedBy"]) == sorted(d["changedBy"]), name
+
+
 def test_a_write_site_carries_the_condition_it_happens_under():
     """changedBy names the assignment; without its condition it says a program touches a
     field but not when, which is the half that matters for merging programs by state."""
     d = _lin("custrpt.cbl")
-    row = next(r for r in d["rows"] if r.get("changedBy"))
-    entry = row["changedBy"][0]
+    row = next(r for r in d["rows"] if r["changedByProgram"])
+    entry = _writes(d, row)[0]
     assert _conds(d, entry), "a write inside a read loop is not unconditional"
     assert _conds(d, entry)[0]["expr"] == "NOT (WS-EOF = 'Y')"
 
@@ -846,7 +866,7 @@ def test_write_site_dedup_keeps_first_occurrence_order():
     assert _entry_key(a) != _entry_key(c)     # a differing condition must not collapse
     d = _lin("lineage.cbl")
     for r in d["rows"]:
-        entries = r.get("changedBy") or []
+        entries = _writes(d, r)
         keys = [_entry_key(e) for e in entries]
         assert len(keys) == len(set(keys)), r["field"]
 
@@ -948,7 +968,7 @@ def test_a_move_out_of_the_varchar_text_carries_the_select_origin_to_the_insert(
     assert row["event"] == "CREATE.DB2.T_DEMO_COMMENT"
     assert _origins(row) == {"GET.DB2.T_DEMO_COMMENT"}
     assert row["changedByProgram"] is True
-    assert {c["action"] for c in row["changedBy"]} == {
+    assert {c["action"] for c in _writes(d, row)} == {
         "MOVE_WS-NOTE_TO_HV-O-CMT-TEXT", "MOVE_WS-LEN_TO_HV-O-CMT-LEN"}
 
 

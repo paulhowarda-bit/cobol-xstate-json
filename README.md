@@ -165,7 +165,7 @@ The default output is a JSON **bundle**:
 ```jsonc
 {
   "format": "xstate-v5-config",
-  "formatVersion": 3,
+  "formatVersion": 4,
   "metadata": { "program": "...", "disclaimer": "..." },
   "machine":  { "id": "...", "initial": "...", "context": { /* typed initial values */ }, "states": { ... } },
   "data":     { "WS-TOTAL": { "type": { "category": "numeric", "usage": "DISPLAY", "digits": 13, "scale": 2, "signed": false }, ... } },

@@ -745,11 +745,13 @@ cobol-xstate prog.cbl --no-lineage --outdir out       # -> out/prog.json only
 ```jsonc
 { "event": "CREATE.FILE.OUT-FILE", "direction": "output", "field": "OUT-FEE",
   "changedByProgram": true,
-  "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44 }],
   "conditionSetId": 4,
   "origins": [{ "event": "GET.CALLER.CALLER" }, { "event": "GET.CONSOLE.SYSIN" }] }
 
-// beside `rows`, the interned pools the id resolves through:
+// beside `rows`, the tables the row resolves through - its field's write sites, and the
+// interned condition pools its ids index:
+"changedBy":     { "OUT-FEE": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE",
+                                 "line": 44, "conditionSetId": 4 }] },
 "conditions":    { "0": { "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
                           "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 } },
 "conditionSets": { "4": [0] }
@@ -775,7 +777,12 @@ is a deposit.*
 - **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
   `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
 - **`changedByProgram`** means the program *assigns* it. An input event's own fill
-  (`ACCEPT`, `SELECT ... INTO`) doesn't count — the value came from outside.
+  (`ACCEPT`, `SELECT ... INTO`) doesn't count — the value came from outside. The write
+  sites themselves are `changedBy[field]`, a document-level table keyed by field and
+  holding exactly the fields some row marks `changedByProgram`: they are a fact about the
+  field, the same list in every row about it, and repeated per row they were 70% of a
+  large program's lineage file (26.6 MB, 7.8 MB stated once). Rows carried them inline
+  up to `formatVersion` 3; from **4** a row has none.
 - **Flow-sensitive**: only origins that actually reach that event. PERFORM is followed as
   a real call; loop self-references (`WS-TOTAL := WS-TOTAL + CUST-AMT`) collapse to the
   real source.
@@ -802,7 +809,7 @@ is a deposit.*
   real decision (`business`) from loop and end-of-file plumbing (`control`) — filter to
   `business` and you have the program's rules. Negation is first-class: a `WHEN OTHER`
   reports `NOT (WS-KIND = 'P')` and `NOT (WS-KIND = 'Q')`, which is the actual rule. The
-  same key appears per write in `changedBy`.
+  same key appears on each write site in `changedBy`.
 - **The conditions are interned, and the document says so.** A point's conditions are a
   set drawn from a small vocabulary, and the same set recurs at a row and at every write
   site under it; written inline at each, one estate program spent 2.04 GB encoding 296
@@ -1116,7 +1123,7 @@ so a corpus joined on it can assert that two programs share state when they do n
 ```jsonc
 {
   "format":     "xstate-v5-config",
-  "formatVersion": 3,   // per-distribution; `--target business` and `reactive` carry
+  "formatVersion": 4,   // per-distribution; `--target business` and `reactive` carry
                         // their OWN format names, cobol-xstate-business / -reactive
   "metadata":   { "program": "...", "source": "...", "generator": "...", "disclaimer": "..." },
   "machine":    { "id", "context", "states", "initial" },

@@ -32,9 +32,7 @@ table alone; `--no-lineage` skips it.
   "field": "OUT-FEE",
   "pic": "9(5)V99",                  // "group" for a VARCHAR host structure's parent
   "section": "FILE",
-  "changedByProgram": true,          // this program assigns it (not just passes it)
-  "changedBy": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44,
-                  "conditionSetId": 7 }],   // ...what governs THIS write
+  "changedByProgram": true,          // this program assigns it: see changedBy["OUT-FEE"]
   "conditionSetId": 4,               // what must hold for the event to happen at all
   "origins": [                       // the external events whose data reaches it HERE
     { "event": "GET.CALLER.CALLER" },
@@ -43,9 +41,13 @@ table alone; `--no-lineage` skips it.
 }
 ```
 
-`conditionSetId` indexes the document's two interned pools, which sit beside `rows`:
+The row's write sites, and the pools its ids index, sit beside `rows`:
 
 ```jsonc
+"changedBy": {                       // field -> this program's write sites for it
+  "OUT-FEE": [{ "action": "COMPUTE_OUT-FEE_eq_LK-QTY_WS-RATE", "line": 44,
+                "conditionSetId": 7 }]   // ...what governs THIS write
+},
 "conditions": {                      // the program's whole condition vocabulary
   "0": { "guard": "WS-TRAN-TYPE_eq_D", "negated": false,
          "expr": "WS-TRAN-TYPE = 'D'", "kind": "business", "line": 28 },
@@ -61,6 +63,17 @@ site under the loop test alone.
 Reading it: *the WRITE to OUT-FILE emits `OUT-FEE`; this program computed it at line 44;
 its value comes from the caller's parameter combined with a console `ACCEPT`; and it
 happens when the transaction is a deposit.*
+
+### Why the write sites are a table
+
+Which assignments in the program write a field is a fact about the **field**, not about
+the event a row describes: every row about `OUT-FEE` has the same list. Up to
+`formatVersion` 3 each row carried it inline, and on an 11,000-line program whose records
+are moved as groups that repetition was **70% of the file** - 26.6 MB, 7.8 MB with each
+list stated once. From `formatVersion` **4** a row carries none: `changedBy` is a
+document-level table keyed by field, holding exactly the fields some row marks
+`changedByProgram` (in field order), and a reader takes `doc["changedBy"][row["field"]]`.
+A row with `changedByProgram: false` has no entry.
 
 ### Why the conditions are interned
 
@@ -99,7 +112,7 @@ and a `kind`:
 | `control` | plumbing — a loop's `UNTIL` test, a file's end-of-stream check |
 
 Filter to `business` and you have the program's rules; the `control` ones are how COBOL
-happened to iterate. Each entry of `changedBy` carries its own `conditionSetId`, scoped to
+happened to iterate. Each write site in `changedBy` carries its own `conditionSetId`, scoped to
 that particular write, so *"this program writes the balance"* becomes *"this program writes
 the balance **here**, under **this**"*.
 
@@ -137,7 +150,7 @@ than hidden:
   *chain* of assignments, so its true condition is the conjunction along the whole chain.
   Tagging it with any single link's condition would look like the answer without being
   it.
-- **An unreachable write site** is marked `unreachable` on its `changedBy` entry rather
+- **An unreachable write site** is marked `unreachable` in its `changedBy` list rather
   than given an empty condition set — it has no path condition *because it has no path*,
   and an empty set there would read as "this always happens".
 

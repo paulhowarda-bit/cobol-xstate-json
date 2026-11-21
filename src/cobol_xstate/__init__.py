@@ -43,7 +43,10 @@ PRODUCER = "cobol-xstate"
 #: ``formatVersion: 2`` on its own since conditions moved into interned pools, so 1 would
 #: have taken a published number BACKWARDS - the exact silent shape change this key exists
 #: to prevent. One number across the family keeps a consumer's rule the same everywhere.
-VIEW_SCHEMA_VERSION = 3
+#:
+#: 4: a lineage row no longer carries ``changedBy``; the write sites are stated once per
+#: field in the document's ``changedBy`` table (``doc["changedBy"][row["field"]]``).
+VIEW_SCHEMA_VERSION = 4
 
 from .errors import (
     CobolXstateError,

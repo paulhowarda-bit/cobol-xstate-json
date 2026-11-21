@@ -10,7 +10,9 @@ them. The result is one row per ``(external event, field)``:
                                                                     GET.CONSOLE.SYSIN]
 
 Each row also carries a ``conditionSetId`` - the conditions under which its event happens
-at all, interned into document-level pools rather than written out inline. Origins are
+at all, interned into document-level pools rather than written out inline. A row's
+``changedBy`` write sites are likewise stated once per field, in the document's
+``changedBy`` table under the row's ``field``. Origins are
 only half a business rule - "DAILYPOST changes the balance" is a dependency, "DAILYPOST
 changes the balance WHEN the transaction is a deposit" is the rule - and the when-clause
 is the half a requirements reader actually needs.
@@ -614,6 +616,7 @@ class _Lineage:
         # pass and once more per ROW; the answer is a property of the state.
         self._cond_memo: Dict[str, Tuple[Optional[int], bool]] = {}
         self._changed_memo: Dict[str, List[dict]] = {}     # field -> `_changed_by`
+        self._changed_fields: Set[str] = set()           # fields some row says changed
         # The OUTPUT's condition pools. Not to be confused with `_intern_conditions`
         # above, which packs the same vocabulary into BITMASKS for the fixpoint's own
         # meet/join; these two carry those predicates out to the document.
@@ -1573,7 +1576,10 @@ class _Lineage:
                 "this table does not state - read the machine for the exact branches"
             )
         if changed:
-            row["changedBy"] = changed
+            # The write sites are a fact about the FIELD, the same list in every row about
+            # it - and repeated per row they were 70% of a large lineage file. Stated once
+            # in the document's `changedBy` table, under `field`.
+            self._changed_fields.add(fu)
         if any(e == _UNKNOWN for e, _m, _r in origins):
             row["unknown"] = True
             row["unknownReason"] = ("value passes through a construct whose data effect "
@@ -2027,6 +2033,8 @@ class _Lineage:
                 "One row per (external event, field). For an INPUT event the fields are "
                 "the ones that event FILLS; for an OUTPUT event they are the ones that "
                 "FILL it. 'changedByProgram' means this program assigns the field; "
+                "its write sites are 'changedBy'[field] - one list per field, the same "
+                "for every row about it; "
                 "'origins' are the external events whose data reaches it here "
                 "(flow-sensitive). A linkage-sourced value shows GET.CALLER.CALLER as "
                 "an origin. 'maybe' origins name the program that would resolve them. "
@@ -2050,6 +2058,10 @@ class _Lineage:
             # write site under it; stored once here, referenced by id there.
             "conditions": {str(i): d for i, d in enumerate(self._cond_defs)},
             "conditionSets": {str(i): s for i, s in enumerate(self._set_defs)},
+            # field -> the write sites in this program that assign it (`_changed_by`),
+            # for every field a row marks `changedByProgram`. Hoisted out of the rows:
+            # every row about a field carried the same list.
+            "changedBy": {f: self._changed_by(f) for f in sorted(self._changed_fields)},
             "rows": rows,
             # The internal dataflow behind those rows, recorded during the same pass:
             # `fills` is a field filled by a boundary crossing, `flow` is one write site
