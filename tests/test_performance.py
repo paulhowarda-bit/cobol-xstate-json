@@ -469,16 +469,70 @@ def test_origins_fixpoint_holds_near_one_visit_per_state_on_converging_paths(mon
         f"queue measured 1.6 per state on this shape and 26.5 on the real program")
 
 
-def test_origins_fixpoint_answer_does_not_depend_on_visit_order():
+def _shared_utilities_source(drivers: int, utils: int) -> str:
+    """Drivers PERFORMed in sequence, each PERFORMing shared routines that PERFORM one
+    another, over several input files: every routine returns to all its callers
+    (context-insensitive), so a change travels one round of calls per pass and each
+    state is re-solved several times with a different, wider map - the shape the
+    estate's slowest programs have, and the one the change tracking in `_Lineage.run`
+    (dirty keys, re-joins, overlays) exists for."""
+    lines = [
+        "       IDENTIFICATION DIVISION.", "       PROGRAM-ID. UTILS.",
+        "       ENVIRONMENT DIVISION.", "       INPUT-OUTPUT SECTION.",
+        "       FILE-CONTROL.",
+    ]
+    lines += [f"           SELECT F{f} ASSIGN TO DD{f}." for f in range(3)]
+    lines += ["       DATA DIVISION.", "       FILE SECTION."]
+    for f in range(3):
+        lines += [f"       FD  F{f}.", f"       01  F{f}-REC.",
+                  f"           05 F{f}-A PIC X(4).", f"           05 F{f}-B PIC X(4)."]
+    lines += ["       WORKING-STORAGE SECTION.", "       01  WS-EOF PIC X VALUE 'N'."]
+    for r in range(4):
+        lines += [f"       01  R{r}-REC."]
+        lines += [f"           05 R{r}-F{k} PIC X(4)." for k in range(2)]
+    lines += ["       PROCEDURE DIVISION.", "       0000-MAIN.",
+              "           PERFORM UNTIL WS-EOF = 'Y'"]
+    lines += [f"               PERFORM D{d}" for d in range(drivers)]
+    lines += ["           END-PERFORM", "           STOP RUN."]
+    for d in range(drivers):
+        r, q = d % 4, (d + 1) % 4
+        lines += [f"       D{d}."]
+        if d % 3 == 0:
+            lines += [f"           READ F{d // 3 % 3} AT END MOVE 'Y' TO WS-EOF.",
+                      f"           MOVE F{d // 3 % 3}-REC TO R{r}-REC."]
+        lines += [f"           MOVE R{q}-F0 TO R{r}-F1.",
+                  f"           PERFORM U{d % utils}.",
+                  f"           MOVE R{r}-REC TO R{q}-REC.",
+                  f"           IF R{r}-F0 = 'A' PERFORM U{(d + 1) % utils}.",
+                  f"           DISPLAY R{q}-F1."]
+    for u in range(utils):
+        lines += [f"       U{u}.", f"           MOVE R{u % 4}-F1 TO R{(u + 2) % 4}-F0."]
+        if u + 1 < utils:
+            lines += [f"           PERFORM U{u + 1}."]
+        lines += [f"           MOVE R{(u + 1) % 4}-REC TO R{(u + 3) % 4}-REC."]
+    return "\n".join(lines) + "\n"
+
+
+def _fixpoint_machines():
+    return [_wide_fields_machine(24, 40),
+            build_machine(parse_program(_shared_utilities_source(12, 4))),
+            build_machine(parse_program(_GROUP_MOVE_LOOP))]
+
+
+@pytest.mark.parametrize("which", [0, 1, 2])
+def test_origins_fixpoint_answer_does_not_depend_on_visit_order(which):
     """The queue and the dedup set are a scheduling choice, never a semantic one.
 
     Skipping a re-queue is only sound because the worklist holds NAMES, not values: the
     incoming map is re-merged from the predecessors' current outputs at pop time, so
     collapsing two pending visits into one cannot lose an update. That is the property
     this asserts, against the exhaustive stack-order walk it replaced - if the dedup ever
-    drops a visit that mattered, the two answers diverge.
+    drops a visit that mattered, the two answers diverge. The walk below joins and
+    compares WHOLE maps, so it is also the reference for the fixpoint's change tracking
+    (only the keys a predecessor changed are re-joined and compared), on a program
+    whose states are each re-solved several times.
     """
-    m = _wide_fields_machine(24, 40)
+    m = _fixpoint_machines()[which]
 
     ref = _Lineage(m)
     ref.changers = ref._changers()
@@ -1021,17 +1075,43 @@ def test_group_move_layouts_are_computed_once_not_per_visit(monkeypatch):
     assert sorted(laid_out) == ["A-REC", "B-REC"]
 
 
-@pytest.mark.parametrize("walk, hops", [(0, 1), (0, 10_000), (10_000, 1), (10_000, 10_000)])
-def test_change_chain_maps_answer_the_same_whatever_their_shortcuts(monkeypatch, walk,
-                                                                    hops):
+@pytest.mark.parametrize("hops, walk, layout", [
+    (1, 0, 1), (1, 10_000, 10**9), (10_000, 0, 10**9), (10_000, 10_000, 1), (8, 32, 48)])
+def test_change_chain_maps_answer_the_same_whatever_their_shortcuts(monkeypatch, hops,
+                                                                    walk, layout):
     """The fixpoint keeps each state's origin map as the keys it changed (`_Node`), with
-    two shortcuts: a full snapshot every `_HOPS` nodes, and joins / equality tests that
-    diff against the common ancestor unless it is more than `_WALK` steps away, when
-    they fall back to whole maps. Neither may change an answer - so force each path,
-    on shapes with joins, loops and group MOVEs, and compare whole views."""
+    three shortcuts: a full snapshot every `_HOPS` nodes, a first join that diffs from
+    the nearest shared ancestor within `_WALK` steps (else joins whole maps), and a
+    visit's `_Overlay` that lays its map out whole after `_LAYOUT_AFTER` reads. None may
+    change an answer - so force each path, on shapes with joins, loops, group MOVEs and
+    shared routines, and compare whole views."""
     machines = [_wide_fields_machine(24, 40), _converging_handlers_machine(6, 4, 8),
-                build_machine(parse_program(_GROUP_MOVE_LOOP))]
+                build_machine(parse_program(_GROUP_MOVE_LOOP)),
+                build_machine(parse_program(_shared_utilities_source(12, 4)))]
     expected = [_Lineage(m).run() for m in machines]
-    monkeypatch.setattr(lineage_mod, "_WALK", walk)
     monkeypatch.setattr(lineage_mod, "_HOPS", hops)
+    monkeypatch.setattr(lineage_mod, "_WALK", walk)
+    monkeypatch.setattr(lineage_mod, "_LAYOUT_AFTER", layout)
     assert [_Lineage(m).run() for m in machines] == expected
+
+
+def test_equal_origin_sets_are_one_object_after_a_run(monkeypatch):
+    """Ledger item 144: a large program held 7.4 million origin-set objects for 281
+    distinct sets, most of its 11.6 GB. Every set the fixpoint stores goes through one
+    table, so equal sets are the same object."""
+    m = build_machine(parse_program(_shared_utilities_source(12, 4)))
+    lin = _Lineage(m)
+    seen = []
+    real = lineage_mod._extend
+
+    def keep(base, delta, full=None):
+        seen.extend((delta or {}).values())
+        return real(base, delta, full)
+
+    monkeypatch.setattr(lineage_mod, "_extend", keep)
+    lin.run()
+    distinct = {}
+    for v in seen:
+        distinct.setdefault(v, set()).add(id(v))
+    assert distinct, "the fixture must store origin sets"
+    assert all(len(ids) == 1 for ids in distinct.values())

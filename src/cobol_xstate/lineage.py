@@ -41,9 +41,11 @@ Honest limits, all surfaced in ``flags`` rather than guessed:
 
 from __future__ import annotations
 
+import functools
 import heapq
 import json
 import re
+import weakref
 from collections import deque
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
@@ -93,15 +95,78 @@ class _Tracked(dict):
                 old[k] = get(self, k)
         dict.update(self, values)
 
-    def changes(self) -> Tuple[Dict[str, OriginSet], Dict[str, Optional[OriginSet]]]:
-        """The written keys whose value really changed: ``(new values, old values)``."""
-        new, old = {}, {}
+    def changes(self, canon: Dict[OriginSet, OriginSet]) -> Dict[str, OriginSet]:
+        """The written keys whose value really changed, with their new values. Every
+        value left in the map is a shared one: a changed value is replaced by its
+        ``canon`` copy, and a key rewritten with an equal set keeps the object it held."""
+        new = {}
         for k, was in self.old.items():
             now = dict.__getitem__(self, k)
-            if now is not was and now != was:
-                new[k] = now
-                old[k] = was
-        return new, old
+            if now is was:
+                continue
+            if now == was:
+                dict.__setitem__(self, k, was)
+                continue
+            now = canon.setdefault(now, now)
+            dict.__setitem__(self, k, now)
+            new[k] = now
+        return new
+
+
+class _Overlay(_Tracked):
+    """A visit's working map laid over a stored map (a `_Node`) without copying it: the
+    visit's writes are held here, and a key it has not written is read from the node.
+    A wide map is thousands of entries while most visits touch a few dozen, so copying
+    it per visit (as `_Tracked` is) was most of what a revisit cost. A visit that reads
+    a lot (a group MOVE reads every field of its source) lays the node out whole after
+    `_LAYOUT_AFTER` reads instead of walking its chain for each. Supports exactly what
+    `_apply` and its helpers use: ``get``, ``in``, ``[k]``, ``[k] = v`` and ``put``."""
+    __slots__ = ("node", "below", "reads")
+
+    def __init__(self, node: "_Node"):
+        dict.__init__(self)
+        self.old = {}
+        self.node = node
+        self.reads = 0
+        self.below = (node.full.get if node.full is not None
+                      else functools.partial(_lookup, node))
+
+    def _below(self, key):
+        self.reads += 1
+        if self.reads == _LAYOUT_AFTER and self.node.full is None:
+            self.below = _materialize(self.node).get
+        return self.below(key)
+
+    def get(self, key, default=None):
+        v = dict.get(self, key)
+        if v is None:
+            v = self._below(key)
+        return default if v is None else v
+
+    def __contains__(self, key):
+        return dict.__contains__(self, key) or self._below(key) is not None
+
+    def __getitem__(self, key):
+        v = self.get(key)
+        if v is None:
+            raise KeyError(key)
+        return v
+
+    def __setitem__(self, key, value):
+        old = self.old
+        if key not in old:
+            old[key] = self.get(key)
+        dict.__setitem__(self, key, value)
+
+    def put(self, values: State) -> None:
+        old = self.old
+        for k in values:
+            if k not in old:
+                old[k] = self.get(k)
+        dict.update(self, values)
+
+
+_LAYOUT_AFTER = 48   # reads after which a visit's `_Overlay` lays its node out whole
 
 
 class _Node:
@@ -111,34 +176,138 @@ class _Node:
     layout that is thousands of entries per state while a state changes about a dozen
     (median 12 of 2,285 on an 11k-line program), so copying, merging and comparing
     whole maps was the cost of the pass and a full map per state its memory. A node
-    keeps only ``delta``, plus a ``full`` snapshot once it is ``_HOPS`` nodes from the
-    last one, so a value is never more than ``_HOPS`` lookups away. Nodes are never
-    mutated once built, so ``base`` links can be shared freely.
+    keeps only ``delta``, until it is ``_HOPS`` nodes from the last ``full`` snapshot:
+    then it becomes one, so a value is never more than ``_HOPS`` lookups away. A
+    snapshot keeps only a weak link (``up``) to the node it grew from, so a chain holds
+    one snapshot alive, not every map ever built above it (which grew without bound
+    on programs whose states are re-solved many times). Nodes never change what they
+    answer once built, so they can be shared freely."""
+    __slots__ = ("base", "delta", "hops", "full", "up", "__weakref__")
 
-    ``h`` is an order-independent fingerprint of the WHOLE map (a sum over its entries),
-    kept up to date from each delta: two maps whose fingerprints differ differ, which
-    settles most "did this state's map change" tests at once. Equal fingerprints are
-    always confirmed key by key, so no answer rests on a hash."""
-    __slots__ = ("base", "delta", "depth", "hops", "full", "h")
-
-    def __init__(self, base: Optional["_Node"], delta: Dict[str, OriginSet],
-                 old: Dict[str, Optional[OriginSet]], full: Optional[dict] = None):
+    def __init__(self, base: Optional["_Node"], delta: Optional[Dict[str, OriginSet]],
+                 full: Optional[dict] = None):
         self.base = base
         self.delta = delta
-        self.depth = base.depth + 1 if base is not None else 0
         self.full = full
         self.hops = 0 if full is not None else base.hops + 1
-        h = base.h if base is not None else 0
-        for k, v in delta.items():
-            was = old.get(k)
-            h += hash((k, v)) - (hash((k, was)) if was is not None else 0)
-        self.h = h
+        self.up = None
 
 
-_HOPS = 16          # a full snapshot at least every this many nodes down a chain
-_WALK = 32          # a common-ancestor walk longer than this falls back to full maps
-_MISSING = object()
+_HOPS = 8           # a full snapshot at least every this many nodes down a chain
+_WALK = 32          # how far up `_since_common` looks for a shared ancestor
 _NO_ORIGINS: OriginSet = frozenset()
+
+
+# -- origin maps as change chains (see `_Node`) ------------------------------------
+
+
+def _extend(base: _Node, delta: Dict[str, OriginSet],
+            full: Optional[dict] = None) -> _Node:
+    """``base`` with ``delta`` applied - or ``base`` itself when nothing changed.
+    ``full``, when the caller already holds the whole map, becomes the snapshot if
+    this node is due one."""
+    if not delta:
+        return base
+    node = _Node(base, delta)
+    if node.hops >= _HOPS:
+        if full is None:
+            full = _materialize(node)
+        full.old = None
+        # The snapshot answers every lookup itself, so the chain above it need not
+        # be kept: only a WEAK link stays, for finding the maps it shares an
+        # ancestor with while that ancestor is still in use (`_since_common`).
+        node.full, node.up, node.base, node.hops = full, weakref.ref(node.base), None, 0
+    return node
+
+
+def _materialize(node: _Node) -> _Tracked:
+    """The whole map at ``node``, as a fresh, private, write-tracked dict."""
+    chain = []
+    while node.full is None:
+        chain.append(node.delta)
+        node = node.base
+    out = _Tracked.of(node.full)
+    for delta in reversed(chain):
+        dict.update(out, delta)
+    return out
+
+
+def _whole(node: _Node) -> dict:
+    """The whole map at ``node``, to read only: its snapshot itself when it is one."""
+    return node.full if node.full is not None else _materialize(node)
+
+
+def _lookup(node: _Node, key: str) -> Optional[OriginSet]:
+    while node.full is None:
+        delta = node.delta
+        if key in delta:
+            return delta[key]
+        node = node.base
+    return node.full.get(key)
+
+
+def _differ(a: _Node, b: _Node, keys) -> List[str]:
+    """The keys among ``keys`` on which two maps disagree."""
+    keys = list(keys)
+    ga, gb = _getter(a, len(keys)), _getter(b, len(keys))
+    return [k for k, va, vb in zip(keys, map(ga, keys), map(gb, keys))
+            if va is not vb and va != vb]
+
+
+def _since_common(nodes: List[_Node]) -> Tuple[Optional[_Node], Set[str]]:
+    """The nearest map every one of ``nodes`` grew from (``None`` when they share
+    no snapshot), and every key changed between it and any of them: the only keys
+    on which they can differ from it."""
+    lines = []
+    for n in nodes:
+        line = [n]
+        while len(line) <= _WALK:
+            if n.full is None:
+                n = n.base
+            else:
+                n = n.up() if n.up is not None else None
+                if n is None:
+                    break
+            line.append(n)
+        lines.append(line)
+    others = [set(map(id, line)) for line in lines[1:]]
+    top = next((a for a in lines[0] if all(id(a) in o for o in others)), None)
+    keys: Set[str] = set()
+    if top is not None:
+        for line in lines:
+            for n in line:
+                if n is top:
+                    break
+                keys.update(n.delta)
+    return top, keys
+
+
+def _snapshot(node: _Node) -> dict:
+    """The snapshot ``node`` grew from: its size is the map's width, near enough."""
+    while node.full is None:
+        node = node.base
+    return node.full
+
+
+def _getter(node: _Node, lookups: int):
+    """A lookup function for ``node``: down its chain for a few keys, or into the
+    map laid out whole when that is cheaper than ``lookups`` chain walks."""
+    if node.full is not None:
+        return node.full.get
+    if 8 * lookups * node.hops > len(_snapshot(node)):
+        return _materialize(node).get
+    return functools.partial(_lookup, node)
+
+
+def _differ_all(a: _Node, b: _Node) -> List[str]:
+    """Every key on which two maps disagree."""
+    top, keys = _since_common([a, b])
+    if top is not None:
+        return _differ(a, b, keys)
+    ma, mb = _materialize(a), _materialize(b)
+    out = [k for k, v in ma.items() if mb.get(k) is not v and mb.get(k) != v]
+    out.extend(k for k in mb if k not in ma)
+    return out
 
 # A condition: (guard name, is it the NEGATED sense?). Negation is first-class because
 # the else / WHEN OTHER branch carries no guard of its own - its condition is precisely
@@ -340,6 +509,7 @@ class _Lineage:
         self._kids = None
         self._layouts: Dict[str, dict] = {}
         self._placements: Dict[Tuple[str, str], tuple] = {}
+        self._canon: Dict[OriginSet, OriginSet] = {}
         self.cursors = _iface._cursor_tables(self.provenance)
         # A FETCH's host-variable <-> Db2 COLUMN correlation, recovered from the cursor's
         # DECLARE. Only the interface build passed this to `_classify`, so every FETCH row
@@ -1535,140 +1705,54 @@ class _Lineage:
 
     # -- origin maps as change chains (see `_Node`) --------------------------------
 
-    @staticmethod
-    def _node(base: _Node, delta: Dict[str, OriginSet],
-              old: Dict[str, Optional[OriginSet]],
-              full: Optional[dict] = None) -> _Node:
-        """``base`` with ``delta`` applied (``old``: those keys' values in ``base``) -
-        or ``base`` itself when nothing changed. ``full``, when the caller already
-        holds the whole map, becomes the snapshot if this node is due one."""
-        if not delta:
-            return base
-        node = _Node(base, delta, old)
-        if node.hops >= _HOPS:
-            if full is None:
-                full = _Lineage._materialize(node)
-            full.old = None
-            node.full, node.hops = full, 0
-        return node
-
-    @staticmethod
-    def _materialize(node: _Node) -> _Tracked:
-        """The whole map at ``node``, as a fresh, private, write-tracked dict."""
-        chain = []
-        while node.full is None:
-            chain.append(node.delta)
-            node = node.base
-        out = _Tracked.of(node.full)
-        for delta in reversed(chain):
-            dict.update(out, delta)
-        return out
-
-    @staticmethod
-    def _get(node: _Node, key: str) -> Optional[OriginSet]:
-        while node.full is None:
-            delta = node.delta
-            if key in delta:
-                return delta[key]
-            node = node.base
-        return node.full.get(key)
-
-    @staticmethod
-    def _ancestor(a: _Node, b: _Node) -> Optional[_Node]:
-        """The nearest node both descend from, or None past `_WALK` steps."""
-        steps = 0
-        while a.depth > b.depth:
-            a, steps = a.base, steps + 1
-            if steps > _WALK:
-                return None
-        while b.depth > a.depth:
-            b, steps = b.base, steps + 1
-            if steps > _WALK:
-                return None
-        while a is not b:
-            a, b, steps = a.base, b.base, steps + 2
-            if steps > _WALK:
-                return None
-        return a
-
-    @staticmethod
-    def _path(node: _Node, top: _Node) -> Dict[str, OriginSet]:
-        """Every key changed between ``top`` and ``node``, with its value at ``node``."""
-        vals: Dict[str, OriginSet] = {}
-        while node is not top:
-            for k, v in node.delta.items():
-                if k not in vals:
-                    vals[k] = v
-            node = node.base
-        return vals
-
-    def _merge(self, nodes: List[_Node]) -> _Node:
-        """The union of several maps: a key's origins at a join are every
-        predecessor's. Only the keys changed since the predecessors' common ancestor
-        can differ between them, so only those are unioned; the rest is the ancestor's
-        map, shared. A common ancestor further than `_WALK` steps up (a loop's back
-        edge round a long body) merges the whole maps instead."""
-        top: Optional[_Node] = nodes[0]
+    def _merge_all(self, nodes: List[_Node]) -> _Node:
+        """The join of several maps, built whole: a key's origins at a join are every
+        predecessor's. Used where nothing is known about what changed - a state's first
+        visit, or a predecessor reached for the first time since its last one. Maps
+        that grew from one snapshot can differ only on the keys changed since it."""
+        top, keys = _since_common(nodes)
+        if top is not None and 4 * len(keys) < len(_snapshot(top)):
+            return _extend(top, self._rejoin(nodes, top, keys))
+        canon = self._canon
+        merged = _materialize(nodes[0])
+        get = merged.get
         for n in nodes[1:]:
-            top = self._ancestor(top, n)
-            if top is None:
-                return self._merge_full(nodes)
-        paths = [self._path(n, top) for n in nodes]
-        keys: Dict[str, None] = {}
-        for p in paths:
-            keys.update(dict.fromkeys(p))
-        delta: Dict[str, OriginSet] = {}
-        old: Dict[str, Optional[OriginSet]] = {}
-        for k in keys:
-            at_top = _MISSING
-            union = None
-            for p in paths:
-                v = p.get(k, _MISSING)
-                if v is _MISSING:
-                    if at_top is _MISSING:
-                        at_top = self._get(top, k)
-                    v = at_top
-                if v is None:
-                    continue
-                union = v if union is None else (union if union is v else union | v)
-            if at_top is _MISSING:
-                at_top = self._get(top, k)
-            if union is not at_top and union != at_top:
-                delta[k] = union
-                old[k] = at_top
-        return self._node(top, delta, old)
-
-    def _merge_full(self, nodes: List[_Node]) -> _Node:
-        merged = self._materialize(nodes[0])
-        for n in nodes[1:]:
-            for k, v in self._materialize(n).items():
-                prev = merged.get(k)
+            # equal sets are one object, so the pairs that differ are found in C
+            for k, v in _whole(n).items() - merged.items():
+                prev = get(k)
                 if prev is None:
                     merged[k] = v
-                elif prev is not v:
-                    merged[k] = prev | v
-        delta, old = merged.changes()
-        return self._node(nodes[0], delta, old, merged)
+                elif prev is not v and not v <= prev:
+                    u = prev | v
+                    merged[k] = canon.setdefault(u, u)
+        return _extend(nodes[0], merged.changes(canon), merged)
 
-    def _same(self, a: _Node, b: _Node) -> bool:
-        """Whether two maps hold the same origins for every key."""
-        if a is b:
-            return True
-        if a.h != b.h:
-            return False
-        top = self._ancestor(a, b)
-        if top is None:
-            return dict(self._materialize(a)) == dict(self._materialize(b))
-        pa, pb = self._path(a, top), self._path(b, top)
-        for k in pa.keys() | pb.keys():
-            va, vb = pa.get(k, _MISSING), pb.get(k, _MISSING)
-            if va is _MISSING or vb is _MISSING:
-                at_top = self._get(top, k)
-                va = at_top if va is _MISSING else va
-                vb = at_top if vb is _MISSING else vb
-            if va is not vb and va != vb:
-                return False
-        return True
+    def _rejoin(self, nodes: List[_Node], was: _Node, keys) -> Dict[str, OriginSet]:
+        """The keys among ``keys`` whose join over ``nodes`` differs from ``was``, with
+        their new value - every other key's join is unchanged, because no predecessor
+        changed it since ``was`` was built."""
+        canon = self._canon
+        gets = [_getter(n, len(keys)) for n in nodes]
+        was_get = _getter(was, len(keys))
+        delta: Dict[str, OriginSet] = {}
+        keys = list(keys)
+        n = len(gets)
+        for k, old, vals in zip(keys, map(was_get, keys),
+                                zip(*[list(map(get, keys)) for get in gets])):
+            u = vals[0]
+            if vals.count(u) != n:
+                u = None
+                for v in vals:
+                    if v is None or v is u:
+                        continue
+                    if u is None:
+                        u = v
+                    elif not v <= u:
+                        w = u | v
+                        u = canon.setdefault(w, w)
+            if u is not old and u != old:
+                delta[k] = u
+        return delta
 
     def run(self, timer=None) -> dict:
         # Solved once per instance. The dynamic-call view wants the primitive facts this
@@ -1691,11 +1775,13 @@ class _Lineage:
                 if t in preds:
                     preds[t].append(s)
 
-        # Every map is a chain of changes down from one empty root (see `_Node`), so
-        # any two maps have a common ancestor to diff and merge against.
-        empty = _Node(None, {}, {}, full={})
-        seed_map = self._seed()
-        seed = self._node(empty, dict(seed_map), {}, _Tracked.of(seed_map))
+        # Equal origin sets are ONE object (`_canon`): a large program holds millions of
+        # map entries but a few hundred distinct sets, and a fresh copy per entry was most
+        # of its memory. It also makes "same set?" an identity test almost everywhere.
+        canon = self._canon = {}
+        empty = _Node(None, None, full={})
+        seed_map = {k: canon.setdefault(v, v) for k, v in self._seed().items()}
+        seed = _extend(empty, seed_map, _Tracked.of(seed_map))
         # None = not yet computed, which is NOT the same as "computed and empty" - the
         # distinction is what lets an all-empty prefix still propagate to successors.
         IN: Dict[str, Optional[_Node]] = {s: None for s in self.states}
@@ -1746,6 +1832,10 @@ class _Lineage:
         later: List[Tuple[int, str]] = []    # the next pass
         queued = set(entries)
         steps = 0
+        dirty: Dict[str, Set[str]] = {}      # keys a predecessor changed since IN[s]
+        dirty_n: Dict[str, int] = {}         # ...in how many updates
+        rebuild: Set[str] = set()            # states to re-join whole
+        wrote: Dict[str, Dict[str, OriginSet]] = {}   # where OUT[s] differs from IN[s]
         # The lattice is finite (origins over fields), so this terminates; the bound is
         # a backstop against a graph shape we did not anticipate, never normal control.
         limit = max(50_000, len(self.states) * 500)
@@ -1764,35 +1854,88 @@ class _Lineage:
             # the cost of the pass: 17.4M dict.get calls on a 4,236-line CICS program,
             # 8.7 of its 12 s, because a group input's fill seeds every leaf of a real
             # copybook record (mean map width 341 fields there). 81% of its states have
-            # exactly ONE predecessor, whose map is simply shared; since group stores
-            # write every leaf (3ee1ee0) maps are wider still, so a join now unions only
-            # the keys its predecessors changed since their common ancestor (`_merge`),
-            # and "did it change" compares only those keys too (`_same`).
+            # exactly ONE predecessor, whose map is simply shared. Since group stores
+            # write every leaf (3ee1ee0) maps are wider still, and a program that
+            # PERFORMs shared routines from many places re-solves each state 5-15 times
+            # (every call of a routine placed earlier is a back edge, so a change travels
+            # one round of calls per pass). So a revisit does work in proportion to what
+            # CHANGED, not to the width: `dirty[s]` holds the keys a predecessor's output
+            # has changed on since `IN[s]` was built, only those are re-joined
+            # (`_rejoin`), and only the keys this state's input or own writes touched are
+            # compared to decide whether its output changed. Every other key is equal by
+            # construction - the answer is exactly the whole-map join's. A state is
+            # re-joined whole (`rebuild`) on its first visit and when a predecessor
+            # produces its first output, since nothing is known about what that adds.
             live = [OUT[p] for p in preds.get(s, []) if OUT[p] is not None]
             if s in entryset:
                 live.insert(0, seed)
-            if len(live) == 1:
+            was = IN[s]
+            keys = dirty.pop(s, None)
+            updates = dirty_n.pop(s, 0)
+            if was is None or s in rebuild:
+                rebuild.discard(s)
+                if len(live) == 1:
+                    merged = live[0]
+                elif live:
+                    merged = self._merge_all(live)
+                else:
+                    merged = empty
+                in_changed = () if was is None else _differ_all(merged, was)
+                if was is not None and not in_changed:
+                    continue                  # input unchanged - nothing to redo
+            elif not keys:
+                continue
+            elif len(live) == 1:
                 merged = live[0]
-            elif live:
-                merged = self._merge(live)
+                # One predecessor that changed once since this state last ran: IN[s]
+                # equals its output from before that change, and `keys` is exactly where
+                # the change landed - nothing to look up.
+                in_changed = keys if updates == 1 else _differ(merged, was, keys)
+                if not in_changed:
+                    continue
             else:
-                merged = empty
-            if IN[s] is not None and self._same(merged, IN[s]):
-                continue                      # input unchanged - nothing to redo
+                in_changed = self._rejoin(live, was, keys)
+                if not in_changed:
+                    continue
+                merged = _extend(was, in_changed)
             IN[s] = merged
-            work_map = self._apply(s, self.states[s], self._materialize(merged), None)
-            delta, old = work_map.changes()
-            new_out = self._node(merged, delta, old, work_map)
-            if OUT[s] is None or not self._same(new_out, OUT[s]):
-                OUT[s] = new_out
-                for t in self.succs.get(s, []):
-                    if t in self.states and t not in queued:
-                        ti = rpo.get(t, far)
-                        if ti > cur:
-                            heapq.heappush(work, (ti, t))
-                        else:
-                            later.append((ti, t))
-                        queued.add(t)
+            work_map = self._apply(s, self.states[s], _Overlay(merged), None)
+            delta = work_map.changes(canon)
+            new_out = _extend(merged, delta)
+            prev_out = OUT[s]
+            if prev_out is None:
+                out_changed = None            # a first output: successors re-join whole
+            else:
+                # A key neither this visit nor the last one wrote passes straight
+                # through, so its output changed exactly where its input did; only the
+                # written keys need comparing.
+                written = set(delta)
+                written.update(wrote.get(s, ()))
+                out_changed = set(in_changed)
+                out_changed.difference_update(written)
+                out_changed.update(_differ(new_out, prev_out, written))
+            # OUT[s] holds IN[s] plus these keys either way: when it is kept below, it is
+            # equal to `new_out`
+            wrote[s] = delta
+            if out_changed is not None and not out_changed:
+                continue
+            OUT[s] = new_out
+            for t in self.succs.get(s, []):
+                if t not in self.states:
+                    continue
+                if IN[t] is not None:
+                    if out_changed is None:
+                        rebuild.add(t)
+                    elif t not in rebuild:
+                        dirty.setdefault(t, set()).update(out_changed)
+                        dirty_n[t] = dirty_n.get(t, 0) + 1
+                if t not in queued:
+                    ti = rpo.get(t, far)
+                    if ti > cur:
+                        heapq.heappush(work, (ti, t))
+                    else:
+                        later.append((ti, t))
+                    queued.add(t)
 
         if timer is not None:
             timer.since("lineage:origins", t_origins)
@@ -1813,7 +1956,7 @@ class _Lineage:
                         "events": lost,
                     })
                 continue
-            self._apply(s, self.states[s], self._materialize(IN[s]), rows)
+            self._apply(s, self.states[s], _materialize(IN[s]), rows)
 
         for u in unreached:
             n = sum(len(e["fields"]) for e in u["events"])
@@ -1901,7 +2044,7 @@ class _Lineage:
             timer.since("lineage:rows", t_rows)
         # Only the solve reads these, and the view above is all that is asked for again;
         # the Machine keeps this instance cached, so do not keep them alive with it.
-        self._kids, self._layouts, self._placements = None, {}, {}
+        self._kids, self._layouts, self._placements, self._canon = None, {}, {}, {}
         return self._view
 
 
