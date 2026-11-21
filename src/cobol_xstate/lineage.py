@@ -182,19 +182,24 @@ class _Node:
     one snapshot alive, not every map ever built above it (which grew without bound
     on programs whose states are re-solved many times). Nodes never change what they
     answer once built, so they can be shared freely."""
-    __slots__ = ("base", "delta", "hops", "full", "up", "__weakref__")
+    __slots__ = ("base", "delta", "hops", "load", "width", "full", "up", "__weakref__")
 
     def __init__(self, base: Optional["_Node"], delta: Optional[Dict[str, OriginSet]],
                  full: Optional[dict] = None):
         self.base = base
         self.delta = delta
         self.full = full
-        self.hops = 0 if full is not None else base.hops + 1
         self.up = None
+        if full is not None:
+            self.hops, self.load, self.width = 0, 0, len(full)
+        else:
+            self.hops, self.load = base.hops + 1, base.load + len(delta)
+            self.width = base.width
 
 
 _HOPS = 8           # a full snapshot at least every this many nodes down a chain
 _WALK = 32          # how far up `_since_common` looks for a shared ancestor
+_LOAD = 4           # ...or once the changes above a snapshot exceed 1/_LOAD of the map
 _NO_ORIGINS: OriginSet = frozenset()
 
 
@@ -209,14 +214,18 @@ def _extend(base: _Node, delta: Dict[str, OriginSet],
     if not delta:
         return base
     node = _Node(base, delta)
-    if node.hops >= _HOPS:
+    # Due a snapshot after `_HOPS` nodes, or sooner once the changes stacked above the
+    # last one add up to a fair part of the map: then a lookup or a layout would spend
+    # more walking deltas than a snapshot costs to keep.
+    if node.hops >= _HOPS or node.load * _LOAD > node.width:
         if full is None:
             full = _materialize(node)
         full.old = None
         # The snapshot answers every lookup itself, so the chain above it need not
         # be kept: only a WEAK link stays, for finding the maps it shares an
         # ancestor with while that ancestor is still in use (`_since_common`).
-        node.full, node.up, node.base, node.hops = full, weakref.ref(node.base), None, 0
+        node.full, node.up, node.base = full, weakref.ref(node.base), None
+        node.hops, node.load, node.width = 0, 0, len(full)
     return node
 
 
@@ -1065,8 +1074,9 @@ class _Lineage:
     # -- transfer -----------------------------------------------------------
     def _apply(self, name: str, st: dict, cur: State,
                rows: Optional[List[dict]]) -> State:
-        """Run a state's entry actions over the origin map ``cur`` - a private copy the
-        caller materialized (`_materialize`), updated in place and returned. When
+        """Run a state's entry actions over the origin map ``cur`` - the visit's own
+        working map (an `_Overlay`, or a `_materialize`d copy), updated in place and
+        returned. When
         ``rows`` is given, emit a row for every field of every event the state
         performs."""
         for aname in st.get("entry", []) or []:
@@ -1899,9 +1909,12 @@ class _Lineage:
                     continue
                 merged = _extend(was, in_changed)
             IN[s] = merged
-            work_map = self._apply(s, self.states[s], _Overlay(merged), None)
-            delta = work_map.changes(canon)
-            new_out = _extend(merged, delta)
+            st = self.states[s]
+            if st.get("entry"):
+                delta = self._apply(s, st, _Overlay(merged), None).changes(canon)
+                new_out = _extend(merged, delta)
+            else:                             # no actions: the output IS the input
+                delta, new_out = {}, merged
             prev_out = OUT[s]
             if prev_out is None:
                 out_changed = None            # a first output: successors re-join whole
@@ -1911,9 +1924,12 @@ class _Lineage:
                 # written keys need comparing.
                 written = set(delta)
                 written.update(wrote.get(s, ()))
-                out_changed = set(in_changed)
-                out_changed.difference_update(written)
-                out_changed.update(_differ(new_out, prev_out, written))
+                if written:
+                    out_changed = set(in_changed)
+                    out_changed.difference_update(written)
+                    out_changed.update(_differ(new_out, prev_out, written))
+                else:
+                    out_changed = in_changed
             # OUT[s] holds IN[s] plus these keys either way: when it is kept below, it is
             # equal to `new_out`
             wrote[s] = delta

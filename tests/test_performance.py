@@ -1075,14 +1075,16 @@ def test_group_move_layouts_are_computed_once_not_per_visit(monkeypatch):
     assert sorted(laid_out) == ["A-REC", "B-REC"]
 
 
-@pytest.mark.parametrize("hops, walk, layout", [
-    (1, 0, 1), (1, 10_000, 10**9), (10_000, 0, 10**9), (10_000, 10_000, 1), (8, 32, 48)])
+@pytest.mark.parametrize("hops, walk, layout, load", [
+    (1, 0, 1, 0), (1, 10_000, 10**9, 10**6), (10_000, 0, 10**9, 0),
+    (10_000, 10_000, 1, 10**6), (10_000, 32, 48, 0), (8, 32, 48, 4)])
 def test_change_chain_maps_answer_the_same_whatever_their_shortcuts(monkeypatch, hops,
-                                                                    walk, layout):
+                                                                    walk, layout, load):
     """The fixpoint keeps each state's origin map as the keys it changed (`_Node`), with
-    three shortcuts: a full snapshot every `_HOPS` nodes, a first join that diffs from
-    the nearest shared ancestor within `_WALK` steps (else joins whole maps), and a
-    visit's `_Overlay` that lays its map out whole after `_LAYOUT_AFTER` reads. None may
+    four shortcuts: a full snapshot every `_HOPS` nodes, or sooner once the chain's
+    deltas pass 1/`_LOAD` of the map's width, a first join that diffs from the nearest
+    shared ancestor within `_WALK` steps (else joins whole maps), and a visit's
+    `_Overlay` that lays its map out whole after `_LAYOUT_AFTER` reads. None may
     change an answer - so force each path, on shapes with joins, loops, group MOVEs and
     shared routines, and compare whole views."""
     machines = [_wide_fields_machine(24, 40), _converging_handlers_machine(6, 4, 8),
@@ -1092,6 +1094,7 @@ def test_change_chain_maps_answer_the_same_whatever_their_shortcuts(monkeypatch,
     monkeypatch.setattr(lineage_mod, "_HOPS", hops)
     monkeypatch.setattr(lineage_mod, "_WALK", walk)
     monkeypatch.setattr(lineage_mod, "_LAYOUT_AFTER", layout)
+    monkeypatch.setattr(lineage_mod, "_LOAD", load)
     assert [_Lineage(m).run() for m in machines] == expected
 
 

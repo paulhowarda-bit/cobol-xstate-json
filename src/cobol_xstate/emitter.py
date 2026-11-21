@@ -510,6 +510,24 @@ def _negated_externals(external_guards: List[str]) -> Dict[str, str]:
 # machine config (strip provenance meta; numeric context -> decimal strings)
 # --------------------------------------------------------------------------- #
 
+def copy_tree(obj):
+    """``copy.deepcopy`` for the JSON-shaped configs the views rewrite, 5-10x faster.
+
+    A config is a tree of dicts, lists and scalars with no shared sub-objects, so the
+    memo and per-object dispatch deepcopy pays for are pure overhead - and it was most of
+    the time the bundle and reactive views took. Anything that is not a plain dict, list
+    or scalar still goes through ``copy.deepcopy``, so nothing is ever shared by mistake.
+    """
+    t = type(obj)
+    if t is dict:
+        return {k: copy_tree(v) for k, v in obj.items()}
+    if t is list:
+        return [copy_tree(v) for v in obj]
+    if t is str or t is int or t is bool or t is float or obj is None:
+        return obj
+    return copy.deepcopy(obj)
+
+
 def _strip_meta(obj):
     if isinstance(obj, dict):
         return {k: _strip_meta(v) for k, v in obj.items() if k != "meta"}
@@ -875,7 +893,7 @@ def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: Lis
             continue
         keys = [k for p in owner for k in by_para.get(p, ())]
         keys.sort(key=position.__getitem__)
-        own = copy.deepcopy({k: pool[k] for k in keys})
+        own = {k: copy_tree(pool[k]) for k in keys}   # private: rerouted in place below
         if initial not in own:
             continue
         needed: set = set()
@@ -894,12 +912,16 @@ def _invoke_transform(orig_states: dict, initial: str, ordered: List[str],
                       ) -> Tuple[dict, Dict[str, dict]]:
     """Return (main_states, actor_configs). Performs become invokes of actor machines;
     main is pruned to what is reachable from `initial` (the un-performed paragraph copies
-    fall away). Each actor config is {initial, states} with a `__RET__` final."""
+    fall away). Each actor config is {initial, states} with a `__RET__` final.
+
+    The main states returned SHARE objects with ``orig_states`` (splitting never writes
+    to its input), so a caller hands in states it owns - every caller does, a private
+    copy of the machine's config. Actor states are copied, because one paragraph's
+    states can sit in several actors and each is rerouted in place."""
     buildable = _buildable_targets(orig_states, ordered, sections)
-    main_src = copy.deepcopy(orig_states)
     main_new: dict = {}
     sink: set = set()
-    for k, st in main_src.items():
+    for k, st in orig_states.items():
         _emit_split(k, st, main_new, buildable, sink)
     main_new = _prune(main_new, initial)
 
@@ -921,11 +943,10 @@ def _invoke_transform_parallel(regions: dict, ordered: List[str],
 
     new_regions: dict = {}
     seed: set = set()
-    for name, r in regions.items():
-        src = copy.deepcopy(r.get("states", {}))
+    for name, r in regions.items():             # shares with `regions`, as above
         new_states: dict = {}
         sink: set = set()
-        for k, st in src.items():
+        for k, st in r.get("states", {}).items():
             _emit_split(k, st, new_states, buildable, sink)
         nr = dict(r)
         nr["states"] = _prune(new_states, r["initial"])
@@ -941,7 +962,7 @@ def _invoke_transform_parallel(regions: dict, ordered: List[str],
 
 def emit_setup_module(machine: Machine, runtime_import: str = RUNTIME_IMPORT) -> str:
     fields = _field_table(machine)
-    config = _strip_meta(copy.deepcopy(machine.config))
+    config = _strip_meta(machine.config)        # a fresh tree: _strip_meta rebuilds it
     config["context"] = _js_context(config, fields)
 
     # PERFORM -> invoke: rebuild the runnable flow with real call-return.

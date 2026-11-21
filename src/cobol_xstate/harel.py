@@ -43,10 +43,10 @@ provenance the compiler already produced. ``Machine.config`` is left untouched.
 
 from __future__ import annotations
 
-import copy
 from typing import Dict, List, Optional, Tuple
 
 from .emitter import (
+    copy_tree,
     _invoke_transform,
     _invoke_transform_parallel,
     _para_of,
@@ -164,7 +164,7 @@ def to_harel(machine) -> Tuple[dict, Dict[str, dict]]:
     the never-executed physical fall-through pruned. ``charts`` maps each callee's actor
     name to its own chart, the statechart model of a performed paragraph.
     """
-    src = copy.deepcopy(machine.config)
+    src = copy_tree(machine.config)
     ordered = machine.paragraph_order
     sections = getattr(machine, "sections", {}) or {}
     charts: Dict[str, dict] = {}

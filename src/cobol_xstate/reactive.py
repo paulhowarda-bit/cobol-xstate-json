@@ -31,7 +31,6 @@ but not proven. Anything unhandled is flagged, never faked.
 
 from __future__ import annotations
 
-import copy
 import json
 from typing import Dict, List, Optional, Tuple
 
@@ -236,7 +235,7 @@ def _flatten(config: dict, ordered: List[str], sections: Dict[str, List[str]],
         origin: Dict[str, str] = {}
         for sid, st in cfg.get("states", {}).items():
             nsid = _ns(target, sid)
-            flat[nsid] = _retarget(copy.deepcopy(st), target)
+            flat[nsid] = _retarget(st, target)    # actor states are private copies
             origin[nsid] = sid
         out.inline[target] = {
             "prefix": f"{target}__",
@@ -551,7 +550,7 @@ def _lower(machine: Machine) -> _Lowered:
 
 def _lower_uncached(machine: Machine) -> _Lowered:
     fields = _field_table(machine)
-    config = _strip_meta(copy.deepcopy(machine.config))
+    config = _strip_meta(machine.config)        # a fresh tree: _strip_meta rebuilds it
 
     if config.get("type") == "parallel":
         raise ReactiveLoweringError(
