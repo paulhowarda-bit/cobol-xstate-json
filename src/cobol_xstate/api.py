@@ -79,6 +79,9 @@ class Analysis:
     #: ``business.BUSINESS_BUDGET``: past it the view raises ``ViewBudgetExceeded``
     #: rather than return a shorter answer that would read as complete.
     business_budget: int = BUSINESS_BUDGET
+    #: Walk steps the business view took (``business.build_business_view``'s
+    #: ``walkSteps``), once it has been asked for; the budget itself on a refusal.
+    business_steps: Optional[int] = None
 
     _art: Optional[dict] = field(default=None, repr=False)
     _dyn: Optional[dict] = field(default=None, repr=False)
@@ -126,17 +129,29 @@ class Analysis:
             self._lin = build_lineage(self.machine)
         return self._lin
 
-    def business(self) -> dict:
+    def business(self, timer: Optional[StageTimer] = None) -> dict:
         """Scaffolding collapsed to boundary, decision and calculation states.
 
         The only one of the three that genuinely recomputed end to end: it builds a fresh
         _BusinessView every call, over a Machine-cached interface.
 
         Raises ``ViewBudgetExceeded`` when the walk needs more than ``business_budget``
-        steps; the view is then not produced at all, and asking again raises again."""
-        if self._bus is None:
-            self._bus = build_business_view(self.machine, self.business_budget)
-        return self._bus
+        steps; the view is then not produced at all, and asking again raises again.
+
+        ``timer``: its open stage gets ``walkSteps`` (`business_steps`), refusal or not,
+        so a --timing run reports the number the budget is set against."""
+        try:
+            if self._bus is None:
+                stats: dict = {}
+                try:
+                    self._bus = build_business_view(self.machine, self.business_budget,
+                                                    stats)
+                finally:
+                    self.business_steps = stats.get("walkSteps")
+            return self._bus
+        finally:
+            if timer is not None and self.business_steps is not None:
+                timer.count("walkSteps", self.business_steps)
 
     def reactive(self) -> dict:
         """May raise ``ReactiveLoweringError`` (a ``NotImplementedError``): the lowering
@@ -504,6 +519,8 @@ def write_views(analysis: Analysis, dest, *, base: Optional[str] = None,
             return analysis.prefetch.report()
         if name == "fetch":
             return analysis.fetch
+        if name == "business":
+            return analysis.business(timer)
         return getattr(analysis, name.replace("-", "_"))()
 
     written: Dict[str, Path] = {}

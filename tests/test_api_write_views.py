@@ -113,7 +113,7 @@ def test_targets_bundle_only_does_not_compute_business(tmp_path, monkeypatch):
 
 def test_a_crashing_companion_is_a_warning_and_the_rest_still_land(tmp_path, monkeypatch,
                                                                    caplog):
-    def _boom(machine, budget=None):
+    def _boom(machine, budget=None, stats=None):
         raise RuntimeError("view exploded")
 
     monkeypatch.setattr(cobol_xstate.api, "build_business_view", _boom)
@@ -127,7 +127,7 @@ def test_a_crashing_companion_is_a_warning_and_the_rest_still_land(tmp_path, mon
 
 
 def test_debug_re_raises_a_companion_failure(tmp_path, monkeypatch):
-    def _boom(machine, budget=None):
+    def _boom(machine, budget=None, stats=None):
         raise RuntimeError("view exploded")
 
     monkeypatch.setattr(cobol_xstate.api, "build_business_view", _boom)
@@ -155,7 +155,7 @@ def test_a_not_implemented_error_from_another_view_is_a_crash_not_a_refusal(tmp_
                                                                             caplog):
     """Only `reactive` has a refusal. Elsewhere NotImplementedError is a defect, and takes
     the ordinary companion boundary rather than being reported as a refused view."""
-    def _boom(machine, budget=None):
+    def _boom(machine, budget=None, stats=None):
         raise NotImplementedError("business is not done yet")
 
     monkeypatch.setattr(cobol_xstate.api, "build_business_view", _boom)

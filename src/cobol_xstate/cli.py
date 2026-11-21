@@ -468,7 +468,7 @@ def _run(args, timing_sink=None) -> int:
             with timer.stage(f"view:{args.target}"):
                 obj = (analysis.lineage() if args.target == "lineage"
                        else analysis.artifacts() if args.target == "artifacts"
-                       else analysis.business())
+                       else analysis.business(timer))
                 write_json(out_path, obj, args.indent)
         except ViewBudgetExceeded as exc:
             # The view this run was asked for exceeded its budget: the run failed, and

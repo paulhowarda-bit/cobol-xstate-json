@@ -255,7 +255,7 @@ def test_a_crashing_companion_view_does_not_fail_a_run_with_a_written_bundle(
     that CRASHES (not refuses) is a loud warning naming the view, never exit != 0."""
     from cobol_xstate import api
 
-    def boom(self):
+    def boom(self, timer=None):
         raise RuntimeError("view exploded")
 
     monkeypatch.setattr(api.Analysis, "business", boom)
@@ -274,7 +274,7 @@ def test_a_crashing_companion_view_does_not_fail_a_run_with_a_written_bundle(
 def test_a_crashing_companion_view_reraises_under_debug(tmp_path, monkeypatch):
     from cobol_xstate import api
 
-    def boom(self):
+    def boom(self, timer=None):
         raise RuntimeError("view exploded")
 
     monkeypatch.setattr(api.Analysis, "business", boom)
@@ -442,6 +442,26 @@ def test_stage_timer_reports_the_process_peak_memory_per_stage():
     assert sum(" MB" in m for m in msgs) == 2
 
 
+def test_stage_timer_counts_join_the_open_stage():
+    """A count lands on the innermost open stage - in its row and its printed line - and
+    is kept when that stage raises, so a stage that failed still says how far it got."""
+    log = _FakeLog()
+    t = StageTimer(log, enabled=True, source_name="x.cbl")
+    with t.stage("outer"):
+        with t.stage("inner"):
+            t.count("walkSteps", 5614)
+    with pytest.raises(ValueError):
+        with t.stage("failed"):
+            t.count("walkSteps", 500)
+            raise ValueError
+    t.count("walkSteps", 1)                       # no stage open: nowhere to put it
+    rows = {r["stage"]: r for r in t.timings()}
+    assert rows["inner"]["walkSteps"] == 5614 and "walkSteps" not in rows["outer"]
+    assert rows["failed"]["walkSteps"] == 500
+    t.report()
+    assert any("inner" in m and m.endswith("walkSteps 5,614") for m in log.msgs)
+
+
 def test_stage_timer_is_a_no_op_when_disabled():
     """Disabled, it must record nothing and emit nothing - the normal-run code path is
     then byte-for-byte the same as before the flag existed."""
@@ -522,7 +542,7 @@ def test_timing_sink_receives_structured_rows_without_the_flag(tmp_path, capsys)
     assert run([EXAMPLES_CBL, "--outdir", str(tmp_path)], timing_sink=got.append) == 0
     assert len(got) == 1, "the sink is called exactly once, on a completed run"
     rows = got[0]
-    assert rows and all(set(r) == {"stage", "ms", "peakMB"} for r in rows)
+    assert rows and all(set(r) - {"walkSteps"} == {"stage", "ms", "peakMB"} for r in rows)
     assert all(isinstance(r["ms"], float) for r in rows)
     assert all(isinstance(r["peakMB"], float) for r in rows)
     names = [r["stage"] for r in rows]
@@ -787,6 +807,28 @@ def test_business_budget_refusal_reaches_the_cli(tmp_path, capsys):
     assert run([EXAMPLES_CBL, "--outdir", str(lifted), "--target", "business",
                 "--business-budget", "0"]) == 0
     assert (lifted / "banktran.business.json").exists()
+
+
+def _business_steps(argv):
+    got = []
+    code = run(argv, timing_sink=got.append)
+    rows = [r for r in got[0] if r["stage"] == "view:business"]
+    assert len(rows) == 1
+    return code, rows[0].get("walkSteps")
+
+
+def test_timing_reports_the_business_walk_steps(tmp_path, capsys):
+    """The number the budget counts, so the budget can be set from real runs: on the
+    business view's own row, for a default run and for --target business, and as the
+    budget itself when the view is refused."""
+    code, steps = _business_steps([EXAMPLES_CBL, "--outdir", str(tmp_path / "d")])
+    assert code == 0 and isinstance(steps, int) and 0 < steps <= 250_000
+    assert _business_steps([EXAMPLES_CBL, "--outdir", str(tmp_path / "t"),
+                            "--target", "business"]) == (0, steps)
+    assert _business_steps([EXAMPLES_CBL, "--outdir", str(tmp_path / "r"),
+                            "--business-budget", "1"]) == (0, 1)
+    assert run([EXAMPLES_CBL, "--outdir", str(tmp_path / "p"), "--timing"]) == 0
+    assert f"walkSteps {steps:,}" in capsys.readouterr().err
 
 
 def test_business_budget_must_be_a_step_count(tmp_path, capsys):

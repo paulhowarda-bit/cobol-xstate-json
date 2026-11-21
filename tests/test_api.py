@@ -58,7 +58,7 @@ def test_the_business_builder_is_called_once(monkeypatch):
     calls = []
     real = cobol_xstate.api.build_business_view
     monkeypatch.setattr(cobol_xstate.api, "build_business_view",
-                        lambda m, b: (calls.append(1), real(m, b))[1])
+                        lambda m, b, s=None: (calls.append(1), real(m, b, s))[1])
     a = _analysis()
     a.business()
     a.business()

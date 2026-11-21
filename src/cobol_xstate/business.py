@@ -859,9 +859,19 @@ class _BusinessView:
         return cfg
 
 
-def build_business_view(machine: Machine, budget: int = BUSINESS_BUDGET) -> dict:
+def build_business_view(machine: Machine, budget: int = BUSINESS_BUDGET,
+                        stats: Optional[dict] = None) -> dict:
     """Return the business-view distillation overlay for ``machine`` (pure read; see module).
 
     Raises `ViewBudgetExceeded` when the walk needs more than ``budget`` steps (0: no
-    limit) - see `BUSINESS_BUDGET`."""
-    return _BusinessView(machine, budget).build()
+    limit) - see `BUSINESS_BUDGET`.
+
+    ``stats``, when given, receives ``walkSteps``: the walk steps this view took, the
+    unit the budget counts. On a refusal it is the budget itself - every step allowed
+    was taken - so a run can say how far it got as well as that it stopped."""
+    view = _BusinessView(machine, budget)
+    try:
+        return view.build()
+    finally:
+        if stats is not None:
+            stats["walkSteps"] = min(view._steps, budget) if budget else view._steps

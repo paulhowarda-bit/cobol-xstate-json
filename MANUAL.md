@@ -244,7 +244,9 @@ which doubles the paths to cover at every level. The other is a program whose PE
 could recurse, which is walked one whole PERFORM stack at a time. A step costs about
 10 µs, and at most about 1 KB while its walk is live, so the default is a few seconds
 and at most a couple of hundred MB. No example program needs more than 35 steps; an
-11,000-line generated program needs 5,614.
+11,000-line generated program needs 5,614. `--timing` reports each run's count
+(`walkSteps` on its `view:business` line), so the budget can be set from your own
+programs rather than these.
 
 A business view that needs more than the budget is **not written** — never a shortened
 one, which would read as complete. Instead:
@@ -632,6 +634,14 @@ macOS and z/OS USS; `PeakWorkingSetSize` on Windows), so it counts every allocat
 never falls. The stage whose line it first jumps on is the one that drove the run's
 memory up. Reading it is one system call per stage and slows nothing. A `timing_sink`
 row carries the same number as `peakMB` (`None` on a platform with no counter).
+
+The `view:business` line (default runs and `--target business` alike) also ends
+`walkSteps N`: the walk steps the business view took, which is the unit
+`--business-budget` counts. Unlike time and memory it is the same on every machine, so
+it is the number to set the budget from: run the estate's largest programs with
+`--timing` (or a `timing_sink`, whose `view:business` row carries `walkSteps`), and with
+`--business-budget 0` for any program that is refused, since a refused view reports the
+budget itself — every step it was allowed.
 
 ### `--summary`
 
