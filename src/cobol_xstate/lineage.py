@@ -87,6 +87,11 @@ class _Tracked(dict):
             old[key] = dict.get(self, key)
         dict.__setitem__(self, key, value)
 
+    def many(self, keys: List[str]) -> List[Optional[OriginSet]]:
+        """``[cur.get(k) for k in keys]``, in one pass: what a group MOVE or a group read
+        wants, every field of a record at once."""
+        return list(map(self.get, keys))
+
     def put(self, values: State) -> None:
         """``cur[k] = v`` for every item, in one C-level update."""
         old, get = self.old, dict.get
@@ -137,6 +142,20 @@ class _Overlay(_Tracked):
             self.below = _materialize(self.node).get
         return self.below(key)
 
+    def many(self, keys: List[str]) -> List[Optional[OriginSet]]:
+        """``[cur.get(k) for k in keys]`` without a method call per key: a group MOVE
+        reads every field of its source, and every field of its target for the old
+        value, and per-key reads through the overlay were most of what it cost."""
+        r = self.reads
+        self.reads = r + len(keys)
+        if r < _LAYOUT_AFTER <= r + len(keys) and self.node.full is None:
+            self.below = _materialize(self.node).get
+        below = self.below
+        if not dict.__len__(self):         # nothing written yet this visit
+            return list(map(below, keys))
+        get = dict.get
+        return [v if (v := get(self, k)) is not None else below(k) for k in keys]
+
     def get(self, key, default=None):
         v = dict.get(self, key)
         if v is None:
@@ -160,9 +179,9 @@ class _Overlay(_Tracked):
 
     def put(self, values: State) -> None:
         old = self.old
-        for k in values:
-            if k not in old:
-                old[k] = self.get(k)
+        new = [k for k in values if k not in old]
+        if new:
+            old.update(zip(new, self.many(new)))
         dict.update(self, values)
 
 
@@ -1345,11 +1364,12 @@ class _Lineage:
         (immutable) entry is returned as it is, not copied."""
         fu = name.upper()
         keys = self.group_reads.get(fu)
-        if keys and any(k in cur for k in keys):
-            acc: Set[Origin] = set()
-            for k in keys:
-                acc |= cur.get(k, _NO_ORIGINS)
-            return acc
+        if keys:
+            vals = [v for v in cur.many(keys) if v is not None]
+            if vals:
+                acc: Set[Origin] = set()
+                acc.update(*vals)
+                return acc
         return cur.get(fu, _NO_ORIGINS)
 
     def _subgroups(self, name: str) -> List[str]:
@@ -1418,12 +1438,13 @@ class _Lineage:
         plan = self._placements.get((src, tgt))
         if plan is None:
             plan = self._placements[(src, tgt)] = self._placement(src, tgt)
-        sources, overlaps, why = plan
+        names, groups, overlaps, why = plan
         if why is not None:
             return None, why
-        # `sources`: (name, is a group) - a field's own entry is already a frozenset
-        origins = [frozenset(self._read(n, cur)) if grp else cur.get(n, _NO_ORIGINS)
-                   for n, grp in sources]
+        # a field's own entry is already a frozenset; a group source reads its leaves
+        origins = [_NO_ORIGINS if v is None else v for v in cur.many(names)]
+        for i, n in groups:
+            origins[i] = frozenset(self._read(n, cur))
         placed: Dict[str, OriginSet] = {}
         for name, hits in overlaps:
             if len(hits) == 1:                # the usual case: one source field
@@ -1436,8 +1457,9 @@ class _Lineage:
 
     def _placement(self, src: str, tgt: str):
         """Which source fields' bytes each target field overlaps, by index into the
-        source fields - ``(source names, [(target name, [i, ...])], None)`` - or
-        ``(None, None, why)`` when either layout is refused. The layouts and so the
+        source fields - ``(source names, [(i, group source name)], [(target name,
+        [i, ...])], None)`` - or ``(None, None, None, why)`` when either layout is
+        refused. The layouts and so the
         overlaps are fixed for the run: computed once per (source, target) pair, never
         at each visit of the store (re-deriving them per visit was a layout - a scan
         of the whole data dictionary per group node - at every group MOVE the fixpoint
@@ -1450,16 +1472,18 @@ class _Lineage:
         lay_s, lay_t = self._layouts[src], self._layouts[tgt]
         for lay in (lay_s, lay_t):
             if not lay.get("provable"):
-                return None, None, (f"the byte layout of {lay['record']} is not provable "
-                                    f"({lay.get('reason', 'no reason given')})")
+                return None, None, None, (
+                    f"the byte layout of {lay['record']} is not provable "
+                    f"({lay.get('reason', 'no reason given')})")
         spans = [(f["offset"], f["offset"] + f["length"]) for f in lay_s["fields"]]
         overlaps = []
         for f in lay_t["fields"]:
             lo, hi = f["offset"], f["offset"] + f["length"]
             overlaps.append((f["name"], [i for i, (s_lo, s_hi) in enumerate(spans)
                                          if s_lo < hi and lo < s_hi]))
-        return ([(f["name"].upper(), f["name"].upper() in self.group_reads)
-                 for f in lay_s["fields"]], overlaps, None)
+        names = [f["name"].upper() for f in lay_s["fields"]]
+        groups = [(i, n) for i, n in enumerate(names) if n in self.group_reads]
+        return names, groups, overlaps, None
 
     def _changed_by(self, field: str) -> List[dict]:
         """Assignments writing this field; for a group, those writing any child.
@@ -1726,16 +1750,22 @@ class _Lineage:
         canon = self._canon
         merged = _materialize(nodes[0])
         get = merged.get
+        # Every write below makes a key's value strictly larger (a new key, or a union
+        # that adds something), so the keys written ARE the delta from nodes[0]: kept
+        # here directly rather than through the map's write tracking and a re-diff.
+        delta: Dict[str, OriginSet] = {}
         for n in nodes[1:]:
             # equal sets are one object, so the pairs that differ are found in C
             for k, v in _whole(n).items() - merged.items():
                 prev = get(k)
                 if prev is None:
-                    merged[k] = v
+                    delta[k] = v
+                    dict.__setitem__(merged, k, v)
                 elif prev is not v and not v <= prev:
                     u = prev | v
-                    merged[k] = canon.setdefault(u, u)
-        return _extend(nodes[0], merged.changes(canon), merged)
+                    u = delta[k] = canon.setdefault(u, u)
+                    dict.__setitem__(merged, k, u)
+        return _extend(nodes[0], delta, merged)
 
     def _rejoin(self, nodes: List[_Node], was: _Node, keys) -> Dict[str, OriginSet]:
         """The keys among ``keys`` whose join over ``nodes`` differs from ``was``, with
