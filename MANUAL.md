@@ -767,8 +767,14 @@ Each state's distillation (`role`, `boundaryActions`, `decisions`, the stripped
 `meta.transition` indexes `transitions`, which hold its route once: `via`, the technical
 states it collapsed, and `guards`, as ids into the document's `stateNames` and `guards`
 tables (`formatVersion` 5; an edge with several guards is labelled `guards#k`, where `k`
-is the route its `meta` names). `cobol_xstate.business.expand_business_view(view)` resolves every id
-back to the full form. A synthetic `__ENTRY__` fans out to the first business state(s).
+is the route its `meta` names). Field lists are ids too (`formatVersion` 7): an
+interface event's `fields`, a boundary action's `fields` and a state's
+`meta.inputFields` / `outputFields` index the view's `fieldSets`, each distinct list
+once, and `pics` maps each field a boundary action carries to its picture, so the
+action's `{name, pic}` list is `fieldSets[i]` typed through `pics`.
+`cobol_xstate.business.expand_business_view(view)` resolves every id back to the full
+form; `expand_business_fields(view)` resolves only the field lists (the
+`formatVersion` 6 form). A synthetic `__ENTRY__` fans out to the first business state(s).
 It is a *view*, not runnable — use `--target js` to execute.
 
 ```bash
@@ -1184,6 +1190,7 @@ so a corpus joined on it can assert that two programs share state when they do n
   "data":       { /* typed data dictionary */ },
   "semantics":  { "actions": {...}, "guards": {...} },
   "interface":  { "endpoints": [], "events": [], "perimeterStates": {}, "parameters": {} },
+  "fieldSets":  [ /* each distinct field list an interface event carries, once */ ],
   "provenance": { /* name -> source trace */ },
   "flags":      [ /* things needing human verification */ ],
   "notes":      [ /* program-level remarks */ ]
@@ -1510,7 +1517,7 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 ```json
 { "event": "GET.DB2.CUST", "direction": "get", "endpointType": "db2",
   "endpoint": "CUST", "verb": "SELECT",
-  "fields": ["CUST-NAME", "CUST-BALANCE"],
+  "fields": 3,                          // fieldSets[3] = ["CUST-NAME", "CUST-BALANCE"]
   "params": ["CUST-ID"],
   "state": "1000-LOOKUP", "region": "PROGRAM", "line": 42,
   "cobol": "EXEC SQL SELECT ... END-EXEC" }
@@ -1519,7 +1526,7 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | Key | Meaning |
 |---|---|
 | `event` | `GET.<TYPE>.<ENDPOINT>` / `CREATE.<TYPE>.<ENDPOINT>` |
-| `fields` | **the data crossing in the event's direction** |
+| `fields` | **the data crossing in the event's direction** — written as an index into the document's top-level `fieldSets` (below): `fieldSets[fields]` is the list of names |
 | `params` | data flowing the *other* way in the same command (SQL `WHERE` host vars, CICS `RIDFLD` keys, `CALL … RETURNING`) — on **every** Db2 verb, not just `SELECT`: an `UPDATE`'s `WHERE` variable picks the row rather than writing a column, and a `DELETE` writes nothing at all, so all of its host variables are parameters |
 | `arguments` | on a `CALL … USING` event, **one entry per argument, in order**: the data name passed (`X` for `X`, `X OF G` and `ADDRESS OF X`), or `null` where the argument is no data item (a literal, `OMITTED`, `LENGTH OF X`). `fields` names what is passed; this is where each sits, so argument *N* joins the callee's `PROCEDURE DIVISION USING` item *N*. Absent on a CALL with no `USING`, and absent when two CALLs share one action (their labels read alike) but pass their arguments in different positions — flagged, since one list would be wrong for the other. Carried on the CALL action's spec (`kind: "call"`), which the runnable machine ignores |
 | `mapset` | on a CICS `SEND` / `RECEIVE MAP(...)` event that names its `MAPSET`: the mapset holding the map. The endpoint stays the map (the screen); absent when the `MAPSET` operand is an unresolved data item |
@@ -1534,6 +1541,23 @@ File endpoints carry their FILE-CONTROL binding (`assign` = the DD name / datase
 | `endpointUnresolved` | the endpoint is **not the resource's name**, as a token: `no-operand` — the statement names no resource this tool could read, and the endpoint is a placeholder (`<file>`, `<queue>`, `<program>`, `<table>` …; a CICS `WRITE JOURNALNAME` is one, having no type of its own); `record` — a `WRITE` / `REWRITE` / `RELEASE` names a record that no FD in the visible source declares or lists in its `DATA RECORD` clause, so its file is unknown. The endpoint and its manifest row carry it too; branch on it, never on the angle brackets |
 | `state` / `region` | which state performs the I/O — lets a renderer draw the arrow |
 | `line` / `cobol` | source trace |
+
+### `fieldSets` — each field list written once
+
+An event's `fields` is an index into the document's top-level `fieldSets`, which holds
+each distinct ordered list of field names once (`formatVersion` 7). A `READ` with no
+`INTO` carries every elementary field of every record its FD declares, and a program
+reads one file at many sites: written whole at each one, the same list grew the document
+with READ sites times record width — 300 READs of a 40-record, 2,000-field FD made a
+23.7 MB bundle and a 168 MB business view; with each list written once they are 8.8 MB
+and 11.0 MB.
+Every event carries an index, an empty list included. The reactive view writes its
+`interface` the same way, beside its own `fieldSets`; the business view shares one
+table across its interface, boundary actions and state `meta` (see `--target business`).
+`cobol_xstate.interface.expand_fields(doc)` resolves every index back to its list — the
+form `formatVersion` 6 wrote — for the bundle or the reactive view. The overlay a
+program's views read in memory (`Machine.interface()`) keeps its lists; only the
+written document indexes them.
 
 ### `columns` — the cross-program state identity
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from cobol_xstate.interface import expand_fields
 from cobol_xstate.lineage import build_lineage
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
@@ -1584,9 +1585,9 @@ def test_a_store_into_linkage_the_program_addresses_itself_is_no_caller_output()
 
 def test_own_linkage_is_no_parameter_when_the_program_has_no_using():
     from cobol_xstate.statechart import build_machine as _bm
-    iface = _bm(parse_program(_OWN_LINKAGE.replace(
+    iface = expand_fields(_bm(parse_program(_OWN_LINKAGE.replace(
         "       PROCEDURE DIVISION USING LK-PARM LK-PTR.\n",
-        "       PROCEDURE DIVISION.\n"))).bundle()["interface"]
+        "       PROCEDURE DIVISION.\n"))).bundle())["interface"]
     assert set(iface["parameters"]["fields"]) == {"LK-PARM", "LK-PTR", "LK-PASSED"}
     crossing = {f for e in iface["events"] if e["endpointType"] == "caller"
                 for f in e["fields"]}

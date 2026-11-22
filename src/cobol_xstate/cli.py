@@ -522,9 +522,10 @@ def _run(args, timing_sink=None) -> int:
 
     def _summary() -> None:
         n_states = len(machine.config.get("states", {}))
-        # The cached overlay, not `machine.bundle()["interface"]`: that is the SAME
-        # object, but reaching it through bundle() re-ran the whole Harel transform -
-        # a second deepcopy of the config and every actor chart - for one log line.
+        # The cached overlay, not `machine.bundle()["interface"]`: that is the same
+        # overlay (published with its field lists as `fieldSets` ids), but reaching it
+        # through bundle() re-ran the whole Harel transform - a second deepcopy of the
+        # config and every actor chart - for one log line.
         iface = machine.interface()
         _log.info(
             f"[{machine.program_id}] {n_states} state(s), "

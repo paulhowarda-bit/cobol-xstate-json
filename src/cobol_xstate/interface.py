@@ -1816,3 +1816,53 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
             "fields": {rec: dv.leaves(rec) for rec in (using or params)},
         },
     }
+
+
+# ------------------------------------------------------------------------------------
+# the published form: each distinct field list once
+# ------------------------------------------------------------------------------------
+
+class FieldSets:
+    """A document's interned field lists: each distinct ordered list of field names
+    written ONCE, in its top-level ``fieldSets``, and every row that carries one
+    pointing at it by index.
+
+    A ``READ`` with no ``INTO`` carries every elementary field of every record its FD
+    declares, and a program reads one file at many sites: the same list was written in
+    full at every one of them - on the interface event, and in the business view on the
+    boundary action and the state's ``meta`` as well - so a document grew with READ
+    sites times record width. ``fieldSets[id]`` is the list the row held; `expand_fields`
+    and ``business.expand_business_view`` rebuild the full form from it."""
+
+    def __init__(self) -> None:
+        self.lists: List[List[str]] = []
+        self._ids: Dict[Tuple[str, ...], int] = {}
+
+    def id(self, fields: Sequence[str]) -> int:
+        key = tuple(fields)
+        i = self._ids.get(key)
+        if i is None:
+            i = self._ids[key] = len(self.lists)
+            self.lists.append(list(key))
+        return i
+
+
+def publish_interface(iface: dict, sets: FieldSets) -> dict:
+    """The overlay as a document writes it: each event's ``fields`` is its id in
+    ``sets``, and the rest is the overlay unchanged. The overlay itself (what
+    ``Machine.interface()`` caches and every view reads) keeps its lists."""
+    out = dict(iface)
+    out["events"] = [{**e, "fields": sets.id(e["fields"])} for e in iface["events"]]
+    return out
+
+
+def expand_fields(doc: dict) -> dict:
+    """``doc`` (the bundle, or the reactive view) with each interface event's ``fields``
+    id resolved to its list and ``fieldSets`` removed: the form ``formatVersion`` 6
+    wrote. A shallow copy - what it does not resolve is shared with ``doc``."""
+    sets = doc["fieldSets"]
+    out = {k: v for k, v in doc.items() if k != "fieldSets"}
+    iface = dict(doc["interface"])
+    iface["events"] = [{**e, "fields": list(sets[e["fields"]])} for e in iface["events"]]
+    out["interface"] = iface
+    return out

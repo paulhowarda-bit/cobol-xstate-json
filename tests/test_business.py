@@ -11,9 +11,10 @@ import json
 import pytest
 
 from cobol_xstate.business import (_is_control_guard, build_business_view,
-                                   expand_business_view)
+                                   expand_business_fields, expand_business_view)
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
+from manyread import READ_FIELDS, READ_PICS, many_reads
 from pathlib import Path
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
@@ -823,3 +824,56 @@ def test_the_expanded_view_is_the_full_form():
             assert {"via", "guards", "events"} <= set(edge["meta"])
             assert not (edge.get("guard") or "").startswith("guards#")
     assert raw["formatVersion"] >= 5      # the business form since version 5
+
+
+# --------------------------------------------------------------------------- #
+# each distinct field list once (`fieldSets`), each field's picture once (`pics`)
+# --------------------------------------------------------------------------- #
+
+def test_a_record_read_at_many_sites_is_written_once_in_the_business_view():
+    raw = build_business_view(many_reads(5))
+    sets, pics = raw["fieldSets"], raw["pics"]
+    read_id = sets.index(READ_FIELDS)
+    assert sets.count(READ_FIELDS) == 1
+    assert len({tuple(s) for s in sets}) == len(sets)          # no list twice
+    reads = [a for s in raw["businessStates"].values()
+             for a in s["boundaryActions"] if a["verb"] == "READ"]
+    assert len(reads) == 5 and {a["fields"] for a in reads} == {read_id}
+    # the interface events and each node's meta point into the same table
+    assert {e["fields"] for e in raw["interface"]["events"]
+            if e["verb"] == "READ"} == {read_id}
+    metas = [st["meta"] for st in raw["machine"]["states"].values()
+             if "inputFields" in st.get("meta", {})]
+    assert metas and all(isinstance(m["inputFields"], int)
+                         and isinstance(m["outputFields"], int) for m in metas)
+    assert sorted(READ_FIELDS) in sets               # meta.inputFields' sorted form
+    assert {f: pics[f] for f in READ_FIELDS} == READ_PICS
+
+
+def test_the_business_view_field_lists_do_not_grow_with_read_sites():
+    few = build_business_view(many_reads(3))
+    many = build_business_view(many_reads(30))
+    assert few["fieldSets"] == many["fieldSets"] and few["pics"] == many["pics"]
+
+
+def test_expanding_the_business_fields_gives_the_typed_lists_back():
+    """`expand_business_fields` undoes only the field interning: a boundary action's
+    `fields` is its `{name, pic}` list again, an event's and a node's are names."""
+    m = many_reads(3)
+    raw = build_business_view(m)
+    full = expand_business_fields(raw)
+    assert "fieldSets" not in full and "pics" not in full
+    assert full["guards"] == raw["guards"]                 # the route tables untouched
+    read = next(a for s in full["businessStates"].values()
+                for a in s["boundaryActions"] if a["verb"] == "READ")
+    assert read["fields"] == [{"name": f, "pic": READ_PICS[f]} for f in READ_FIELDS]
+    name = next(n for n, st in full["machine"]["states"].items()
+                if st["meta"].get("inputFields"))
+    meta = full["machine"]["states"][name]["meta"]
+    assert meta["inputFields"] == sorted(READ_FIELDS)
+    assert meta["boundaryActions"] == full["businessStates"][name]["boundaryActions"]
+    iface_reads = [e for e in m.interface()["events"] if e["verb"] == "READ"]
+    assert [e["fields"] for e in full["interface"]["events"] if e["verb"] == "READ"] \
+        == [e["fields"] for e in iface_reads]
+    # and the full form is reached through expand_business_view as well
+    assert expand_business_view(raw)["businessStates"] == full["businessStates"]

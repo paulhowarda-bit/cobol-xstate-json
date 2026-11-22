@@ -86,7 +86,7 @@ are unchanged.
 
 | File | For |
 |---|---|
-| `prog.reactive.json` | **drawing / reviewing** - the XState config plus `interface` and `manifest`. Same shape as the other machine views, so the renderer draws it identically. The waits and publishes on this chart *are* the new system's message contract. |
+| `prog.reactive.json` | **drawing / reviewing** - the XState config plus `interface` (its events' `fields` indexing `fieldSets`, as in the bundle) and `manifest`. Same shape as the other machine views, so the renderer draws it identically. The waits and publishes on this chart *are* the new system's message contract. |
 | `prog.reactive.mjs` | **running** - the same config plus the decimal ops, guards and `recvOps`, so it executes under stock XState by sending events. |
 
 A test asserts the two carry an identical machine, so the picture cannot drift from the

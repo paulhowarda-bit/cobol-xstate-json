@@ -42,7 +42,7 @@ from . import VIEW_SCHEMA_VERSION
 from .analysis import CallAnalysis, analyze_calls
 from .conventions import base_table as _base_table
 from .conventions import load as _load_conventions
-from .interface import build_interface
+from .interface import FieldSets, build_interface, publish_interface
 from .semantics import (mask_literals, parse_condition, parse_operation,
                         split_outside_literals)
 from .model import (
@@ -184,6 +184,7 @@ class Machine:
         # run before the restructuring copies the nodes, or the boundary tags are lost.
         iface = self.interface()
         config, charts, paragraphs = to_harel(self)
+        field_sets = FieldSets()
         return {
             "format": "xstate-v5-config",
             "formatVersion": VIEW_SCHEMA_VERSION,
@@ -221,7 +222,10 @@ class Machine:
             "data": self.data,
             "semantics": {"actions": self.semantics.get("actions", {}),
                           "guards": self.semantics.get("guards", {})},
-            "interface": iface,
+            "interface": publish_interface(iface, field_sets),
+            # Each distinct field list an interface event carries, once; an event's
+            # `fields` is its index here. interface.expand_fields inlines them.
+            "fieldSets": field_sets.lists,
             "provenance": self.provenance,
             "flags": self.flags,
             "notes": self.notes,

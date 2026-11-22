@@ -768,6 +768,7 @@ def build_reactive_view(machine: Machine) -> dict:
     inbound event, and where each outbound event is published.
     """
     lo = _lower(machine)
+    field_sets = _iface.FieldSets()
     return {
         # See business.py: `format` is a discriminator, so the three views that shared
         # `xstate-v5-config` no longer do. The bundle keeps that name; it is the one this
@@ -793,7 +794,10 @@ def build_reactive_view(machine: Machine) -> dict:
             ),
         },
         "machine": lo.config,
-        "interface": lo.iface,
+        "interface": _iface.publish_interface(lo.iface, field_sets),
+        # Each distinct field list the events carry, once; an event's `fields` is its
+        # index here, as in the bundle. interface.expand_fields inlines them.
+        "fieldSets": field_sets.lists,
         "manifest": lo.manifest,
         "flags": lo.rw.flags,
     }

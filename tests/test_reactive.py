@@ -18,8 +18,9 @@ from cobol_xstate.parser import parse_program
 from cobol_xstate.reactive import (_event_slug, _find_cycle, build_reactive_view,
                                    emit_reactive_module)
 from cobol_xstate.statechart import build_machine
+from manyread import READ_FIELDS, many_reads
 
-REPO = Path(__file__).resolve().parents[1]
+REPO =Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
 RUNTIME = REPO / "src" / "cobol_xstate" / "runtime" / "cobolRuntime.mjs"
 
@@ -542,6 +543,22 @@ def test_reactive_view_and_module_are_the_same_machine():
     m = _machine("custrpt.cbl")
     assert build_reactive_view(m)["machine"] == _extract(
         emit_reactive_module(m), "machineConfig")
+
+
+def test_reactive_view_writes_each_field_list_once():
+    """The reactive view publishes its interface the way the bundle does: an event's
+    `fields` is an id into `fieldSets`, so a record READ at many sites is listed once,
+    and `expand_fields` gives back the lists the lowering itself waits on."""
+    from cobol_xstate.interface import expand_fields
+    from cobol_xstate.reactive import _lower
+    m = many_reads(5)
+    v = build_reactive_view(m)
+    sets = v["fieldSets"]
+    reads = [e for e in v["interface"]["events"] if e["verb"] == "READ"]
+    assert len(reads) == 5 and {e["fields"] for e in reads} == {sets.index(READ_FIELDS)}
+    assert len({tuple(s) for s in sets}) == len(sets)
+    assert build_reactive_view(many_reads(30))["fieldSets"] == sets
+    assert expand_fields(v)["interface"] == _lower(m).iface
 
 
 def _run_dir(root):

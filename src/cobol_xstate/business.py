@@ -190,6 +190,11 @@ class _BusinessView:
         self._inside: Dict[tuple, Optional[list]] = {}
         self._closed_set: set = set()                # classes `_closed` has proven
         self._cut = False                            # did the last `_walk` hit `arrived`
+        # Each distinct field list the view writes, once (`fieldSets`), and the picture
+        # of each field a boundary action carries (`pics`) - see `_typed_fields`.
+        self._sets = _iface.FieldSets()
+        self._pics: Dict[str, Optional[str]] = {}
+        self._typed: set = set()                     # set ids whose fields are in _pics
 
     def _flag(self, msg: str) -> None:
         if self._quiet:
@@ -916,6 +921,19 @@ class _BusinessView:
         t = it.get("type") or {}
         return t.get("pic") or t.get("category")
 
+    def _typed_fields(self, fields: List[str]) -> int:
+        """A boundary action's fields as written: the id of the list in `fieldSets`,
+        each field's picture entered once in `pics`. The pair says what the per-field
+        ``{name, pic}`` list said, and a READ of a wide record no longer writes that
+        list again at every site that reads it."""
+        i = self._sets.id(fields)
+        if i not in self._typed:
+            self._typed.add(i)
+            for f in fields:
+                if f not in self._pics:
+                    self._pics[f] = self._pic(f)
+        return i
+
     # -- per-state business summary ----------------------------------------
     def _state_summary(self, name: str, st: dict, role: str) -> dict:
         boundary_actions, internal_steps = [], []
@@ -937,8 +955,7 @@ class _BusinessView:
                           "direction": hit["direction"],
                           "event": _iface._event(hit["direction"], hit["etype"],
                                                  hit["endpoint"]),
-                          "fields": [{"name": f, "pic": self._pic(f)}
-                                     for f in hit["fields"]]}
+                          "fields": self._typed_fields(hit["fields"])}
                     if hit.get("params"):     # data flowing the other way (keys, WHERE)
                         ba["params"] = [{"name": f, "pic": self._pic(f)}
                                         for f in hit["params"]]
@@ -1036,6 +1053,12 @@ class _BusinessView:
             # thing written once, however many routes use it (see `_Tables`).
             "guards": tables.guards,
             "stateNames": tables.states,
+            # Each distinct field list, once: what an interface event's `fields`, a
+            # boundary action's `fields` and a node's `meta.inputFields` /
+            # `outputFields` index. `pics` holds the picture of each field a boundary
+            # action carries, so its `{name, pic}` list is `fieldSets[i]` typed by it.
+            "fieldSets": self._sets.lists,
+            "pics": dict(sorted(self._pics.items())),
             "collapsed": [{"state": n, "reason": "technical scaffolding"}
                           for n in technical_names],
             "counts": {"faithfulStates": len(self.states),
@@ -1078,6 +1101,7 @@ class _BusinessView:
         events: List[dict] = []
         for e in self.iface.get("events", []):
             ev = dict(e)
+            ev["fields"] = self._sets.id(e["fields"])     # an index into `fieldSets`
             host = e.get("state")
             if host in keep:
                 pass
@@ -1126,14 +1150,14 @@ class _BusinessView:
                 # fields crossing it without joining to `interface`.
                 meta["perimeter"] = ("input-output" if s.get("gets") and s.get("creates")
                                      else "input" if s.get("gets") else "output")
-                meta["inputFields"] = sorted({f["name"]
-                                              for a in s.get("boundaryActions", [])
-                                              if a["direction"] == "get"
-                                              for f in a.get("fields", [])})
-                meta["outputFields"] = sorted({f["name"]
-                                               for a in s.get("boundaryActions", [])
-                                               if a["direction"] == "create"
-                                               for f in a.get("fields", [])})
+                # Ids into `fieldSets`, like the boundary actions' own fields.
+                acts = s.get("boundaryActions", [])
+                meta["inputFields"] = self._sets.id(sorted(
+                    {f for a in acts if a["direction"] == "get"
+                     for f in self._sets.lists[a["fields"]]}))
+                meta["outputFields"] = self._sets.id(sorted(
+                    {f for a in acts if a["direction"] == "create"
+                     for f in self._sets.lists[a["fields"]]}))
             node["meta"] = meta
             states[name] = node
 
@@ -1242,13 +1266,46 @@ class _Tables:
         return i
 
 
+def expand_business_fields(view: dict) -> dict:
+    """The business view with each field-list id resolved and ``fieldSets`` / ``pics``
+    removed - the form ``formatVersion`` 6 wrote: an interface event's ``fields`` and a
+    node's ``meta.inputFields`` / ``outputFields`` are lists of names again, and a
+    boundary action's ``fields`` its ``{name, pic}`` list. Everything else (the route
+    tables included) is left as it is, and shared with ``view``."""
+    sets, pics = view["fieldSets"], view["pics"]
+
+    def actions(acts: List[dict]) -> List[dict]:
+        return [{**a, "fields": [{"name": f, "pic": pics[f]} for f in sets[a["fields"]]]}
+                for a in acts]
+
+    states = {}
+    for name, st in view["machine"]["states"].items():
+        meta = st.get("meta")
+        if meta and "boundaryActions" in meta:
+            meta = {**meta, "boundaryActions": actions(meta["boundaryActions"])}
+            for k in ("inputFields", "outputFields"):
+                if k in meta:
+                    meta[k] = list(sets[meta[k]])
+            st = {**st, "meta": meta}
+        states[name] = st
+    out = {k: v for k, v in view.items() if k not in ("fieldSets", "pics")}
+    out["machine"] = {**view["machine"], "states": states}
+    out["interface"] = _iface.expand_fields(
+        {"interface": view["interface"], "fieldSets": sets})["interface"]
+    out["businessStates"] = {
+        n: {**s, "boundaryActions": actions(s["boundaryActions"])}
+        for n, s in view["businessStates"].items()}
+    return out
+
+
 def expand_business_view(view: dict) -> dict:
     """The business view with every index resolved: a copy in which each route's
     ``guards`` are the guard objects and its ``via`` the state names, each chart edge's
-    ``meta`` carries its route again, and a ``guards#N`` label is the names of the
-    guards it stands for joined with AND - the form ``formatVersion`` 4 wrote. It holds exactly what the
+    ``meta`` carries its route again, a ``guards#N`` label is the names of the guards it
+    stands for joined with AND - the form ``formatVersion`` 4 wrote - and every field
+    list is written out in full (`expand_business_fields`). It holds exactly what the
     view holds, for a reader that wants the full form and can afford its size."""
-    v = copy.deepcopy(view)
+    v = copy.deepcopy(expand_business_fields(view))
     guards = v.pop("guards")
     names = v.pop("stateNames")
     ids = {}                                  # route -> its guard ids, before resolving

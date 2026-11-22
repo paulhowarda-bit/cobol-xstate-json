@@ -1,7 +1,9 @@
 """The external-interface / perimeter overlay: which states get or create external events."""
 
+from cobol_xstate.interface import expand_fields
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
+from manyread import READ_FIELDS, many_reads
 
 
 def _iface(proc_body: str, data_body: str = "") -> dict:
@@ -12,7 +14,7 @@ def _iface(proc_body: str, data_body: str = "") -> dict:
         "       WORKING-STORAGE SECTION.\n" + data_body +
         "       PROCEDURE DIVISION.\n" + proc_body
     )
-    return build_machine(parse_program(src)).bundle()["interface"]
+    return expand_fields(build_machine(parse_program(src)).bundle())["interface"]
 
 
 def _events_at(iface, state):
@@ -97,7 +99,7 @@ def test_program_parameter_interface_using_returning_linkage():
         "           MOVE 'OK' TO LK-REPLY\n"
         "           GOBACK.\n"
     )
-    iface = build_machine(parse_program(src)).bundle()["interface"]
+    iface = expand_fields(build_machine(parse_program(src)).bundle())["interface"]
     p = iface["parameters"]
     assert p["using"] == ["LK-REQUEST", "LK-REPLY"]
     assert p["returning"] == "WS-RC"
@@ -140,7 +142,7 @@ def test_linkage_moves_are_receive_request_and_send_response():
         "           MOVE WS-NAME TO LK-REPLY\n"
         "           GOBACK.\n"
     )
-    iface = build_machine(parse_program(src)).bundle()["interface"]
+    iface = expand_fields(build_machine(parse_program(src)).bundle())["interface"]
     caller = [e for e in iface["events"] if e["endpointType"] == "caller"]
     # reading a linkage field is a get (receive request); writing one is a create (send)
     reads = [e for e in caller if e["direction"] == "get" and "LK-CUST-ID" in e["fields"]]
@@ -487,7 +489,7 @@ def test_cics_handle_condition_is_a_get_in_the_handlers_region():
 def _iface_of(src: str) -> dict:
     from cobol_xstate.parser import parse_program
     from cobol_xstate.statechart import build_machine
-    return build_machine(parse_program(src)).bundle()["interface"]
+    return expand_fields(build_machine(parse_program(src)).bundle())["interface"]
 
 
 _CICS_SRC = (
@@ -787,7 +789,7 @@ def test_sql_string_constant_containing_from_is_not_the_table():
         "               FROM CUSTMAST\n"
         "           END-EXEC\n"
         "           STOP RUN.\n")
-    iface = build_machine(parse_program(src)).bundle()["interface"]
+    iface = expand_fields(build_machine(parse_program(src)).bundle())["interface"]
     endpoints = {e["endpoint"] for e in iface["endpoints"]}
     assert "CUSTMAST" in endpoints
     assert "AUDIT" not in endpoints
@@ -810,7 +812,7 @@ def test_time_literal_colons_are_not_host_variables():
         "             DELETE FROM AUDITLOG WHERE TS = '12:30:45'\n"
         "           END-EXEC\n"
         "           STOP RUN.\n")
-    iface = build_machine(parse_program(src)).bundle()["interface"]
+    iface = expand_fields(build_machine(parse_program(src)).bundle())["interface"]
     fields = {f for s in iface["perimeterStates"].values()
               for f in s.get("creates", []) + s.get("gets", [])}
     assert "30" not in fields and "45" not in fields
@@ -1102,7 +1104,7 @@ def test_a_subselect_set_maps_its_value_variable_but_not_its_row_selector():
 def _callfilter():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "examples" / "callfilter.cbl").read_text()
-    return build_machine(parse_program(src)).bundle()["interface"]
+    return expand_fields(build_machine(parse_program(src)).bundle())["interface"]
 
 
 def test_a_rejected_literal_is_published_apart_from_the_candidates():
@@ -1147,9 +1149,9 @@ def _example_iface(name: str) -> dict:
     from pathlib import Path
     from cobol_xstate.preprocessor import CopybookResolver
     examples = Path(__file__).resolve().parents[1] / "examples"
-    return build_machine(parse_program(
+    return expand_fields(build_machine(parse_program(
         (examples / name).read_text(),
-        resolver=CopybookResolver(paths=[str(examples)]))).bundle()["interface"]
+        resolver=CopybookResolver(paths=[str(examples)]))).bundle())["interface"]
 
 
 def test_a_cics_write_naming_no_file_is_marked_not_named():
@@ -1370,7 +1372,7 @@ def test_a_copied_linkage_section_puts_nothing_on_the_caller_perimeter():
            "           GOBACK.\n")
     machine = build_machine(parse_program(
         src, resolver=CopybookResolver(paths=[], fetcher=members.get)))
-    iface = machine.bundle()["interface"]
+    iface = expand_fields(machine.bundle())["interface"]
     assert [e for e in iface["events"] if e["endpointType"] == "caller"] == []
     rows = [r for r in build_lineage(machine)["rows"] if r["field"] == "WS-TARGET"]
     assert rows and all(r["origins"] == [] for r in rows)
@@ -1426,7 +1428,8 @@ def test_a_call_event_carries_its_arguments_by_position():
     passed."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "examples" / "callargs.cbl").read_text()
-    calls = _call_events(build_machine(parse_program(src)).bundle()["interface"])
+    calls = _call_events(
+        expand_fields(build_machine(parse_program(src)).bundle())["interface"])
     assert calls["P1"]["arguments"] == [None, "WS-A"]
     assert calls["P2"]["arguments"] == ["WS-A", None, "WS-B"]
     assert calls["P3"]["arguments"] == ["WS-B", None, "WS-C"]
@@ -1455,7 +1458,8 @@ def test_calls_sharing_an_action_with_different_positions_publish_none():
         "           CALL 'P' USING 'X' WS-A\n"
         "           CALL 'P' USING WS-A\n"
         "           GOBACK.\n"))
-    calls = [e for e in machine.bundle()["interface"]["events"] if e["verb"] == "CALL"]
+    calls = [e for e in expand_fields(machine.bundle())["interface"]["events"]
+             if e["verb"] == "CALL"]
     assert calls and all("arguments" not in e for e in calls)
     assert any("different positions" in f["message"] for f in machine.flags)
 
@@ -1476,3 +1480,40 @@ def test_a_call_spec_does_not_reach_the_runnable_machine():
     assert machine.semantics["actions"]["call_P"] == {"kind": "call", "arguments": ["WS-A"]}
     ops, effects = _build_ops(machine, {})
     assert "call_P" not in ops and "call_P" not in effects
+
+
+# --------------------------------------------------------------------------- #
+# the published overlay writes each distinct field list once (`fieldSets`)
+# --------------------------------------------------------------------------- #
+
+def test_a_record_read_at_many_sites_is_written_once():
+    bundle = many_reads(5).bundle()
+    sets = bundle["fieldSets"]
+    reads = [e for e in bundle["interface"]["events"] if e["verb"] == "READ"]
+    assert len(reads) == 5
+    # every READ names the same id, and the list behind it is written once
+    assert {e["fields"] for e in reads} == {sets.index(READ_FIELDS)}
+    assert sets.count(READ_FIELDS) == 1
+    assert len({tuple(s) for s in sets}) == len(sets)          # no list twice
+    assert all(isinstance(e["fields"], int) for e in bundle["interface"]["events"])
+
+
+def test_the_published_field_lists_do_not_grow_with_read_sites():
+    few, many = many_reads(3).bundle(), many_reads(30).bundle()
+    assert few["fieldSets"] == many["fieldSets"]
+    assert len(many["interface"]["events"]) > len(few["interface"]["events"])
+
+
+def test_expanding_the_bundle_gives_back_the_overlay_every_view_reads():
+    """`expand_fields` is lossless: the published events, resolved, are the overlay's
+    own - the lists `Machine.interface()` keeps, and lineage and reactive consume."""
+    m = many_reads(4)
+    full = expand_fields(m.bundle())
+    assert "fieldSets" not in full
+    assert full["interface"] == m.interface()
+    assert all(isinstance(e["fields"], list) for e in m.interface()["events"])
+
+
+def test_the_machine_only_bundle_carries_no_field_sets():
+    import json
+    assert "fieldSets" not in json.loads(many_reads(2).to_json(machine_only=True))

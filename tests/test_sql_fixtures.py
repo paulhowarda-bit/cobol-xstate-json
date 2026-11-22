@@ -11,6 +11,7 @@ import json
 import pytest
 
 from cobol_xstate.business import build_business_view
+from cobol_xstate.interface import expand_fields
 from cobol_xstate.parser import parse_program
 from cobol_xstate.reactive import build_reactive_view
 from cobol_xstate.statechart import build_machine
@@ -21,7 +22,8 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 def _iface(name):
     src = (EXAMPLES / name).read_text()
-    return build_machine(parse_program(src), source_name=name).bundle()["interface"]
+    m = build_machine(parse_program(src), source_name=name)
+    return expand_fields(m.bundle())["interface"]
 
 
 def _dirs(iface, etype):
@@ -1205,7 +1207,8 @@ def _inline_machine(data_body, proc_body):
 
 
 def _db2_endpoints(proc_body, data_body=""):
-    return set(_dirs(_inline_machine(data_body, proc_body).bundle()["interface"], "db2"))
+    m = _inline_machine(data_body, proc_body)
+    return set(_dirs(expand_fields(m.bundle())["interface"], "db2"))
 
 
 def test_every_table_each_statement_names_is_published():
@@ -1262,7 +1265,8 @@ def test_a_fetch_on_a_procedure_division_cursor_over_a_join_reads_both_tables():
         "           EXEC SQL FETCH CPD INTO :WS-A, :WS-B END-EXEC\n"))
     assert _cursor_table_refs(m.provenance) == {"CPD": ["T_PD_FIRST", "T_PD_JOINED"]}
     fetch = [(e["endpoint"], bool(e.get("columns")), e.get("secondaryTable"))
-             for e in m.bundle()["interface"]["events"] if e["verb"] == "FETCH"]
+             for e in expand_fields(m.bundle())["interface"]["events"]
+             if e["verb"] == "FETCH"]
     assert fetch == [("T_PD_FIRST", True, None), ("T_PD_JOINED", False, True)]
 
 
@@ -1274,7 +1278,7 @@ def test_a_parse_bundle_without_cursor_tables_publishes_only_the_cursor_table():
     for c in doc["sql_cursors"]:
         del c["tables"]
     m = build_machine(program_from_dict(doc), source_name="jointest.cbl")
-    assert [e["endpoint"] for e in m.bundle()["interface"]["events"]
+    assert [e["endpoint"] for e in expand_fields(m.bundle())["interface"]["events"]
             if e["verb"] == "FETCH"] == ["T_CUR_FIRST"]
 
 
@@ -1428,7 +1432,7 @@ def test_every_spelling_of_a_result_set_cursor_publishes_at_open(declare):
         "               SELECT COL1 FROM T_RS_A A JOIN T_RS_B B ON A.K = B.K\n"
         "           END-EXEC.\n",
         "           EXEC SQL OPEN RC END-EXEC\n")
-    assert _opens(m.bundle()["interface"]) == [("T_RS_A", "RC", True),
+    assert _opens(expand_fields(m.bundle())["interface"]) == [("T_RS_A", "RC", True),
                                               ("T_RS_B", None, True)]
 
 
@@ -1444,7 +1448,7 @@ def test_a_result_set_cursor_declared_in_a_copybook_publishes_at_open(tmp_path):
            "       PROCEDURE DIVISION.\n       0000-MAIN.\n"
            "           EXEC SQL OPEN RC END-EXEC\n           GOBACK.\n")
     m = build_machine(parse_program(src, resolver=CopybookResolver(paths=[str(tmp_path)])))
-    assert _opens(m.bundle()["interface"]) == [("T_RS_COPIED", "RC", True)]
+    assert _opens(expand_fields(m.bundle())["interface"]) == [("T_RS_COPIED", "RC", True)]
 
 
 def test_a_fetch_anywhere_in_the_program_keeps_its_cursors_open_silent(tmp_path):
@@ -1464,7 +1468,7 @@ def test_a_fetch_anywhere_in_the_program_keeps_its_cursors_open_silent(tmp_path)
            "           PERFORM 2000-FETCH\n           GOBACK.\n"
            "       COPY FETCHP.\n")
     m = build_machine(parse_program(src, resolver=CopybookResolver(paths=[str(tmp_path)])))
-    iface = m.bundle()["interface"]
+    iface = expand_fields(m.bundle())["interface"]
     assert _opens(iface) == []
     assert [(e["verb"], e["endpoint"]) for e in iface["events"]
             if e["endpointType"] == "db2"] == [("FETCH", "T_C9")]
@@ -1477,7 +1481,7 @@ def test_a_cursor_over_a_prepared_statement_still_publishes_nothing_at_open():
         "           EXEC SQL DECLARE DC CURSOR WITH RETURN FOR DYN_STMT END-EXEC.\n",
         "           EXEC SQL PREPARE DYN_STMT FROM :WS-A END-EXEC\n"
         "           EXEC SQL OPEN DC END-EXEC\n")
-    assert _opens(m.bundle()["interface"]) == []
+    assert _opens(expand_fields(m.bundle())["interface"]) == []
 
 
 def test_an_unfetched_data_change_cursor_publishes_its_write_and_only_that():
@@ -1488,7 +1492,8 @@ def test_an_unfetched_data_change_cursor_publishes_its_write_and_only_that():
         "           END-EXEC.\n",
         "           EXEC SQL OPEN DCC END-EXEC\n")
     opens = [(e["direction"], e["verb"], e["endpoint"])
-             for e in m.bundle()["interface"]["events"] if e["line"] and "OPEN" in e["cobol"]]
+             for e in expand_fields(m.bundle())["interface"]["events"]
+             if e["line"] and "OPEN" in e["cobol"]]
     assert opens == [("create", "INSERT", "T_DC_Q")]
 
 
@@ -1501,7 +1506,7 @@ def test_a_parenthesised_result_set_publishes_every_table_it_names():
         "               UNION ALL SELECT K FROM T_PAR_TWO )\n"
         "           END-EXEC.\n",
         "           EXEC SQL OPEN PC END-EXEC\n")
-    assert _opens(m.bundle()["interface"]) == [("T_PAR_ONE", "PC", True),
+    assert _opens(expand_fields(m.bundle())["interface"]) == [("T_PAR_ONE", "PC", True),
                                               ("T_PAR_TWO", None, True)]
 
 
@@ -1529,7 +1534,7 @@ def test_a_merge_using_a_table_reads_it():
         "                ON T.K = S.K WHEN MATCHED THEN DELETE\n"
         "           END-EXEC\n"))
     assert [(d, ep, sec) for _, d, ep, _, _, sec in _db2_events(
-        m.bundle()["interface"])] == [("create", "T_MU_TGT", None),
+        expand_fields(m.bundle())["interface"])] == [("create", "T_MU_TGT", None),
                                       ("get", "T_MU_SRC", True)]
 
 
@@ -1544,7 +1549,8 @@ def test_a_with_statement_reads_the_base_table_its_cte_reads():
 def test_a_with_statements_columns_are_refused_and_flagged_not_guessed():
     m = build_machine(parse_program((EXAMPLES / "sqlmerge.cbl").read_text()),
                       source_name="sqlmerge.cbl")
-    ev = next(e for e in m.bundle()["interface"]["events"] if e["verb"] == "WITH")
+    ev = next(e for e in expand_fields(m.bundle())["interface"]["events"]
+              if e["verb"] == "WITH")
     assert "columns" not in ev
     assert ev["columnsUnresolved"] == "common-table-expression"
     assert [f["line"] for f in m.flags if "EXEC SQL WITH" in f["message"]] == [32]
@@ -1574,7 +1580,8 @@ def test_a_cursor_declared_for_a_with_query_publishes_through_its_fetch():
         "           END-EXEC\n"
         "           EXEC SQL OPEN WC END-EXEC\n"
         "           EXEC SQL FETCH WC INTO :WS-A END-EXEC\n"))
-    assert [(v, ep) for v, _, ep, _, _, _ in _db2_events(m.bundle()["interface"])] == [
+    iface = expand_fields(m.bundle())["interface"]
+    assert [(v, ep) for v, _, ep, _, _, _ in _db2_events(iface)] == [
         ("FETCH", "T_WC_BASE")]
 
 

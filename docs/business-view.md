@@ -87,6 +87,18 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
   `k`'s business guards (all its guards if it has no business guard). `cobol_xstate.business.expand_business_view(view)` returns the
   full form — guard objects and state names in place, each edge's `meta` carrying its
   route, labels joined with AND — which is exactly what `formatVersion` 4 wrote.
+- **Field lists are ids into `fieldSets`, each distinct list written once**
+  (`formatVersion` 7). An interface event's `fields`, a boundary action's `fields` and a
+  state's `meta.inputFields` / `outputFields` are indexes into the view's top-level
+  `fieldSets`; `pics` maps each field a boundary action carries to its picture (`null`
+  where the data division declares none), so the action's typed list is
+  `[{"name": f, "pic": pics[f]} for f in fieldSets[i]]`. A `READ` with no `INTO` carries
+  every leaf of every record its FD declares, and that list used to be written in full at
+  every READ site — up to three times per site (event, boundary action, and the action
+  again in the state's `meta`), plus the state's sorted `inputFields`. 300 READs of a
+  40-record, 2,000-field FD made a 168 MB business view; written once it is 11.0 MB, built
+  in 3.1 s instead of 38.8 s. `expand_business_fields(view)` resolves only these ids (the
+  `formatVersion` 6 form); `expand_business_view` resolves them along with the routes.
 
   Version 4 wrote every route out whole, twice (on the edge and in `transitions`), with
   each guard's condition tree copied at every use. Routes on a report splitter are long
