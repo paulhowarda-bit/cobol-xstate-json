@@ -121,6 +121,21 @@ def test_abbreviated_condition_implies_subject():
         ]}
 
 
+def test_a_run_of_ors_or_ands_is_one_node_and_a_group_stays_its_own():
+    """Two-way nodes nested one inside the next made `A = 1 OR 2 OR ... OR 1500` a tree
+    1,500 deep, and every walk of it overflowed Python's stack."""
+    rel = lambda left, op, right: {"op": "rel", "left": left, "rel": op, "right": right}
+    assert parse_condition("A = 1 OR 2 OR 3") == {
+        "op": "or", "args": [rel("A", "=", "1"), rel("A", "=", "2"), rel("A", "=", "3")]}
+    assert parse_condition("(A = 1 OR B = 2) OR C = 3 AND D = 4 AND E = 5") == {
+        "op": "or", "args": [
+            {"op": "or", "args": [rel("A", "=", "1"), rel("B", "=", "2")]},
+            {"op": "and", "args": [rel("C", "=", "3"), rel("D", "=", "4"),
+                                   rel("E", "=", "5")]}]}
+    tree = parse_condition("A = 0 " + " ".join(f"OR {i}" for i in range(1, 1500)))
+    assert tree["op"] == "or" and len(tree["args"]) == 1500
+
+
 def test_abbreviated_condition_implies_subject_only():
     # A > 1 AND < 9  ->  A > 1 AND A < 9  (subject implied, operator restated)
     assert parse_condition("A > 1 AND < 9") == {

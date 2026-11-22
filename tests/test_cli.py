@@ -236,6 +236,38 @@ def test_default_run_writes_all_views(tmp_path):
                                 "banktran.dynamic-calls.json"}  # targets it cannot name
 
 
+def test_machine_generated_depth_writes_every_view(tmp_path, caplog):
+    """Shapes generated code has, each about 1,500 deep, every one of which overflowed
+    Python's stack somewhere: an IF with 1,500 ORs (the whole run died) or ANDs, a
+    COMPUTE summing 1,500 terms and one nesting 200 parentheses (--target js died, a
+    default run lost its reactive view). Every view of every one must now be written."""
+    n = 1500
+    body = {
+        "orlist": ["IF WS-A = 0"] + [f"   OR WS-A = {i}" for i in range(1, n)]
+                  + ["    MOVE 1 TO WS-B", "END-IF"],
+        "andlist": ["IF WS-A NOT = 0"] + [f"   AND WS-A NOT = {i}" for i in range(1, n)]
+                   + ["    MOVE 1 TO WS-B", "END-IF"],
+        "compute": ["COMPUTE WS-B = WS-A"] + [f"    + {i}" for i in range(1, n)],
+        "paren": ["COMPUTE WS-B ="] + ["    " + "(" * 40] * 5
+                 + ["    WS-A"] + ["    " + " + 1)" * 10] * 20,
+    }
+    for name, lines in body.items():
+        src = tmp_path / f"{name}.cbl"
+        src.write_text("".join("       " + line + "\n" for line in [
+            "IDENTIFICATION DIVISION.", f"PROGRAM-ID. {name.upper()}.",
+            "DATA DIVISION.", "WORKING-STORAGE SECTION.",
+            "01 WS-A PIC 9(5) VALUE 1.", "01 WS-B PIC 9(9) VALUE 0.",
+            "PROCEDURE DIVISION.", "0000-MAIN.",
+            *("    " + line for line in lines), "    STOP RUN."]))
+        out = tmp_path / name
+        assert run([str(src), "--outdir", str(out)]) == 0, name
+        assert {p.name for p in out.glob("*.json")} >= {
+            f"{name}.json", f"{name}.business.json", f"{name}.lineage.json",
+            f"{name}.reactive.json"}, name
+        assert run([str(src), "--outdir", str(out), "--target", "js"]) == 0, name
+    assert "RecursionError" not in caplog.text
+
+
 def test_a_refused_reactive_view_does_not_take_the_run_down(tmp_path):
     """The reactive lowering refuses CICS handler regions. On a default run that is a
     fact about the program, not a failure of the run: the other views must still land."""

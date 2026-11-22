@@ -15,7 +15,8 @@ import pytest
 
 import node_session
 from cobol_xstate.parser import parse_program
-from cobol_xstate.reactive import _event_slug, build_reactive_view, emit_reactive_module
+from cobol_xstate.reactive import (_event_slug, _find_cycle, build_reactive_view,
+                                   emit_reactive_module)
 from cobol_xstate.statechart import build_machine
 
 REPO = Path(__file__).resolve().parents[1]
@@ -579,3 +580,15 @@ def test_cli_reactive_writes_both_the_module_and_the_drawable_json(tmp_path):
     assert (d / "custrpt.reactive.mjs").exists()    # runnable
     assert (d / "custrpt.reactive.json").exists()   # drawable
     assert (d / "cobolRuntime.mjs").exists()        # beside it, so the import resolves
+
+
+def test_the_cycle_check_survives_a_perform_chain_thousands_deep():
+    """The recursion check recursed once per PERFORM level, and a chain about a thousand
+    deep (a 37,000-line generated program) overflowed Python's stack: the reactive view
+    was lost. Over an explicit stack it finds no cycle in a chain, and still names the
+    cycle when the end of the chain calls back into it."""
+    chain = {f"P{i}": {f"P{i + 1}"} for i in range(3000)}
+    chain["P3000"] = set()
+    assert _find_cycle(chain) is None
+    chain["P3000"] = {"P2998"}
+    assert _find_cycle(chain) == ["P2998", "P2999", "P3000", "P2998"]

@@ -152,31 +152,31 @@ def _actor_call_graph(actor_configs: Dict[str, dict]) -> Dict[str, set]:
 
 
 def _find_cycle(graph: Dict[str, set]) -> Optional[List[str]]:
-    """A call cycle (A -> B -> A) if one exists - flattening cannot represent it."""
-    colour: Dict[str, int] = {}
-    stack: List[str] = []
+    """A call cycle (A -> B -> A) if one exists - flattening cannot represent it.
 
-    def visit(n: str) -> Optional[List[str]]:
-        colour[n] = 1
-        stack.append(n)
-        for m in sorted(graph.get(n, ())):
-            if m not in graph:
+    Depth-first over an EXPLICIT stack: recursing once per PERFORM level overflowed
+    Python's stack on a chain about a thousand PERFORMs deep, and the reactive view
+    was lost."""
+    colour: Dict[str, int] = {}                       # 1 on the path, 2 finished
+    for root in sorted(graph):
+        if colour.get(root, 0):
+            continue
+        colour[root] = 1
+        path: List[str] = [root]
+        succs = [iter(sorted(graph.get(root, ())))]
+        while succs:
+            m = next(succs[-1], None)
+            if m is None:
+                colour[path.pop()] = 2
+                succs.pop()
+            elif m not in graph:
                 continue
-            if colour.get(m) == 1:                    # back edge
-                return stack[stack.index(m):] + [m]
-            if colour.get(m, 0) == 0:
-                got = visit(m)
-                if got:
-                    return got
-        stack.pop()
-        colour[n] = 2
-        return None
-
-    for n in sorted(graph):
-        if colour.get(n, 0) == 0:
-            got = visit(n)
-            if got:
-                return got
+            elif colour.get(m) == 1:                  # back edge
+                return path[path.index(m):] + [m]
+            elif not colour.get(m, 0):
+                colour[m] = 1
+                path.append(m)
+                succs.append(iter(sorted(graph.get(m, ()))))
     return None
 
 

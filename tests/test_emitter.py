@@ -14,6 +14,7 @@ import pytest
 
 import node_session
 from cobol_xstate.emitter import (
+    _ExprError,
     _emit_guard,
     _emit_numeric_expr,
     edge_target,
@@ -442,6 +443,13 @@ def test_perform_until_call_return_runs_under_stock_xstate(repo_tmp):
 
 
 @pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_or_and_runs_of_many_terms_decide_correctly_under_stock_xstate(repo_tmp):
+    # A three-term OR, a three-term AND, a false three-term OR, and a parenthesized OR
+    # inside a three-term AND - each one flat condition node, each deciding as COBOL does.
+    _run_to_done(repo_tmp, "orchain.cbl", {"WS-HIT": "2", "WS-BOTH": "1", "WS-MISS": "0"})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
 def test_nested_perform_threads_context_under_stock_xstate(repo_tmp):
     # 1000-OUTER performs 2000-INNER: context must thread back up two call levels.
     _run_to_done(repo_tmp, "nestperf.cbl", {"WS-SUM": "11"})
@@ -568,3 +576,27 @@ def test_perform_of_one_paragraph_two_ways_runs_both(repo_tmp):
     # 1000-INIT performed once then 3 times: it must run 4 times total, WS-A = 4. The
     # _2-suffixed PERFORM used to resolve to nothing and be dropped, leaving WS-A = 1.
     _run_to_done(repo_tmp, "perftwice.cbl", {"WS-A": "4"})
+
+
+def test_a_long_compute_is_emitted_without_recursing_per_term():
+    """A COMPUTE summing 400 terms is a tree 400 deep (the parser folds + to the left).
+    Emitting it recursed once per node and overflowed Python's stack at about a
+    thousand: the whole --target js run died."""
+    js = _emit_numeric_expr("WS-A " + " ".join(f"+ {i}" for i in range(1, 400)))
+    assert js.count("add(") == 399
+    assert js.startswith("add(add(") and js.endswith(", D(\"399\"))")
+
+
+def test_an_expression_too_deep_for_a_js_engine_is_left_unmodeled():
+    """Node refused to import a module nesting 1,500 calls, so a tree that deep is an
+    _ExprError - which the caller turns into notModeled, saying why - not JS that
+    compiles and then cannot be loaded."""
+    with pytest.raises(_ExprError, match="more than 500 operations deep"):
+        _emit_numeric_expr("WS-A " + " ".join(f"+ {i}" for i in range(1, 1500)))
+
+
+def test_deeply_nested_parentheses_are_left_unmodeled_not_a_crash():
+    """Each parenthesis costs the parser five Python frames; 200 of them overflowed."""
+    with pytest.raises(_ExprError, match="nested more than 100 deep"):
+        _emit_numeric_expr("(" * 200 + "WS-A" + " + 1)" * 200)
+    assert _emit_numeric_expr("(" * 50 + "WS-A" + " + 1)" * 50).count("add(") == 50

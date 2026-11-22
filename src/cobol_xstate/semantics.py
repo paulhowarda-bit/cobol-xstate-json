@@ -433,19 +433,26 @@ def parse_condition(text: str, data: Optional[Dict] = None) -> dict:
         pos += 1
         return t
 
+    # A run of ORs is ONE node holding every term, and so is a run of ANDs - not two-way
+    # nodes nested one inside the next. Nested, `A = 1 OR 2 OR ... OR 1500` was a tree
+    # 1,500 deep: everything that walked it recursed once per term and overflowed
+    # Python's stack (the interface view first, which took the whole run down), the
+    # default indented JSON grew with the square of its length (one IF with 200 ORs
+    # made a 3.7 MB business view), and past about 500 terms Python's json module could
+    # not write it at all. A parenthesized group stays its own node, as written.
     def parse_or():
-        node = parse_and()
+        terms = [parse_and()]
         while peek() and peek().upper() == "OR":
             adv()
-            node = {"op": "or", "args": [node, parse_and()]}
-        return node
+            terms.append(parse_and())
+        return terms[0] if len(terms) == 1 else {"op": "or", "args": terms}
 
     def parse_and():
-        node = parse_not()
+        terms = [parse_not()]
         while peek() and peek().upper() == "AND":
             adv()
-            node = {"op": "and", "args": [node, parse_not()]}
-        return node
+            terms.append(parse_not())
+        return terms[0] if len(terms) == 1 else {"op": "and", "args": terms}
 
     def parse_not():
         if peek() and peek().upper() == "NOT":

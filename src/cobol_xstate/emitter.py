@@ -139,6 +139,18 @@ def _tokenize_expr(expr: str) -> List[str]:
     return out
 
 
+#: How deeply an arithmetic expression may nest - parentheses, a chain of ``**``, a run
+#: of unary signs - before it is left unmodeled (``notModeled``, saying why). Each level
+#: costs the parser five Python frames, so 200 nested parentheses overflowed the stack
+#: and took the whole ``--target js`` run down. No real program comes near 100.
+_MAX_EXPR_NESTING = 100
+
+#: How many operations deep an expression's emitted JS may nest (see `_emit_num_node`).
+#: Half of what Node was measured to load, because the engine's limit is not ours to
+#: pin; a real COMPUTE is a few dozen.
+_MAX_EMIT_DEPTH = 500
+
+
 class _ExprParser:
     """Recursive-descent over ``expr := add``; precedence (low->high):
     ``+ -`` , ``* /`` , ``**`` (right-assoc), unary ``+ -`` , primary."""
@@ -146,6 +158,17 @@ class _ExprParser:
     def __init__(self, tokens: List[str]):
         self.toks = tokens
         self.i = 0
+        self.depth = 0
+
+    def _nested(self, parse):
+        """Run one recursive step of the grammar, refusing past `_MAX_EXPR_NESTING`."""
+        self.depth += 1
+        if self.depth > _MAX_EXPR_NESTING:
+            raise _ExprError(f"nested more than {_MAX_EXPR_NESTING} deep")
+        try:
+            return parse()
+        finally:
+            self.depth -= 1
 
     def _peek(self) -> Optional[str]:
         return self.toks[self.i] if self.i < len(self.toks) else None
@@ -179,13 +202,13 @@ class _ExprParser:
         node = self._unary()
         if self._peek() == "**":
             self._adv()
-            return {"op": "**", "l": node, "r": self._power()}  # right-assoc
+            return {"op": "**", "l": node, "r": self._nested(self._power)}  # right-assoc
         return node
 
     def _unary(self) -> dict:
         if self._peek() in ("+", "-"):
             op = self._adv()
-            node = self._unary()
+            node = self._nested(self._unary)
             if op == "-":
                 return {"op": "-", "l": {"kind": "num", "text": "0"}, "r": node}
             return node
@@ -197,7 +220,7 @@ class _ExprParser:
             raise _ExprError("unexpected end of expression")
         if t == "(":
             self._adv()
-            node = self._add()
+            node = self._nested(self._add)
             if self._peek() != ")":
                 raise _ExprError("missing ')'")
             self._adv()
@@ -218,16 +241,41 @@ class _ExprParser:
         return {"kind": "ref", "name": up}
 
 
+def _emit_num_leaf(node: dict) -> str:
+    if node["kind"] == "num":
+        return f'D({_js_str(node["text"])})'
+    if node.get("sub") is not None:  # TBL(I) -> the i-th element
+        return (f'D(elem(context[{_js_str(node["name"])}], '
+                f'{_subscript_js(node["sub"])}))')
+    return f'D(context[{_js_str(node["name"])}])'
+
+
 def _emit_num_node(node: dict) -> str:
-    if "kind" in node:
-        if node["kind"] == "num":
-            return f'D({_js_str(node["text"])})'
-        if node.get("sub") is not None:  # TBL(I) -> the i-th element
-            return (f'D(elem(context[{_js_str(node["name"])}], '
-                    f'{_subscript_js(node["sub"])}))')
-        return f'D(context[{_js_str(node["name"])}])'
-    fn = _NUM_OPS[node["op"]]
-    return f'{fn}({_emit_num_node(node["l"])}, {_emit_num_node(node["r"])})'
+    """A parsed expression tree -> its JS, over an explicit stack. The parser folds a
+    run of ``+``/``-`` (and ``*``/``/``) to the left, so a COMPUTE summing 1,500 terms is
+    a tree 1,500 deep, and recursing once per node overflowed Python's stack: the whole
+    ``--target js`` run died, and a default run lost its reactive view.
+
+    The JS is one call per operation, nested as deep as the tree, and a JS engine
+    parsing it has a stack too: Node loaded 1,100 nested operations and refused 1,500
+    ("Maximum call stack size exceeded"), which is a module that cannot even be
+    imported. So a tree deeper than `_MAX_EMIT_DEPTH` raises ``_ExprError`` and the
+    statement is left ``notModeled``, saying why."""
+    out: List[str] = []
+    stack: List[Tuple[dict, bool, int]] = [(node, False, 1)]
+    while stack:
+        n, children_done, depth = stack.pop()
+        if "kind" in n:
+            out.append(_emit_num_leaf(n))
+        elif children_done:
+            r = out.pop()
+            out.append(f'{_NUM_OPS[n["op"]]}({out.pop()}, {r})')
+        elif depth > _MAX_EMIT_DEPTH:
+            raise _ExprError(f"more than {_MAX_EMIT_DEPTH} operations deep")
+        else:
+            stack += [(n, True, depth), (n["r"], False, depth + 1),
+                      (n["l"], False, depth + 1)]
+    return out[0]
 
 
 def _emit_numeric_expr(expr: str) -> str:
