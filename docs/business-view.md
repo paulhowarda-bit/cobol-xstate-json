@@ -156,6 +156,14 @@ read together: the business view shows *which steps matter*, the lineage table s
   them together in order of guard count, and each transition takes the route with the
   fewest guards from any of them (one loop exit here: 4.3 MB). Which transitions there
   are does not change, only the route each one shows.
+- **Overlapping PERFORM ... THRU ranges are walked once.** Restart-from-step code
+  PERFORMs STEP-k THRU STEP-EXIT for every k, so each range is a different call context
+  at every step it holds, and every step was walked once per range holding it: 400 steps
+  needed 643,997 walk steps and were refused at the budget. Where no PERFORM can be
+  reached any more, a frame's range is refined to the part of it still reachable - at
+  STEP-j every earlier range is STEP-j THRU STEP-EXIT - and frames that agree on that,
+  on their return point and on what they sit on become one context. 400 steps now take
+  2,403 walk steps (0.2 s, was 18 s); the view is unchanged, byte for byte.
 - **A view that needs too much work is refused, not cut short.** The walk has a budget
   of 250,000 steps (`--business-budget`, `analyze(business_budget=)`; `0` means no
   limit). A view that needs more raises `ViewBudgetExceeded`, and nothing partial is

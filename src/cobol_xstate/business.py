@@ -129,7 +129,8 @@ def _successors(st: dict) -> List[Tuple[dict, str]]:
 #: contexts is walked a second time, from all of them at once, for each transition's
 #: shortest route (`_build_flow`). Every step costs about 10 us, so 250,000 is a few
 #: seconds. No example program needs more than 33, an 11,000-line generated one needs
-#: 9,213, and a thousand-report splitter 143,131.
+#: 9,213, a thousand-report splitter 143,131, and 400 overlapping PERFORM ... THRU
+#: ranges 2,403 (`_fit`).
 #:
 #: Exceeding it is a FAILURE of this view, never a shorter answer: a cut-off walk would
 #: return a transition list that reads as complete, and nothing downstream could tell.
@@ -174,6 +175,17 @@ class _BusinessView:
         self._found: List[dict] = []         # the flow's transitions, for the refusal
         self._arrived: Dict[str, set] = {}   # per source state: places walked (`_walk`)
         self._contexts = 0
+        # Frame refinement (`_region_tables`, `_fit`): which states can reach no
+        # PERFORM, the lowest paragraph each can still reach, and the refined frames.
+        self._region: set = set()
+        self._lo: Dict[str, float] = {}
+        self._refined: Dict[tuple, tuple] = {}
+        self._frames: Dict[tuple, tuple] = {}
+        self._returns: Dict[tuple, bool] = {}       # refined config -> can it return
+        self._spans: Dict[frozenset, Optional[Tuple[int, int]]] = {}
+        self._calls: Dict[str, tuple] = {}       # call state -> its resolved PERFORM
+        self._pushed: Dict[str, tuple] = {}      # call state -> the frame it pushes
+        self._below: Optional[dict] = None          # `_call_sites`' answer, once known
 
     def _flag(self, msg: str) -> None:
         if self._quiet:
@@ -249,48 +261,263 @@ class _BusinessView:
         return {"name": name, "condition": tree, "field": _guard_field(tree),
                 "kind": "control" if self._control_guard(name) else "business"}
 
-    def _step(self, state: str, stack: tuple, check_recursion: bool = True):
+    def _step(self, state: str, stack: tuple, check_recursion: bool = True,
+              fit: bool = True):
         """Yield ``(label, (next_state, next_stack))`` for one control step from a config.
 
         ``check_recursion=False`` is for the call-site walk, which runs only once
         `_call_sites` has shown that no PERFORM can land inside a range already on the
-        stack - so the check could never fire, and it would need the whole stack."""
+        stack - so the check could never fire, and it would need the whole stack.
+
+        ``fit`` refines the next config's top frame to the part of its range still
+        reachable (`_fit`); `_call_sites` steps without it, because it keys what sits
+        under each frame by the frame as PERFORMed."""
+        out = self._fit if fit else (lambda s, k: k)
         st = self.states.get(state, {})
         if state in self.finals:                       # program end, or a return
             if stack and stack[-1][1] is not None:
-                yield ({}, (stack[-1][1], stack[:-1]))
+                ret = stack[-1][1]
+                yield ({}, (ret, out(ret, stack[:-1])))
             return
-        performs = self._perform_names(st)
+        call = self._calls.get(state)
+        if call is None:
+            # Resolved once per state: a THRU range's paragraph set is as long as the
+            # range, and every walk through the call state asked for it again.
+            performs = self._perform_names(st)
+            call = self._calls[state] = (performs,) + (
+                _target_owner(performs[0], self.ordered, self.sections, self._index)
+                + (self._continuation(st),) if performs else ())
+        performs = call[0]
         if performs:                                   # a call
             name = performs[0]
-            owner, init = _target_owner(name, self.ordered, self.sections, self._index)
-            cont = self._continuation(st)
+            owner, init, cont = call[1], call[2], call[3]
             if len(performs) > 1:
                 self._flag(f"{state}: {len(performs)} PERFORMs in one state; "
                            f"only {name} followed")
             if owner is None or init is None or init not in self.states:
                 self._flag(f"PERFORM {name}: target unresolved; call not followed")
                 if cont is not None:
-                    yield ({}, (cont, stack))
-            elif check_recursion and any(owner & fo for fo, _ in stack):
+                    yield ({}, (cont, out(cont, stack)))
+            elif check_recursion and any(owner & fr[0] for fr in stack):
                 self._flag(f"recursive PERFORM {name}; not followed")
                 if cont is not None:
-                    yield ({}, (cont, stack))
+                    yield ({}, (cont, out(cont, stack)))
             else:
-                yield ({}, (init, stack + ((frozenset(owner), cont),)))
+                frame = self._pushed.get(state)
+                if frame is None:
+                    frame = self._pushed[state] = (frozenset(owner), cont)
+                yield ({}, (init, out(init, stack + (frame,))))
             return
         for lab, target in _successors(st):            # ordinary edges
             if target not in self.states:
                 continue
             if stack:
-                owner, ret = stack[-1]
+                owner, ret = stack[-1][0], stack[-1][1]
                 if _para_of(target) not in owner or target == "__END__":   # leaves -> return
                     if ret is not None:
-                        yield (lab, (ret, stack[:-1]))
+                        yield (lab, (ret, out(ret, stack[:-1])))
                 else:
-                    yield (lab, (target, stack))
+                    yield (lab, (target, out(target, stack)))
             else:
                 yield (lab, (target, stack))
+
+    # -- frame refinement ---------------------------------------------------
+    #
+    # Restart-from-step code PERFORMs STEP-k THRU STEP-EXIT for every k, so the frame of
+    # each range is a different config at every step it holds: N ranges, N^2/2 configs,
+    # every later step walked once per range that holds it (a 400-step program needed
+    # 644,000 walk steps, over the budget). But at STEP-j the steps before j cannot be
+    # reached again, and a frame's range is only ever asked one question - does this
+    # target leave it - about targets the walk can still reach. So a frame is refined to
+    # the part of its range that can still be reached, and at STEP-j every range from an
+    # earlier step is the same frame: STEP-j THRU STEP-EXIT. The work is done once.
+    #
+    # Only where no PERFORM can be reached (a "region" state): a frame's range there is
+    # never asked about again by a PERFORM's recursion test, nor does anything get
+    # PERFORMed on top of it, so what sits under a frame is still keyed by the frame as
+    # PERFORMed (`_call_sites`). A refined frame carries that along - ``(range, return
+    # point, what it sits on)`` - so two frames become one only when everything they can
+    # still do is the same: the same reachable range, the same return point, and the
+    # same frames, in the same order, to return under. Frames that differ there stay
+    # apart, and the view is the one the unrefined walk gives, byte for byte.
+
+    def _region_tables(self) -> None:
+        """Fill ``_region`` (the states from which no PERFORM is reachable) and ``_lo``
+        (per state, the lowest paragraph position of any target reachable from it).
+
+        One pass over the flat graph's strongly connected components (iterative Tarjan,
+        which emits a component only after every component it reaches)."""
+        states = self.states
+        succ = {n: [t for _, t in _successors(st) if t in states]
+                for n, st in states.items()}
+        inf = float("inf")
+        index: Dict[str, int] = {}
+        low: Dict[str, int] = {}
+        on: set = set()
+        path: List[str] = []
+        comp: Dict[str, int] = {}
+        has_call: List[bool] = []
+        lo: List[float] = []
+        n = 0
+        for root in states:
+            if root in index:
+                continue
+            index[root] = low[root] = n
+            n += 1
+            path.append(root)
+            on.add(root)
+            work = [(root, iter(succ[root]))]
+            while work:
+                v, it = work[-1]
+                for w in it:
+                    if w not in index:
+                        index[w] = low[w] = n
+                        n += 1
+                        path.append(w)
+                        on.add(w)
+                        work.append((w, iter(succ[w])))
+                        break
+                    if w in on:
+                        low[v] = min(low[v], index[w])
+                else:
+                    work.pop()
+                    if work:
+                        u = work[-1][0]
+                        low[u] = min(low[u], low[v])
+                    if low[v] == index[v]:
+                        c = len(has_call)
+                        members = []
+                        while True:
+                            w = path.pop()
+                            on.discard(w)
+                            comp[w] = c
+                            members.append(w)
+                            if w == v:
+                                break
+                        call, least = False, inf
+                        for m in members:
+                            if any(a.startswith("perform_")
+                                   for a in (states[m].get("entry", []) or [])):
+                                call = True
+                            for t in succ[m]:
+                                least = min(least, self._index.get(_para_of(t), inf))
+                                ct = comp[t]
+                                if ct != c:
+                                    call = call or has_call[ct]
+                                    least = min(least, lo[ct])
+                        has_call.append(call)
+                        lo.append(least)
+        self._region = {s for s in states if not has_call[comp[s]]}
+        self._lo = {s: lo[comp[s]] for s in states}
+
+    def _fit(self, state: str, stack: tuple) -> tuple:
+        """``stack`` with its top frame refined to the paragraphs of its range that can
+        still be reached from ``state`` - when ``state`` is a region state.
+
+        Once `_call_sites` has answered, a refined frame is ``(range, return point,
+        what it sits on)``, the last taken from the frame as PERFORMed; before that (and
+        when the per-stack walk is kept, where nothing is hidden under a frame) it is
+        ``(range, return point)``."""
+        if not stack or state not in self._region:
+            return stack
+        top = stack[-1]
+        key = (top, self._lo[state])
+        got = self._refined.get(key)
+        if got is None:
+            owner, ret = top[0], top[1]
+            lo = key[1]
+            span = self._span_of(owner)
+            if span is not None:
+                first = max(span[0], lo)
+                kept = _Span(first, span[1], self._index) if first <= span[1] \
+                    else frozenset()
+            else:
+                kept = frozenset(p for p in owner if self._index[p] >= lo)
+                if len(kept) == len(owner):
+                    kept = owner
+            if len(top) == 3:
+                got = (kept, ret, top[2])
+            elif self._below is not None:
+                got = (kept, ret, tuple(self._below.get(top, ())))
+            else:
+                got = (kept, ret)
+            got = self._frames.setdefault(got, got)
+            self._refined[key] = got
+        return stack if got is top else stack[:-1] + (got,)
+
+    def _span_of(self, owner) -> Optional[Tuple[int, int]]:
+        """``(first, last)`` paragraph positions when ``owner`` is every paragraph
+        between two positions - a PERFORM ... THRU range, or one already refined - so
+        refining it is two numbers, not a copy of the rest of the range. ``None`` for any
+        other set, and whenever the paragraph order repeats a name (a position then does
+        not name one paragraph)."""
+        if isinstance(owner, _Span):
+            return owner.first, owner.last
+        if len(owner) < 2 or len(self._index) != len(self.ordered):
+            return None
+        got = self._spans.get(owner, False)
+        if got is False:
+            at = list(map(self._index.__getitem__, owner))
+            first, last = min(at), max(at)
+            got = self._spans[owner] = \
+                (first, last) if last - first + 1 == len(owner) else None
+        return got
+
+    def _region_returns(self, state: str, frame: tuple) -> bool:
+        """Can control return out of ``frame`` from ``(state, frame)``, a region config?
+
+        A property of the config, not of whichever frame was refined into it, so it is
+        answered once: the unknown configs reachable are collected, then "returns" is
+        propagated back from each that steps out of the frame. Whatever is left cannot."""
+        start = (state, frame)
+        if start in self._returns:
+            return self._returns[start]
+        preds: Dict[tuple, List[tuple]] = {}
+        order: List[tuple] = []
+        local = {start}
+        todo = [start]
+        yes: List[tuple] = []
+        while todo:
+            c = todo.pop()
+            order.append(c)
+            for _, (nxt, nstack) in self._step(c[0], (c[1],), False):
+                if not nstack:
+                    yes.append(c)
+                    continue
+                d = (nxt, nstack[-1])
+                known = self._returns.get(d)
+                if known is not None:
+                    if known:
+                        yes.append(c)
+                    continue
+                preds.setdefault(d, []).append(c)
+                if d not in local:
+                    local.add(d)
+                    todo.append(d)
+        true = set(yes)
+        while yes:
+            for p in preds.get(yes.pop(), ()):
+                if p not in true:
+                    true.add(p)
+                    yes.append(p)
+        for c in order:
+            self._returns[c] = c in true
+        return self._returns[start]
+
+    def _lows(self, hidden) -> tuple:
+        """The frames a hidden bottom frame can sit on. ``hidden`` names the frame the
+        walk started under: ``("B", frame)``, a frame as PERFORMed, whose answer is
+        `_call_sites`'; ``("R", state, frame)``, a refined frame, which carries it."""
+        if hidden[0] == "B":
+            return tuple(self._below.get(hidden[1], ()))
+        return hidden[2][2]
+
+    def _start_tag(self, state: str, stack: tuple):
+        """The hidden tag a walk from config ``(state, stack)`` carries: it names that
+        config, so walks from two configs never merge while under their own frame."""
+        if state in self._region:
+            return ("R", state, stack[0])
+        return ("B", stack[0])
 
     def _call_sites(self):
         """What can sit under each PERFORM frame - or ``None`` when the per-stack walk
@@ -321,15 +548,28 @@ class _BusinessView:
         def reach(state, top):
             if (state, top) not in seen:
                 seen.add((state, top))
-                work.append((state, top))
+                work.append((state, top, top is not None and state in self._region))
 
         reach(initial, None)
         self._quiet = True
         try:
             while work:
-                state, top = work.pop()
+                state, top, region = work.pop()
+                if region:
+                    # A frame entering a region (see `_fit`): nothing is PERFORMed in
+                    # there, so all the walk through it can do is return. Asked once per
+                    # refined config, not walked once per frame - which is the same
+                    # thing, at the same point, as the walk it replaces: every config
+                    # that walk visited was a region config, so between here and its
+                    # first return nothing else could happen.
+                    cls = self._fit(state, (top,))[0]
+                    if top[1] is not None and self._region_returns(state, cls):
+                        returned[top] = None
+                        for low in below.get(top, ()):
+                            reach(top[1], low)
+                    continue
                 stack = () if top is None else (top,)
-                for _, (nxt, nstack) in self._step(state, stack, False):
+                for _, (nxt, nstack) in self._step(state, stack, False, fit=False):
                     if len(nstack) > len(stack):                  # a PERFORM
                         frame = nstack[-1]
                         lows = below.setdefault(frame, {})
@@ -384,29 +624,20 @@ class _BusinessView:
                 elif nxt not in colour:
                     colour[nxt] = 1
                     path.append((nxt, iter(up.get(nxt, ()))))
-        owners: Dict[str, List[frozenset]] = {}
-        for node in nodes:
-            for para in node:
-                owners.setdefault(para, []).append(node)
-        reach_memo: Dict[frozenset, set] = {}
-
-        def reaches(src):
-            got = reach_memo.get(src)
-            if got is None:
-                got, todo = set(), [src]
-                while todo:
-                    for n in up.get(todo.pop(), ()):
-                        if n not in got:
-                            got.add(n)
-                            todo.append(n)
-                reach_memo[src] = got
-            return got
-
-        for nodes_here in owners.values():
-            for i, x in enumerate(nodes_here):
-                for y in nodes_here[i + 1:]:
-                    if y in reaches(x) or x in reaches(y):
-                        return True
+        # Two ranges sharing a paragraph with a path from one to the other: asked from
+        # the path side. Pairing every two ranges that share a paragraph instead was
+        # cubic in restart-from-step code, where N ranges each hold every later step -
+        # 10.7 million pairs for 400 steps, none of them with a path.
+        for x in up:
+            got, todo = set(), [x]
+            while todo:
+                for n in up.get(todo.pop(), ()):
+                    if n not in got:
+                        got.add(n)
+                        todo.append(n)
+            for y in got:
+                if not x.isdisjoint(y):
+                    return True
         return False
 
     def _walk(self, cfgs: List[tuple], below, arrived: set) -> List[dict]:
@@ -437,8 +668,10 @@ class _BusinessView:
         under that frame until it returns out of it - and then it continues, in the same
         walk, at the frame's return point once for each frame that can sit there
         (``None``: nothing, the top level), each again standing for everything under it.
-        A config is ``(state, stack, hidden)``: ``hidden`` says the bottom frame of
-        ``stack`` stands for an unknown rest. Re-running the walk one frame deeper for
+        A config is ``(state, stack, hidden)``: ``hidden``, when set, says the bottom
+        frame of ``stack`` stands for an unknown rest, and names where to find what can
+        be under it (`_lows`) - the bottom frame itself may be a refined one (`_fit`)
+        standing for several. Re-running the walk one frame deeper for
         each possible caller, as this did, walked the part before the return again for
         every full stack - k^d of them for k callers per level, d levels deep. Without
         ``below`` the stack is the whole stack and nothing is hidden.
@@ -484,9 +717,12 @@ class _BusinessView:
             if hidden and not stack:
                 # Returned out of the frame standing for the unknown rest: carry on at
                 # its return point under each frame that can be there.
-                for low in below.get(cur_stack[0], ()):
-                    heapq.heappush(heap, (count, seq, (state, (low,) if low else (),
-                                                       low is not None),
+                for low in self._lows(hidden):
+                    heapq.heappush(heap, (count, seq, (state,
+                                                       self._fit(state, (low,)) if low
+                                                       else (),
+                                                       ("B", low) if low is not None
+                                                       else False),
                                           biz, guards, events, via))
                     seq += 1
             else:
@@ -497,9 +733,9 @@ class _BusinessView:
         for state, cur_stack in cfgs:
             if (state in self.finals) and not cur_stack:
                 continue
+            tag = self._start_tag(state, cur_stack) if callsite and cur_stack else False
             for lab, nxt in self._step(state, cur_stack, not callsite):
-                push(lab, nxt, callsite and bool(cur_stack), 0, frozenset(), None, (),
-                     None)
+                push(lab, nxt, tag, 0, frozenset(), None, (), None)
 
         while heap:
             self._steps += 1
@@ -521,7 +757,6 @@ class _BusinessView:
                                 "events": list(events), "via": via})
                 continue
             via2 = (state, via)
-            cur_stack = stack
             for lab, nxt in self._step(state, stack, not callsite):
                 push(lab, nxt, hidden, count, biz, guards, events, via2)
         return results
@@ -567,7 +802,11 @@ class _BusinessView:
         if initial not in self.states:
             return entry, transitions
 
+        self._region_tables()
         below = self._call_sites()
+        # From here a refined frame carries what it sits on (`_fit`).
+        self._below = below
+        self._refined.clear()
         worklist: List[tuple] = []
         if self._is_business(initial):
             entry.append({"to": initial, "guards": [], "events": [], "via": []})
@@ -878,6 +1117,29 @@ class _BusinessView:
         elif states:
             cfg["initial"] = next(iter(states))
         return cfg
+
+
+class _Span:
+    """The paragraphs at positions ``first`` .. ``last`` of the paragraph order: a
+    refined PERFORM ... THRU range (`_BusinessView._fit`), held as its bounds. It answers
+    the one question a frame's range is asked - is this paragraph in it - and is equal to
+    another span with the same bounds."""
+
+    __slots__ = ("first", "last", "_index")
+
+    def __init__(self, first: int, last: int, index: Dict[str, int]) -> None:
+        self.first, self.last, self._index = first, last, index
+
+    def __contains__(self, para: str) -> bool:
+        i = self._index.get(para)
+        return i is not None and self.first <= i <= self.last
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, _Span) and \
+            (self.first, self.last) == (other.first, other.last)
+
+    def __hash__(self) -> int:
+        return hash((_Span, self.first, self.last))
 
 
 #: The prefix of an edge label standing for its route's guards: ``guards#<i>``, where

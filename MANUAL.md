@@ -246,7 +246,9 @@ several PERFORMs is walked a second time, from all of them at once, to find each
 transition's shortest route. A step costs about 10 µs, so the default is a few seconds.
 No example program needs more than 33 steps; an 11,000-line generated program needs
 9,213, and a report splitter with a thousand report loops sharing one read paragraph
-needs 143,131. `--timing` reports each run's count
+needs 143,131. Overlapping `PERFORM ... THRU` ranges (restart-from-step code, which
+PERFORMs STEP-k THRU STEP-EXIT for every k) are walked once per step, not once per range
+holding it: 400 steps need 2,403. `--timing` reports each run's count
 (`walkSteps` on its `view:business` line), so the budget can be set from your own
 programs rather than these.
 

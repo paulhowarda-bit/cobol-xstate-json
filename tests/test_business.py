@@ -684,6 +684,60 @@ def test_a_transition_shows_its_shortest_route_from_any_call_context():
     assert max(len(t["via"]) for t in view["transitions"]) < 10   # 51 before
 
 
+def _restart(steps):
+    """Restart-from-step: the main paragraph PERFORMs S-k THRU S-LAST-EXIT for the
+    restart step k, so the N ranges overlap - each holds every later step."""
+    a = lambda s: "       " + s
+    out = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. RESTART.", "DATA DIVISION.",
+           "WORKING-STORAGE SECTION.", "01 WS-STEP PIC 9(5) VALUE 1.",
+           "01 WS-CNT PIC 9(9) VALUE 0.", "01 WS-A PIC 9(9) VALUE 0.",
+           "PROCEDURE DIVISION.", "0000-MAIN.", "    EVALUATE WS-STEP"]
+    for k in range(1, steps + 1):
+        out += [f"      WHEN {k}", f"        PERFORM S-{k} THRU S-LAST-EXIT"]
+    out += ["    END-EVALUATE.", "    STOP RUN."]
+    for k in range(1, steps + 1):
+        out += [f"S-{k}.", f"    ADD {k} TO WS-CNT.", f"    IF WS-A > {k}",
+                f"        MOVE {k} TO WS-A", "    END-IF."]
+    out += ["S-LAST-EXIT.", "    EXIT."]
+    return "\n".join(a(s) for s in out) + "\n"
+
+
+def test_overlapping_thru_ranges_are_walked_once_not_once_per_range():
+    """Each range was a different call context at every step it holds, so every step
+    was walked once per range holding it: 200 steps took 161,997 walk steps, 400 were
+    refused at the budget (643,997). A range is refined to what can still be reached -
+    at step j every earlier range IS S-j THRU S-LAST-EXIT - so each step is walked once,
+    with every transition still there."""
+    stats = {}
+    view = build_business_view(build_machine(parse_program(_restart(200)),
+                                             source_name="restart200.cbl"), stats=stats)
+    assert stats["walkSteps"] < 2_000                  # 1,203; 161,997 before
+    # Per step: main -> its ADD, ADD -> IF, IF -> next ADD (both branches); then the
+    # last step's IF -> program end (both branches) and main's WHEN OTHER -> end.
+    assert len(view["transitions"]) == 4 * 200 + 1
+    reached = {t["to"] for t in view["transitions"]}
+    assert all(f"S-{k}" in reached for k in range(1, 201))
+
+
+def test_refining_frames_changes_the_work_not_the_view(monkeypatch):
+    """Refinement merges call contexts that can no longer differ; it must never change
+    what the view says. With it switched off (no state counts as unable to reach a
+    PERFORM, so no frame is ever refined) the view is the same, byte for byte - on every
+    example, and on the generated shapes these tests use."""
+    from cobol_xstate.business import _BusinessView
+    sources = [(n.name, n.read_text()) for n in sorted(EXAMPLES.glob("*.cbl"))]
+    sources += [("restart30.cbl", _restart(30)), ("layers.cbl", _layered(4)),
+                ("fan.cbl", _fan(8)), ("loopnest.cbl", _loop_nest(4)),
+                ("splitter.cbl", _splitter(20))]
+    for name, src in sources:
+        machine = build_machine(parse_program(src), source_name=name)
+        refined = json.dumps(build_business_view(machine))
+        with monkeypatch.context() as m:
+            m.setattr(_BusinessView, "_region_tables", lambda self: None)
+            plain = json.dumps(build_business_view(machine))
+        assert refined == plain, name
+
+
 def test_an_if_branch_keeps_its_arrow_when_the_else_reaches_the_same_state():
     """`IF SQLCODE = 0 ... ELSE ... END-IF` with both branches running on to the program
     end: each branch is a business step of its own, so each gets its transition."""
