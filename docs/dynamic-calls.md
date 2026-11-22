@@ -84,6 +84,28 @@ to count by hand, plus the reason. The rule behind that:
 > A wrong offset is indistinguishable from a right one. The reader finds garbage and
 > blames the data.
 
+The layout itself is not repeated in each source. A record's layout is the same for every
+field of it a source reads, so it is written once, in the document's top-level `layouts`
+list (`formatVersion` 7), and `extract.layout` is its index there:
+
+```json
+"extract": {"kind": "file-field", "field": "CTL-PGM-NAME", "record": "CTL-REC",
+            "layout": 0, "note": "...", "offset": 5, "length": 8,
+            "readAt": "bytes 5-12 of the 78-byte record", "recordLength": 78},
+...
+"layouts": [{"record": "CTL-REC", "fields": [...], "provable": true, "size": 78}]
+```
+
+Written whole into every source, the view grew as (sources fed from a record) x (fields in
+that record): one 2000-field input record feeding 20 dynamic CALLs wrote 8.4 MB, and a
+program with 901 sources on one record 58 MB — now 344 KB and 1.6 MB. Entries are interned by
+*content*, not by record name, because each program of a member has its own data
+dictionary: two contained programs' `CTL-REC`s that lay out differently are two entries,
+and two that lay out alike are one. `extract.layout` is `null` when the field is not a
+declared item (there is no record to lay out), and `layouts` is `[]` when no source reads
+a file. `expand_dynamic_calls(view)` in `cobol_xstate.dynamic_calls` writes a copy of each
+layout back into its source and drops the table — the `formatVersion` 6 form, key for key.
+
 `SIGN IS SEPARATE` is the exception that proves it — an exact, knowable +1 byte, so it
 does *not* block a position. (`SYNCHRONIZED` and `SIGN IS SEPARATE` are parsed for this
 purpose alone; nothing else in the tool reads them.)

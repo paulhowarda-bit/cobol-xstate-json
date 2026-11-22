@@ -79,6 +79,18 @@ def test_field_position_reports_the_field_within_its_own_record():
     assert pos["recordLength"] == 78
 
 
+def test_field_position_lays_out_a_record_once_for_many_fields():
+    """With a ``layouts`` memo, every field of one record gets the SAME layout object -
+    computed once - and each answer is the one it would be without the memo."""
+    data, memo = _data(PLAIN), {}
+    a = field_position(data, "CTL-KEY", layouts=memo)
+    b = field_position(data, "CTL-PGM-NAME", layouts=memo)
+    assert a["layout"] is b["layout"] is memo["CTL-REC"]
+    assert list(memo) == ["CTL-REC"]
+    assert a == field_position(data, "CTL-KEY")
+    assert b == field_position(data, "CTL-PGM-NAME")
+
+
 def test_occurs_multiplies_the_group():
     data = _data("""\
        01  T-REC.

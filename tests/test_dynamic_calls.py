@@ -9,7 +9,9 @@ asserting a fiction - the control file's contents are run-time data.
 import json
 
 from cobol_xstate.artifacts import build_artifacts
-from cobol_xstate.dynamic_calls import annotate_artifacts, build_dynamic_calls
+from cobol_xstate.dynamic_calls import (annotate_artifacts, build_dynamic_calls,
+                                        expand_dynamic_calls)
+from cobol_xstate.storage import field_position
 from mainframe_artifacts.fetch import build_fetch_plan, fetch_dependencies
 import importlib.util
 
@@ -434,7 +436,8 @@ def test_a_file_source_withholds_the_position_it_cannot_prove():
     extract = _only(view)["sources"][0]["extract"]
     assert "readAt" not in extract
     assert "OCCURS DEPENDING ON CTL-N" in extract["positionWithheld"]
-    assert extract["layout"]["fields"], "the layout must survive the refusal"
+    assert view["layouts"][extract["layout"]]["fields"], \
+        "the layout must survive the refusal"
 
 
 def test_the_report_is_self_describing_and_serializable():
@@ -704,3 +707,157 @@ def test_a_column_qualified_to_a_joined_table_is_read_from_that_table():
     assert src["artifact"] == "ZZROUTE"
     assert src["how"]["readAt"] == "ZZROUTE.HANDLER"
     assert "FROM ZZROUTE" in src["extract"]["run"]
+
+
+# --------------------------------------------------------------------------- #
+# each record layout written once: the `layouts` table
+# --------------------------------------------------------------------------- #
+
+def _fanout_src(fields: int, sites: int) -> str:
+    """One input record of ``fields`` fields; ``sites`` dynamic CALL items, each MOVEd
+    from its own field and called once - every source reads a field of the one record."""
+    lines = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. FANOUT.",
+             "ENVIRONMENT DIVISION.", "INPUT-OUTPUT SECTION.", "FILE-CONTROL.",
+             "    SELECT CTL-FILE ASSIGN TO CTLDD.", "DATA DIVISION.", "FILE SECTION.",
+             "FD CTL-FILE.", "01 CTL-REC."]
+    lines += [f"   05 CTL-F{i} PIC X(8)." for i in range(fields)]
+    lines += ["WORKING-STORAGE SECTION."]
+    lines += [f"01 WS-P{i} PIC X(8)." for i in range(sites)]
+    lines += ["PROCEDURE DIVISION.", "0000-MAIN.", "    OPEN INPUT CTL-FILE",
+              "    READ CTL-FILE"]
+    lines += [f"    MOVE CTL-F{i} TO WS-P{i}" for i in range(sites)]
+    lines += [f"    CALL WS-P{i}" for i in range(sites)]
+    lines += ["    STOP RUN."]
+    return "".join("       " + ln + "\n" for ln in lines)
+
+
+def test_a_record_many_sources_read_is_laid_out_once():
+    """Twelve dynamic CALLs fed from twelve fields of one 40-field record: the layout
+    used to be written into each of the twelve sources. It is in `layouts` once, every
+    source names it by the same id, and each source keeps its own field's position."""
+    m, _art, view = _view(_fanout_src(40, 12))
+    assert len(view["dynamicCalls"]) == 12
+    (layout,) = view["layouts"]
+    assert layout == field_position(m.data, "CTL-F0")["layout"]
+    assert len(layout["fields"]) == 40
+    for i, row in enumerate(sorted(view["dynamicCalls"],
+                                   key=lambda r: int(r["item"][4:]))):
+        (src,) = row["sources"]
+        ext = src["extract"]
+        assert ext["layout"] == 0 and ext["record"] == "CTL-REC"
+        assert ext["field"] == f"CTL-F{i}"
+        assert ext["readAt"] == f"bytes {8 * i + 1}-{8 * i + 8} of the 320-byte record"
+    # Written once in the document, not once per source: a field no source reads
+    # appears in the layout and nowhere else.
+    assert json.dumps(view).count('"CTL-F39"') == 1
+
+
+def test_the_view_grows_with_the_record_once_not_once_per_source():
+    """The size is (sources) + (fields), not (sources) x (fields): ten times the
+    sources on a 200-field record costs what it costs on a 20-field one."""
+    def size(fields, sites):
+        return len(json.dumps(_view(_fanout_src(fields, sites))[2]))
+    wide = size(200, 20) - size(200, 2)
+    narrow = size(20, 20) - size(20, 2)
+    # Equal up to the digits of the larger offsets and the record length.
+    assert abs(wide - narrow) < 200, (wide, narrow)
+
+
+def _two_records_src(outer_rest: str, inner_rest: str) -> str:
+    """OUTER and INNER each read their CALL target from a CTL-REC of their own."""
+    def unit(name, rest):
+        return (
+            "       IDENTIFICATION DIVISION.\n"
+            f"       PROGRAM-ID. {name}.\n"
+            "       ENVIRONMENT DIVISION.\n"
+            "       INPUT-OUTPUT SECTION.\n"
+            "       FILE-CONTROL.\n"
+            f"           SELECT CTL-FILE ASSIGN TO {name}DD.\n"
+            "       DATA DIVISION.\n"
+            "       FILE SECTION.\n"
+            "       FD  CTL-FILE.\n"
+            "       01  CTL-REC.\n"
+            "           05  CTL-PGM-NAME  PIC X(8).\n"
+            f"           05  CTL-REST      {rest}.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            "       01  WS-SUBPGM  PIC X(8).\n"
+            "       PROCEDURE DIVISION.\n"
+            f"       {name}-MAIN.\n"
+            "           READ CTL-FILE AT END CONTINUE END-READ\n"
+            "           MOVE CTL-PGM-NAME TO WS-SUBPGM\n"
+            "           CALL WS-SUBPGM\n")
+    return (unit("OUTER", outer_rest) + "           CALL 'INNER'\n           GOBACK.\n"
+            + unit("INNER", inner_rest) + "           GOBACK.\n"
+            "       END PROGRAM INNER.\n"
+            "       END PROGRAM OUTER.\n")
+
+
+def test_two_programs_records_of_one_name_keep_their_own_layouts():
+    """Each program of a member has its own data dictionary, so OUTER's CTL-REC and
+    INNER's CTL-REC are two records that only share a name. Laid out differently, they
+    are two layouts - interning by the record's name would hand INNER OUTER's 80
+    bytes."""
+    m, _art, view = _view(_two_records_src("PIC X(72)", "PIC X(12)"))
+    by_prog = {r["program"]: r["sources"][0]["extract"] for r in view["dynamicCalls"]}
+    assert sorted(by_prog) == ["INNER", "OUTER"]
+    assert len(view["layouts"]) == 2
+    assert by_prog["OUTER"]["layout"] != by_prog["INNER"]["layout"]
+    assert view["layouts"][by_prog["OUTER"]["layout"]]["size"] == 80
+    assert view["layouts"][by_prog["INNER"]["layout"]]["size"] == 20
+    (inner,) = m.contained
+    assert view["layouts"][by_prog["INNER"]["layout"]] == \
+        field_position(inner.data, "CTL-PGM-NAME")["layout"]
+
+
+def test_two_programs_equal_layouts_are_written_once():
+    """...and laid out alike, they are one layout: the table holds each distinct
+    layout once, however many programs reach it."""
+    _m, _art, view = _view(_two_records_src("PIC X(72)", "PIC X(72)"))
+    assert len(view["dynamicCalls"]) == 2
+    assert len(view["layouts"]) == 1
+    assert {r["sources"][0]["extract"]["layout"] for r in view["dynamicCalls"]} == {0}
+
+
+def test_expand_writes_each_sources_layout_back():
+    """`expand_dynamic_calls` is the form the view had before the table: every source
+    carrying its own copy of its record's layout, and no `layouts` key - the rest of the
+    document key for key, in the same order. It does not touch the view it is given."""
+    m, _art, view = _view(_fanout_src(5, 3))
+    before = json.dumps(view)
+    full = expand_dynamic_calls(view)
+    assert json.dumps(view) == before
+    assert "layouts" not in full
+    assert list(full) == [k for k in view if k != "layouts"]
+    layouts = [s["extract"]["layout"] for r in full["dynamicCalls"]
+               for s in r["sources"]]
+    assert len(layouts) == 3
+    for lay in layouts:
+        assert lay == field_position(m.data, "CTL-F0")["layout"]
+    assert layouts[0] is not layouts[1], "each source owns its copy"
+    # Nothing but the layout differs: put the id back and it is the view's own row.
+    for row, full_row in zip(view["dynamicCalls"], full["dynamicCalls"]):
+        for src, full_src in zip(row["sources"], full_row["sources"]):
+            assert list(full_src) == list(src)
+            assert list(full_src["extract"]) == list(src["extract"])
+            assert dict(full_src["extract"], layout=src["extract"]["layout"]) == \
+                src["extract"]
+
+
+def test_a_view_with_no_file_source_has_an_empty_table():
+    """A Db2-fed call reads no record: `layouts` is still there, empty, so the shape
+    does not depend on what the program reads - and expanding drops only that key."""
+    _m, _art, view = _view("""\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DB2P.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM  PIC X(8).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           EXEC SQL SELECT HANDLER INTO :WS-PGM FROM ROUTING END-EXEC
+           CALL WS-PGM
+           GOBACK.
+""")
+    assert view["layouts"] == []
+    assert expand_dynamic_calls(view) == {k: v for k, v in view.items()
+                                          if k != "layouts"}

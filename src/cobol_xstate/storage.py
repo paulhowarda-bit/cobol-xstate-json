@@ -290,11 +290,16 @@ def _dedup(items: List[str]) -> List[str]:
     return list(dict.fromkeys(items))
 
 
-def field_position(data: Dict[str, dict], field: str) -> dict:
+def field_position(data: Dict[str, dict], field: str, *,
+                   layouts: Optional[Dict[str, dict]] = None) -> dict:
     """Where one field sits in its own record - the form the dynamic-calls view wants.
 
     Returns ``{record, field, offset?, length?, provable, reason?, layout}``. The record
-    is the field's topmost ancestor, since that is the unit a dataset is read in."""
+    is the field's topmost ancestor, since that is the unit a dataset is read in.
+
+    ``layouts``, when given, memoizes `record_layout` by record for a caller positioning
+    many fields of the one dictionary: the same record's layout is then computed once and
+    returned as the SAME object, which the caller must not mutate."""
     entry = data.get(field.upper())
     if not isinstance(entry, dict):
         return {"field": field, "provable": False,
@@ -319,7 +324,12 @@ def field_position(data: Dict[str, dict], field: str) -> dict:
         seen.add(parent)
         record = parent
 
-    layout = record_layout(data, record)
+    if layouts is None:
+        layout = record_layout(data, record)
+    else:
+        if record not in layouts:
+            layouts[record] = record_layout(data, record)
+        layout = layouts[record]
     out = {"record": record, "field": field.upper(),
            "provable": bool(layout.get("provable")), "layout": layout}
     if layout.get("size"):

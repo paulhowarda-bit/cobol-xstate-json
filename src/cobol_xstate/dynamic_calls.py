@@ -58,6 +58,8 @@ said differently, because each sends the reader somewhere different:
 
 from __future__ import annotations
 
+import copy
+import json
 from collections import deque
 from typing import Dict, List, Optional, Tuple
 
@@ -78,6 +80,67 @@ _NAMES = {
 # The caller event, which is not an artifact on the estate but a fact about who invokes
 # this program - a different answer, and a different place to go looking.
 _CALLER = "GET.CALLER.CALLER"
+
+
+class _Layouts:
+    """Each distinct record layout of the document, once: ``layouts``, in order of first
+    use, and the id a source's ``extract.layout`` names it by.
+
+    A record's layout is the same for every field of it a source reads, so writing it
+    into each source made the view (sources fed from a record) x (fields in it) - one
+    2000-field input record feeding 20 dynamic CALLs wrote 8.4 MB of the same layout.
+    Interned by CONTENT, not by record name: two programs of one member each have their
+    own data dictionary, so two records named alike can lay out differently - and they
+    get two ids - while two layouts that are equal are equal however they were reached.
+    Equality is the layouts' JSON text, key order kept: two layouts with the same text
+    serialize to the same bytes, so `expand_dynamic_calls` writes back exactly what each
+    source held."""
+
+    def __init__(self) -> None:
+        self.layouts: List[dict] = []
+        self._by_text: Dict[str, int] = {}
+        # id(layout) -> (its id, the layout). The layout is held so its id() cannot be
+        # reused by another object while this table lives.
+        self._by_obj: Dict[int, Tuple[int, dict]] = {}
+
+    def intern(self, layout: Optional[dict]) -> Optional[int]:
+        if layout is None:
+            return None
+        hit = self._by_obj.get(id(layout))
+        if hit is not None:
+            return hit[0]
+        text = json.dumps(layout)
+        i = self._by_text.get(text)
+        if i is None:
+            i = self._by_text[text] = len(self.layouts)
+            self.layouts.append(layout)
+        self._by_obj[id(layout)] = (i, layout)
+        return i
+
+
+def expand_dynamic_calls(view: dict) -> dict:
+    """The dynamic-calls view with every ``extract.layout`` id resolved: a copy in which
+    each file-field source carries its own copy of ``layouts[id]`` again and the table is
+    dropped - the form ``formatVersion`` 6 wrote. It holds exactly what the view holds,
+    for a reader that wants each source self-contained and can afford its size."""
+    out = dict(view)
+    table = out.pop("layouts", [])
+    rows = []
+    for row in view.get("dynamicCalls", []):
+        row = dict(row)
+        sources = []
+        for src in row.get("sources", []):
+            ext = src.get("extract")
+            if isinstance(ext, dict) and isinstance(ext.get("layout"), int):
+                src = dict(src, extract=dict(ext, layout=copy.deepcopy(
+                    table[ext["layout"]])))
+            sources.append(src)
+        if "sources" in row:
+            row["sources"] = sources
+        rows.append(row)
+    if "dynamicCalls" in view:
+        out["dynamicCalls"] = rows
+    return out
 
 
 def _index(rows: List[dict], key: str) -> Dict[str, List[dict]]:
@@ -178,14 +241,16 @@ def _artifact_row(manifest: Optional[dict], name: str) -> dict:
     return {}
 
 
-def _recipe(fill: dict, endpoint: str, data: dict) -> dict:
+def _recipe(fill: dict, endpoint: str, data: dict, layouts: _Layouts,
+            memo: Dict[str, dict]) -> dict:
     """What to actually RUN or READ to get the real target list out of the artifact.
 
     Naming the artifact and the field is where this view used to stop, and it leaves the
     last mile to the reader. For Db2 the exact query is derivable from the SQL we already
     parsed, and for a file the field's byte position is derivable from the record layout -
     so derive them. Both are refused rather than guessed when the inputs do not support
-    them (see `storage.record_layout`)."""
+    them (see `storage.record_layout`). The record's layout is written once, in the
+    document's ``layouts`` table (`_Layouts`); ``layout`` here is its id there."""
     column = _column_of(fill)
     if column:
         endpoint = _table_of(fill, endpoint)
@@ -197,12 +262,12 @@ def _recipe(fill: dict, endpoint: str, data: dict) -> dict:
             "note": ("every distinct value this column holds is a possible target of "
                      "the call - the live table is the authoritative call graph"),
         }
-    position = field_position(data, fill["field"])
+    position = field_position(data, fill["field"], layouts=memo)
     out = {
         "kind": "file-field",
         "field": fill["field"],
         "record": position.get("record"),
-        "layout": position.get("layout"),
+        "layout": layouts.intern(position.get("layout")),
         "note": ("each record's value in this field is a possible target - read the "
                  "dataset and take the distinct values of this field"),
     }
@@ -215,7 +280,8 @@ def _recipe(fill: dict, endpoint: str, data: dict) -> dict:
 
 
 def _source(site: dict, event: str, maybe: bool, resolver: Optional[str],
-            flow_by_target, fills_by_field, manifest, data: dict) -> dict:
+            flow_by_target, fills_by_field, manifest, data: dict, layouts: _Layouts,
+            memo: Dict[str, dict]) -> dict:
     """One artifact that supplies the call's target, and the route the name takes."""
     if maybe and resolver and event.startswith("CREATE.PROGRAM."):
         # The item is passed BY REFERENCE to another program, which may write it - so
@@ -299,7 +365,7 @@ def _source(site: dict, event: str, maybe: bool, resolver: Optional[str],
         "event": fill["event"],
         "how": how,
         # ...and what to run or read to turn the artifact into the actual target list.
-        "extract": _recipe(fill, endpoint, data),
+        "extract": _recipe(fill, endpoint, data, layouts, memo),
     }
     src.update({k: v for k, v in _artifact_row(manifest, endpoint).items()
                 if k != "kind"})
@@ -375,9 +441,12 @@ def _own_rows(manifest: Optional[dict], unit: Optional[str]) -> Optional[dict]:
                                      if r.get("containedProgram") == unit])
 
 
-def _dynamic_rows(machine: Machine, artifacts: Optional[dict]
+def _dynamic_rows(machine: Machine, artifacts: Optional[dict], layouts: _Layouts
                   ) -> Tuple[List[dict], List[str]]:
     """One program's rows, from its own lineage, and the lineage flags they rest on."""
+    # This program's record layouts by record, each laid out once however many of its
+    # sources read a field of it. Per program: each has its own data dictionary.
+    memo: Dict[str, dict] = {}
     lin = machine.lineage()
     lin.run()
 
@@ -466,7 +535,8 @@ def _dynamic_rows(machine: Machine, artifacts: Optional[dict]
         sources: List[dict] = []
         for (event, maybe, resolver) in site["origins"]:
             sources.append(_source(site, event, maybe, resolver, flow_by_target,
-                                   fills_by_field, artifacts, machine.data or {}))
+                                   fills_by_field, artifacts, machine.data or {},
+                                   layouts, memo))
         row["sources"] = sources
 
         if not sources:
@@ -540,13 +610,19 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
     ``artifacts`` is the related-artifact manifest, used to give each source its
     retrievable identity (ddname, and the dataset when the JCL was bound). Pure read.
 
+    Each distinct record layout a file-field source reads is in ``layouts`` once, and
+    the source's ``extract.layout`` is its index there; `expand_dynamic_calls` writes
+    every copy back.
+
     A program contained in this source is part of this member, so its dynamic targets
     are rows here too, traced over ITS lineage and its storage; each row's ``program``
     says whose call it is."""
-    rows, own_flags = _dynamic_rows(machine, _own_rows(artifacts, None))
+    layouts = _Layouts()
+    rows, own_flags = _dynamic_rows(machine, _own_rows(artifacts, None), layouts)
     flags = list(own_flags)
     for unit in machine.contained:
-        more, unit_flags = _dynamic_rows(unit, _own_rows(artifacts, unit.program_id))
+        more, unit_flags = _dynamic_rows(unit, _own_rows(artifacts, unit.program_id),
+                                         layouts)
         rows.extend(more)
         flags.extend(f"contained program {unit.program_id}: {f}" for f in unit_flags)
 
@@ -584,5 +660,6 @@ def build_dynamic_calls(machine: Machine, artifacts: Optional[dict] = None) -> d
                                        for s in r.get("sources", []))),
         },
         "dynamicCalls": rows,
+        "layouts": layouts.layouts,
         "flags": flags,
     }

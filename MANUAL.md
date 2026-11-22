@@ -1039,6 +1039,18 @@ whenever `OCCURS DEPENDING`, `REDEFINES`, `SYNCHRONIZED` or an unreadable PICTUR
 arithmetic uncertain — you get the ordered layout and the reason instead, because a wrong
 offset is indistinguishable from a right one.
 
+A file source's record layout is written once (`formatVersion` 7), in the document's
+top-level **`layouts`** list, and its `extract.layout` is the index of that layout there
+(`null` when the field is not a declared item, so there is no record to lay out). Every
+source that reads a field of the same record names the same entry; written whole into each
+source, one 2000-field input record feeding 20 dynamic CALLs made an 8.4 MB view, and 901
+sources on one record 58 MB. The table holds each *distinct* layout: two programs of one member that each have a
+record of the same name keep two entries when they lay out differently (each program has
+its own data dictionary) and share one when they do not. `layouts` is always present —
+`[]` when no source reads a file. `cobol_xstate.dynamic_calls.expand_dynamic_calls(view)`
+puts a copy of its layout back into each source and drops the table: the form
+`formatVersion` 6 wrote, key for key.
+
 Six other outcomes are reported differently because each sends you somewhere else: a
 `caller` source (the value is passed in — enumerate this program's *callers*), a
 `called-program` source (passed BY REFERENCE to a callee that may write it — the target is
