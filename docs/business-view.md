@@ -161,9 +161,15 @@ read together: the business view shows *which steps matter*, the lineage table s
   at every step it holds, and every step was walked once per range holding it: 400 steps
   needed 643,997 walk steps and were refused at the budget. Where no PERFORM can be
   reached any more, a frame's range is refined to the part of it still reachable - at
-  STEP-j every earlier range is STEP-j THRU STEP-EXIT - and frames that agree on that,
-  on their return point and on what they sit on become one context. 400 steps now take
-  2,403 walk steps (0.2 s, was 18 s); the view is unchanged, byte for byte.
+  STEP-j every earlier range is STEP-j THRU STEP-EXIT - and configs whose frames agree
+  on that, on their return point and on what they sit on are one class. A config is not
+  walked when its class, and every class it can reach inside its frame, has been walked
+  already: its walk would find nothing and push only more of the same. The configs are
+  not merged into their class, because the transitions list is in the order the
+  worklist meets configs, and merging them changes that order (a frame reached a second
+  way, while the first way's configs still wait, has its copies walked first). 400
+  steps now take 2,403 walk steps (0.1 s, was 18 s), and the view is the one the
+  unrefined walk gives, byte for byte.
 - **A view that needs too much work is refused, not cut short.** The walk has a budget
   of 250,000 steps (`--business-budget`, `analyze(business_budget=)`; `0` means no
   limit). A view that needs more raises `ViewBudgetExceeded`, and nothing partial is

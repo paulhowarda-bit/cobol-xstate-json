@@ -719,13 +719,45 @@ def test_overlapping_thru_ranges_are_walked_once_not_once_per_range():
     assert all(f"S-{k}" in reached for k in range(1, 201))
 
 
+#: Two overlapping ranges also reached another way: 0000-MAIN PERFORMs D-3 and then
+#: falls into it, so D-3's two PERFORM ... THRU frames are met from two places. At S-3
+#: both frames are S-3 THRU S-LAST-EXIT, but the second one is reached while the first
+#: one's S-3__if3 config still waits on the worklist - so the second one's copy is walked
+#: first, and S-3__if3's transitions come before S-3's program-end ones.
+_REACHED_TWICE = "\n".join("       " + s for s in [
+    "IDENTIFICATION DIVISION.", "PROGRAM-ID. THRUORD.", "DATA DIVISION.",
+    "WORKING-STORAGE SECTION.", "01 X0 PIC 9(4) VALUE 0.", "01 X2 PIC 9(4) VALUE 0.",
+    "01 X4 PIC 9(4) VALUE 0.", "PROCEDURE DIVISION.", "0000-MAIN.", "    PERFORM D-3.",
+    "D-3.", "    EVALUATE X2", "      WHEN 0", "        PERFORM S-2 THRU S-LAST-EXIT",
+    "      WHEN 1", "        PERFORM S-3 THRU S-LAST-EXIT", "    END-EVALUATE.",
+    "S-2.", "    DISPLAY X0.", "S-3.", "    IF X0 > 3 GO TO S-LAST-EXIT END-IF.",
+    "    IF X4 > 3", "        MOVE 3 TO X2", "    END-IF.", "S-LAST-EXIT.",
+    "    EXIT."]) + "\n"
+
+
+def test_frames_alike_from_here_are_still_walked_in_the_order_they_are_met():
+    """Configs whose frames can no longer differ are one class, but they are not merged:
+    the transitions list is in the order the worklist meets configs, and merging them
+    put S-3__if3's two transitions to S-2 after S-3's to the program end. A config is
+    only left unwalked once its class, and all it reaches inside its frame, is walked."""
+    view = build_business_view(build_machine(parse_program(_REACHED_TWICE),
+                                             source_name="thruord.cbl"))
+    assert [(t["from"], t["to"]) for t in view["transitions"]] == [
+        ("D-3", "D-3"), ("D-3", "S-2"), ("D-3", "S-3"), ("S-3", "S-3__if3"),
+        ("S-3", "S-2"), ("S-2", "D-3"), ("D-3", "S-2"), ("S-2", "S-3"),
+        ("S-3__if3", "S-2"), ("S-3__if3", "S-2"), ("S-3", "__END__"),
+        ("S-3__if3", "__END__"), ("S-3__if3", "__END__")]
+
+
 def test_refining_frames_changes_the_work_not_the_view(monkeypatch):
-    """Refinement merges call contexts that can no longer differ; it must never change
-    what the view says. With it switched off (no state counts as unable to reach a
-    PERFORM, so no frame is ever refined) the view is the same, byte for byte - on every
-    example, and on the generated shapes these tests use."""
+    """Refinement lets the walk skip configs that can no longer differ from one already
+    walked; it must never change what the view says. With it switched off (no state
+    counts as unable to reach a PERFORM, so no frame is ever refined) the view is the
+    same, byte for byte - on every example, and on the generated shapes these tests
+    use."""
     from cobol_xstate.business import _BusinessView
     sources = [(n.name, n.read_text()) for n in sorted(EXAMPLES.glob("*.cbl"))]
+    sources += [("thruord.cbl", _REACHED_TWICE)]
     sources += [("restart30.cbl", _restart(30)), ("layers.cbl", _layered(4)),
                 ("fan.cbl", _fan(8)), ("loopnest.cbl", _loop_nest(4)),
                 ("splitter.cbl", _splitter(20))]

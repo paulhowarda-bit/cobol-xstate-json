@@ -130,7 +130,7 @@ def _successors(st: dict) -> List[Tuple[dict, str]]:
 #: shortest route (`_build_flow`). Every step costs about 10 us, so 250,000 is a few
 #: seconds. No example program needs more than 33, an 11,000-line generated one needs
 #: 9,213, a thousand-report splitter 143,131, and 400 overlapping PERFORM ... THRU
-#: ranges 2,403 (`_fit`).
+#: ranges 2,403 (`_closed`).
 #:
 #: Exceeding it is a FAILURE of this view, never a shorter answer: a cut-off walk would
 #: return a transition list that reads as complete, and nothing downstream could tell.
@@ -186,6 +186,10 @@ class _BusinessView:
         self._calls: Dict[str, tuple] = {}       # call state -> its resolved PERFORM
         self._pushed: Dict[str, tuple] = {}      # call state -> the frame it pushes
         self._below: Optional[dict] = None          # `_call_sites`' answer, once known
+        # class -> the classes its first walk found inside its frame; None: cut short
+        self._inside: Dict[tuple, Optional[list]] = {}
+        self._closed_set: set = set()                # classes `_closed` has proven
+        self._cut = False                            # did the last `_walk` hit `arrived`
 
     def _flag(self, msg: str) -> None:
         if self._quiet:
@@ -262,7 +266,7 @@ class _BusinessView:
                 "kind": "control" if self._control_guard(name) else "business"}
 
     def _step(self, state: str, stack: tuple, check_recursion: bool = True,
-              fit: bool = True):
+              fit: bool = False):
         """Yield ``(label, (next_state, next_stack))`` for one control step from a config.
 
         ``check_recursion=False`` is for the call-site walk, which runs only once
@@ -270,8 +274,10 @@ class _BusinessView:
         stack - so the check could never fire, and it would need the whole stack.
 
         ``fit`` refines the next config's top frame to the part of its range still
-        reachable (`_fit`); `_call_sites` steps without it, because it keys what sits
-        under each frame by the frame as PERFORMed."""
+        reachable (`_fit`). Only `_region_returns` steps that way: the business walk
+        steps over frames as PERFORMed, so its configs are the ones the view has always
+        been built from, and refinement only decides which of them need no walk
+        (`_closed`)."""
         out = self._fit if fit else (lambda s, k: k)
         st = self.states.get(state, {})
         if state in self.finals:                       # program end, or a return
@@ -330,16 +336,26 @@ class _BusinessView:
     # reached again, and a frame's range is only ever asked one question - does this
     # target leave it - about targets the walk can still reach. So a frame is refined to
     # the part of its range that can still be reached, and at STEP-j every range from an
-    # earlier step is the same frame: STEP-j THRU STEP-EXIT. The work is done once.
+    # earlier step is the same frame: STEP-j THRU STEP-EXIT.
     #
     # Only where no PERFORM can be reached (a "region" state): a frame's range there is
     # never asked about again by a PERFORM's recursion test, nor does anything get
     # PERFORMed on top of it, so what sits under a frame is still keyed by the frame as
     # PERFORMed (`_call_sites`). A refined frame carries that along - ``(range, return
-    # point, what it sits on)`` - so two frames become one only when everything they can
-    # still do is the same: the same reachable range, the same return point, and the
-    # same frames, in the same order, to return under. Frames that differ there stay
-    # apart, and the view is the one the unrefined walk gives, byte for byte.
+    # point, what it sits on)`` - so two configs fall in one CLASS only when everything
+    # they can still do is the same: the same reachable range, the same return point,
+    # and the same frames, in the same order, to return under.
+    #
+    # The class is NOT the config the view is built from. Merging configs into their
+    # class changes the order the worklist meets them, and the order of the transitions
+    # list is that order: a frame reached a second way, while the first way's configs
+    # still wait on the worklist, has its own copies walked first. So the walk stays over
+    # frames as PERFORMed, and the class only answers one question (`_closed`): would
+    # walking this config change anything? A config whose class has been walked, and
+    # every class it can reach without leaving its frame too, would find no transition
+    # and push only more such configs - its walk, and the cascade under it, is the
+    # quadratic work, and it is skipped. Everything else is walked as before, in the same
+    # order, so the view is the one the unrefined walk gives, byte for byte.
 
     def _region_tables(self) -> None:
         """Fill ``_region`` (the states from which no PERFORM is reachable) and ``_lo``
@@ -480,7 +496,7 @@ class _BusinessView:
         while todo:
             c = todo.pop()
             order.append(c)
-            for _, (nxt, nstack) in self._step(c[0], (c[1],), False):
+            for _, (nxt, nstack) in self._step(c[0], (c[1],), False, fit=True):
                 if not nstack:
                     yes.append(c)
                     continue
@@ -504,20 +520,45 @@ class _BusinessView:
             self._returns[c] = c in true
         return self._returns[start]
 
-    def _lows(self, hidden) -> tuple:
-        """The frames a hidden bottom frame can sit on. ``hidden`` names the frame the
-        walk started under: ``("B", frame)``, a frame as PERFORMed, whose answer is
-        `_call_sites`'; ``("R", state, frame)``, a refined frame, which carries it."""
-        if hidden[0] == "B":
-            return tuple(self._below.get(hidden[1], ()))
-        return hidden[2][2]
+    def _class_of(self, cfg: tuple):
+        """The class of a business-walk config (see the notes above `_region_tables`):
+        its state and its stack with the top frame refined - or ``None`` when the state
+        can still reach a PERFORM, or nothing is on the stack, and the config is a class
+        of its own."""
+        state, stack = cfg
+        if not stack or state not in self._region:
+            return None
+        return (state, self._fit(state, stack))
 
-    def _start_tag(self, state: str, stack: tuple):
-        """The hidden tag a walk from config ``(state, stack)`` carries: it names that
-        config, so walks from two configs never merge while under their own frame."""
-        if state in self._region:
-            return ("R", state, stack[0])
-        return ("B", stack[0])
+    def _closed(self, cls) -> bool:
+        """Would walking a config of class ``cls`` now change anything?
+
+        No, when every class it can reach without leaving its frame (``_inside``, what
+        the first walk of each class found there) has been walked, and none of those
+        walks was cut short by a place another walk had already passed (``None``). A
+        config of a walked class is a copy of the walked one under another frame as
+        PERFORMed: its steps are the same, so are the transitions it finds, and every
+        place it can reach outside its frame has been passed already (the frames of a
+        class return to the same point, under the same frames). All its walk can do is
+        push copies of what the walked one found inside the frame, and for a closed
+        class those are configs of closed classes too. Once closed, always closed."""
+        if cls in self._closed_set:
+            return True
+        seen = {cls}
+        todo = [cls]
+        while todo:
+            c = todo.pop()
+            if c in self._closed_set:
+                continue
+            inside = self._inside.get(c)
+            if inside is None:              # not walked yet, or its walk was cut short
+                return False
+            for d in inside:
+                if d not in seen:
+                    seen.add(d)
+                    todo.append(d)
+        self._closed_set.update(seen)
+        return True
 
     def _call_sites(self):
         """What can sit under each PERFORM frame - or ``None`` when the per-stack walk
@@ -569,7 +610,7 @@ class _BusinessView:
                             reach(top[1], low)
                     continue
                 stack = () if top is None else (top,)
-                for _, (nxt, nstack) in self._step(state, stack, False, fit=False):
+                for _, (nxt, nstack) in self._step(state, stack, False):
                     if len(nstack) > len(stack):                  # a PERFORM
                         frame = nstack[-1]
                         lows = below.setdefault(frame, {})
@@ -668,10 +709,8 @@ class _BusinessView:
         under that frame until it returns out of it - and then it continues, in the same
         walk, at the frame's return point once for each frame that can sit there
         (``None``: nothing, the top level), each again standing for everything under it.
-        A config is ``(state, stack, hidden)``: ``hidden``, when set, says the bottom
-        frame of ``stack`` stands for an unknown rest, and names where to find what can
-        be under it (`_lows`) - the bottom frame itself may be a refined one (`_fit`)
-        standing for several. Re-running the walk one frame deeper for
+        A config is ``(state, stack, hidden)``: ``hidden`` says the bottom frame of
+        ``stack`` stands for an unknown rest. Re-running the walk one frame deeper for
         each possible caller, as this did, walked the part before the return again for
         every full stack - k^d of them for k callers per level, d levels deep. Without
         ``below`` the stack is the whole stack and nothing is hidden.
@@ -702,6 +741,11 @@ class _BusinessView:
         # breadth-first reaches the loop's exits immediately.
         heap: List[tuple] = []
         seq = 0
+        # Was the walk cut short inside its own frame, at a place an earlier walk had
+        # already passed (`_closed` then never takes this walk as a class's template)?
+        start = cfgs[0][1]
+        mine: set = set()
+        self._cut = False
 
         def push(lab, nxt, hidden, count, biz, guards, events, via):
             nonlocal seq
@@ -717,12 +761,9 @@ class _BusinessView:
             if hidden and not stack:
                 # Returned out of the frame standing for the unknown rest: carry on at
                 # its return point under each frame that can be there.
-                for low in self._lows(hidden):
-                    heapq.heappush(heap, (count, seq, (state,
-                                                       self._fit(state, (low,)) if low
-                                                       else (),
-                                                       ("B", low) if low is not None
-                                                       else False),
+                for low in below.get(cur_stack[0], ()):
+                    heapq.heappush(heap, (count, seq, (state, (low,) if low else (),
+                                                       low is not None),
                                           biz, guards, events, via))
                     seq += 1
             else:
@@ -733,9 +774,9 @@ class _BusinessView:
         for state, cur_stack in cfgs:
             if (state in self.finals) and not cur_stack:
                 continue
-            tag = self._start_tag(state, cur_stack) if callsite and cur_stack else False
             for lab, nxt in self._step(state, cur_stack, not callsite):
-                push(lab, nxt, tag, 0, frozenset(), None, (), None)
+                push(lab, nxt, callsite and bool(cur_stack), 0, frozenset(), None, (),
+                     None)
 
         while heap:
             self._steps += 1
@@ -748,8 +789,11 @@ class _BusinessView:
             state, stack, hidden = c
             key = (c, events, biz)
             if key in arrived:
+                if stack == start and key not in mine:
+                    self._cut = True
                 continue
             arrived.add(key)
+            mine.add(key)
             if ((state in self.finals) and not stack) or self._is_business(state):
                 results.append({"to": state,
                                 "to_config": (state, stack[-1:] if callsite else stack),
@@ -757,6 +801,7 @@ class _BusinessView:
                                 "events": list(events), "via": via})
                 continue
             via2 = (state, via)
+            cur_stack = stack
             for lab, nxt in self._step(state, stack, not callsite):
                 push(lab, nxt, hidden, count, biz, guards, events, via2)
         return results
@@ -804,7 +849,7 @@ class _BusinessView:
 
         self._region_tables()
         below = self._call_sites()
-        # From here a refined frame carries what it sits on (`_fit`).
+        # From here a refined frame carries what it sits on (`_fit`, `_class_of`).
         self._below = below
         self._refined.clear()
         worklist: List[tuple] = []
@@ -824,13 +869,24 @@ class _BusinessView:
             cfg = worklist.pop()
             if cfg in seen_cfg:
                 continue
+            cls = self._class_of(cfg)
+            if cls is not None and self._closed(cls):
+                # A copy of a walked config under another frame as PERFORMed, with
+                # nothing it could reach left unwalked: walking it would find no
+                # transition and push only more of the same (`_closed`).
+                continue
             seen_cfg.add(cfg)
             self._contexts = len(seen_cfg)
             state, stack = cfg
             if (state in self.finals) and not stack:
                 continue
             cfgs_of.setdefault(state, []).append(cfg)
-            for nb in self._walk([cfg], below, self._arrived.setdefault(state, set())):
+            found = self._walk([cfg], below, self._arrived.setdefault(state, set()))
+            if cls is not None and cls not in self._inside:
+                self._inside[cls] = None if self._cut else [
+                    self._class_of(nb["to_config"]) for nb in found
+                    if nb["to_config"][1] == stack]
+            for nb in found:
                 k = (state, nb["to"], nb["business"], tuple(nb["events"]))
                 if k not in tr_at:
                     tr_at[k] = {"from": state, "to": nb["to"], "via": nb["via"],
