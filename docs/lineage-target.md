@@ -245,8 +245,13 @@ A **flow-sensitive reaching-origins fixpoint** over the emitted state graph:
    - an assignment gives its target the **union** of its operands' origins;
    - `STRING`/`UNSTRING`/`INSPECT` propagate **dependencies** (see below);
    - a `CALL`'s by-reference arguments gain a **maybe** origin.
-3. **Join** at merge points (union), iterate to a fixpoint. The lattice is finite, so it
-   terminates.
+3. **Join** at merge points (union), iterate to a fixpoint. The lattice is finite and the
+   transfer monotone, so it terminates: there is no iteration limit. Each change of a
+   state's output adds at least one field or origin to it, which the run checks as it
+   goes; a run that breaks that (a transfer that stopped being monotone, a defect) is
+   refused with an error, never published cut short. An earlier limit, `max(50_000,
+   states x 500)` visits, stopped a loop needing ~500 loop-carried hops early and
+   published "internally set" for a field the input reached.
 4. **Emit** a row at every event, using the origins that actually reach it.
 
 PERFORM is followed as a real call and returned from, using the same target resolution as

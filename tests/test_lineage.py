@@ -1592,3 +1592,80 @@ def test_own_linkage_is_no_parameter_when_the_program_has_no_using():
     crossing = {f for e in iface["events"] if e["endpointType"] == "caller"
                 for f in e["fields"]}
     assert not crossing & {"LK-WORK", "LK-WORK-A", "LK-BUF"}
+
+
+# --------------------------------------------------------------------------- #
+# the origins fixpoint runs to the fixpoint, or refuses
+#
+# It used to stop after max(50_000, states x 500) visits - a guess that scaled with the
+# states, while the work scales with how many loop-carried hops an origin needs - and then
+# published what it had. Origins only grow, so a cut-off answer is a confident "no": the
+# program below lost its DISPLAY row's origin and said "internally set" behind one
+# generic flag. Now there is no limit; termination rests on the transfer being monotone,
+# which is checked as the run goes, and a run that breaks it is refused, never published.
+# --------------------------------------------------------------------------- #
+
+def _shift_loop(fields: int, fillers: int) -> str:
+    """A loop that ACCEPTs F1 and shifts a `fields`-long history one field per
+    iteration (the MOVEs run backwards, so the value advances one field per pass), with
+    `fillers` IF statements adding states to the loop. DISPLAY F<fields> sees the ACCEPT
+    only after `fields` passes round the loop."""
+    lines = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. SHIFT.", "DATA DIVISION.",
+             "WORKING-STORAGE SECTION.", "01 WS-EOF PIC X VALUE 'N'.",
+             "01 WS-ON PIC 9 VALUE 1."]
+    lines += [f"01 F{i} PIC X(10)." for i in range(1, fields + 1)]
+    lines += ["PROCEDURE DIVISION.", "0000-MAIN.", "    PERFORM UNTIL WS-EOF = 'Y'",
+              "        ACCEPT F1"]
+    lines += [f"        MOVE F{i} TO F{i + 1}" for i in range(fields - 1, 0, -1)]
+    lines += ["        IF WS-ON = 1 CONTINUE ELSE CONTINUE END-IF"] * fillers
+    lines += [f"        DISPLAY F{fields}", "        ACCEPT WS-EOF", "    END-PERFORM.",
+              "    STOP RUN."]
+    return "\n".join("       " + s for s in lines) + "\n"
+
+
+def test_a_long_loop_carried_chain_is_solved_to_its_fixpoint(monkeypatch):
+    """112 states, 56,115 visits: the old limit (56,000 here) cut this run off and the
+    DISPLAY row read "internally set". The convergence check is reached (the shifting
+    state's output changes ~500 times) and holds, so it is not a blind guard."""
+    import cobol_xstate.lineage as lineage_mod
+    checked = []
+    real = lineage_mod._Lineage._check_height
+
+    def spy(self, state, n, out, steps):
+        checked.append(n)
+        return real(self, state, n, out, steps)
+
+    monkeypatch.setattr(lineage_mod._Lineage, "_check_height", spy)
+    d = _lin_src(_shift_loop(502, 36))
+    r = _row(d, "F502")
+    assert _origins(r) == {"GET.CONSOLE.SYSIN"}
+    assert "note" not in r
+    assert not [f for f in d["flags"] if "bound" in f or "converg" in f]
+    assert max(checked) >= 256
+
+
+def test_a_fixpoint_that_does_not_converge_is_refused_not_cut_off(monkeypatch):
+    """A transfer that is not monotone may never settle. Simulated by one that flips a
+    field's origins on every visit: the solve raises instead of looping or publishing.
+    `analyze` raises with it - the artifact manifest is annotated from the dynamic-calls
+    report, which reads this same fixpoint - so nothing is written on top of an
+    unsettled answer."""
+    import cobol_xstate.lineage as lineage_mod
+    from cobol_xstate.api import analyze
+    real = lineage_mod._Lineage._apply
+    flips = {}
+
+    def flipping(self, name, st, cur, rows):
+        cur = real(self, name, st, cur, rows)
+        if rows is None:
+            n = flips[name] = flips.get(name, 0) + 1
+            cur["WS-ON"] = (frozenset({("GET.FLIP.FLIP", False, None)}) if n % 2
+                            else frozenset())
+        return cur
+
+    monkeypatch.setattr(lineage_mod._Lineage, "_apply", flipping)
+    src = _shift_loop(3, 1)
+    with pytest.raises(RuntimeError, match="not converging"):
+        _lin_src(src)
+    with pytest.raises(RuntimeError, match="not converging"):
+        analyze(src, source_name="shift.cbl", retrieve=False)

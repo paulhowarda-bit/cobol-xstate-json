@@ -222,6 +222,11 @@ _HOPS = 8           # a full snapshot at least every this many nodes down a chai
 _WALK = 32          # how far up `_since_common` looks for a shared ancestor
 _LOAD = 4           # ...or once the changes above a snapshot exceed 1/_LOAD of the map
 _NO_ORIGINS: OriginSet = frozenset()
+# The change count at which a state's convergence is first checked (`_check_height`),
+# then at every doubling. Any value is sound - the inequality checked holds at every
+# count - so this only decides the cost: real programs change a state's output a few
+# times, and never pay for a check.
+_CHECK_FROM = 16
 
 
 # -- origin maps as change chains (see `_Node`) ------------------------------------
@@ -1800,6 +1805,25 @@ class _Lineage:
                 delta[k] = u
         return delta
 
+    def _check_height(self, state: str, n: int, out: _Node, steps: int) -> None:
+        """Raise unless OUT[``state``], changed ``n`` times, has room for that many
+        changes: ``n <= 1 + height``, where the height counts each key once and each
+        origin under it once - what a monotone transfer must have added, one at least
+        per change after the first. Failing means the fixpoint is not converging the way
+        its termination rests on, so the run is refused: an unsettled origins map would
+        publish "no external origin reaches this field" as a finding."""
+        height = 0
+        for v in _whole(out).values():
+            height += 1 + len(v)
+        if n > 1 + height:
+            raise RuntimeError(
+                f"lineage fixpoint is not converging: the origins leaving state {state} "
+                f"changed {n} times but hold only {height} keys and origins, so the "
+                f"transfer is not monotone and the iteration need not end ({steps:,} "
+                f"visits so far). No lineage view is produced - a cut-off one would "
+                f"report fields as internally set without proof. This is a defect in "
+                f"the analysis; please report this program")
+
     def run(self, timer=None) -> dict:
         # Solved once per instance. The dynamic-call view wants the primitive facts this
         # pass records (`fills`/`flow`/`dynamic_sites`) and the lineage table wants the
@@ -1882,15 +1906,31 @@ class _Lineage:
         dirty_n: Dict[str, int] = {}         # ...in how many updates
         rebuild: Set[str] = set()            # states to re-join whole
         wrote: Dict[str, Dict[str, OriginSet]] = {}   # where OUT[s] differs from IN[s]
-        # The lattice is finite (origins over fields), so this terminates; the bound is
-        # a backstop against a graph shape we did not anticipate, never normal control.
-        limit = max(50_000, len(self.states) * 500)
+        # NO iteration limit: the loop runs until nothing is queued, which is exactly
+        # when every state's IN is the join of its predecessors' OUTs and its OUT is its
+        # transfer of that IN - the fixpoint. It used to stop after `max(50_000, states x
+        # 500)` pops, a guess that scaled with the states only, while the work scales
+        # with how many loop-carried hops an origin needs: a loop shifting a 502-field
+        # history one field per iteration ran out of steps, and its DISPLAY row said
+        # "internally set" about a field the ACCEPT reaches. Stopping early never
+        # over-reports - origins only grow - so a cut-off answer is a confident "no".
+        #
+        # Termination is a proof, not a budget. Every map starts unset and the join is
+        # union; the transfer is monotone (more origins in, more origins out), so each
+        # OUT[s] only grows, and a state is queued only when a predecessor's OUT changed.
+        # Each change of OUT[s] after its first adds at least one key or one origin to
+        # it, so by the time OUT[s] has changed n times, n <= 1 + its height (the keys
+        # it holds plus the origins under them), which the finite fields x origins bound
+        # from above. That inequality is checked as the run goes (`_check_height`, at
+        # doubling counts from `_CHECK_FROM`, so real programs never pay for it); it can
+        # fail only if the transfer stops being monotone, and then the loop might never
+        # end, so the solve RAISES rather than cut off and publish as if settled. Every
+        # view that reads this solve (lineage, dynamic calls, the manifest annotated
+        # from them) fails with it.
+        changes: Dict[str, int] = {}         # how many times OUT[s] has changed
+        check_at: Dict[str, int] = {}        # ...and the count to next check it at
         while work or later:
             steps += 1
-            if steps > limit:
-                self._flag("lineage fixpoint hit its iteration bound; the result may be "
-                           "incomplete - please report this program")
-                break
             if not work:
                 work, later = later, []
                 heapq.heapify(work)
@@ -1972,6 +2012,10 @@ class _Lineage:
             if out_changed is not None and not out_changed:
                 continue
             OUT[s] = new_out
+            n = changes[s] = changes.get(s, 0) + 1
+            if n >= check_at.get(s, _CHECK_FROM):
+                self._check_height(s, n, new_out, steps)
+                check_at[s] = 2 * n
             for t in self.succs.get(s, []):
                 if t not in self.states:
                     continue
