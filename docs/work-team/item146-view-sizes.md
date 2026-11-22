@@ -2,7 +2,7 @@
 
 Item 146 is fixed at its cause. F100WB01's business view was 926 MB because it wrote every route twice and copied every guard's condition tree at every use. It now writes each guard and each route once, and on our 1,000-report reproduction the view went from 782 MB to 18.7 MB. We then looked for the same mistake in our other views and found three more that repeated something once per use: overlapping `PERFORM ... THRU` ranges in the bundle and the reactive view, READ field lists, and record layouts in the dynamic-calls view. Each now writes it once. No content is lost: every change comes with a function that rebuilds the previous form, and we checked those functions against every golden we keep.
 
-**These are format changes, and the tracer has to change for each.** `formatVersion` goes from 4 to 5 (pushed), then to 6 (committed, not pushed), then to 7 (on branches, not merged). The steps are in the first section.
+**These are format changes, and the tracer has to change for each.** `formatVersion` goes from 4 to 5 (pushed), then to 6, then to 7 (both committed on our master, not pushed). The steps are in the first section.
 
 | repo | commits | status | what |
 |---|---|---|---|
@@ -12,17 +12,18 @@ Item 146 is fixed at its cause. F100WB01's business view was 926 MB because it w
 | jcl-dependencies | `0beea19` | pushed | its copy of the COBOL artifact manifest, at version 5 |
 | cobol-xstate-json | `452b491` | committed, not pushed | overlapping `THRU` ranges: each paragraph written once (`formatVersion` 6) |
 | jcl-dependencies | `393209f` | committed, not pushed | its copy of the COBOL artifact manifest, at version 6 |
-| cobol-xstate-json | branches `claude/business-thru`, `claude/read-lists`, `claude/dyncalls-layout`, `claude/lineage-cap` | not merged | four follow-ups, planned to ship together as `formatVersion` 7 |
+| cobol-xstate-json | `bbae650`, `f9d98b9`, `ee35418`, `36d8628`, `28e99a1`, `ff7af62`, `8331919`, `925cfa4` and the version-7 commit | committed, not pushed | four follow-ups, shipped together as `formatVersion` 7 |
+| jcl-dependencies | the version-7 fixture commit | committed, not pushed | its copy of the COBOL artifact manifest, at version 7 |
 
 Take the two repos together. Only jcl-dependencies' test fixture carries our version number. jcl-dependencies itself never reads it, so `--bind-jcl` binds exactly as before.
 
-**Version 7 has not happened yet.** The four branches have been reviewed, and fixed where the review found problems, but they are not merged. The integrator will merge them, bump `formatVersion` to 7 once for all of them, and re-record our goldens at that point. Until then, the version-7 shapes described below may still move.
+**Version 7 is integrated.** The four follow-ups were merged onto our master together and `formatVersion` was bumped to 7 once for all of them. Together they pass our gate 6/6 and our full suite (1,117 tests, the one skip needing mfdep). All 612 of our version-6 goldens reproduce byte for byte from version-7 output, directly and through the parse bundle, once the version line is set back and the expand functions below are applied. 405 digests moved: the bundle, business, dynamic-calls, lineage and artifacts views of all 68 examples, and the 65 reactive views that are not refusals. Lineage and artifacts moved only on the version line.
 
 ---
 
 ## What the tracer has to change
 
-**1. Accept each new `formatVersion` for every cobol-xstate view.** All of our views share the number: the bundle, `business`, `reactive`, `lineage`, `artifacts`, `dynamic-calls` and `dependents`. Each bump moves all of them, including views whose shape did not change. Move your pin to 5 now, to 6 when `452b491` is pushed, and to 7 when the integration lands. Until you do, your check will treat every cobol-xstate view as unknown.
+**1. Accept each new `formatVersion` for every cobol-xstate view.** All of our views share the number: the bundle, `business`, `reactive`, `lineage`, `artifacts`, `dynamic-calls` and `dependents`. Each bump moves all of them, including views whose shape did not change. Move your pin to 5 now, to 6 when `452b491` is pushed, and to 7 when we push it. Until you do, your check will treat every cobol-xstate view as unknown.
 
 **2. Read the business view's routes through its tables (version 5).** A route in `entry` or `transitions` now holds ids:
 
@@ -37,7 +38,7 @@ Take the two repos together. Only jcl-dependencies' test fixture carries our ver
 
 **4. In the reactive view, follow `sharedParagraphs` (version 6).** Overlapping ranges that never call one another now share their states and one return. For such a range, the `inline` entry has `return` and `retField` shared with the other ranges, and its `states` lists only what sits under its own prefix. A new `sharedParagraphs` maps each paragraph the range runs from elsewhere to the range whose `states` holds it. There is no expand function for this one, because the machine is genuinely different: fewer states, the same behaviour. We proved the behaviour under real XState on `examples/restart.cbl`, restarted at each step. A program with no overlapping ranges gets a reactive view identical to version 5's apart from the version line.
 
-**5. Resolve field lists through `fieldSets` (planned for version 7).** A READ with no INTO used to write every field of every record in its FD at every READ site. Now each distinct field list is written once:
+**5. Resolve field lists through `fieldSets` (version 7).** A READ with no INTO used to write every field of every record in its FD at every READ site. Now each distinct field list is written once:
 
 * **The bundle and the reactive view** have a top-level `fieldSets` right after `interface`. Each `interface.events[i].fields` is an index into it, an empty list included. `cobol_xstate.interface.expand_fields(doc)` restores the lists.
 * **The business view** has one top-level `fieldSets`. Interface events' `fields`, boundary actions' `fields` (in `machine` meta and in `businessStates`), and meta `inputFields` / `outputFields` all index it. The view also has a top-level `pics` map from field name to picture, written once, sorted by name, and `null` where none is declared. A boundary action's old `{name, pic}` list is `fieldSets[i]` typed through `pics`. `cobol_xstate.business.expand_business_fields(view)` gives the version-6 business view. `expand_business_view` now resolves the field lists too, so it still returns the full version-4 form.
@@ -45,11 +46,11 @@ Take the two repos together. Only jcl-dependencies' test fixture carries our ver
 * Only `fields` is interned. `params` lists (SQL WHERE, RIDFLD, RETURNING) stay inline.
 * This applies in memory as well as on disk. `analysis.machine.bundle()`, `Analysis.machine_json()`, `Analysis.business()` and `Analysis.reactive()` all return ids. Only the internal overlay, `Machine.interface()`, keeps its lists.
 
-**6. Resolve record layouts in the dynamic-calls view (planned for version 7).** The view has a new top-level `layouts` list between `dynamicCalls` and `flags`. It is always present, and is `[]` when no source reads a file. A source's `extract.layout` is now an index into it, or `null` as before when the field is not a declared item. Layouts are interned by content, not by record name, so two contained programs with a same-named record laid out differently get two entries. `cobol_xstate.dynamic_calls.expand_dynamic_calls(view)` puts a copy of each layout back into its source and drops the table.
+**6. Resolve record layouts in the dynamic-calls view (version 7).** The view has a new top-level `layouts` list between `dynamicCalls` and `flags`. It is always present, and is `[]` when no source reads a file. A source's `extract.layout` is now an index into it, or `null` as before when the field is not a declared item. Layouts are interned by content, not by record name, so two contained programs with a same-named record laid out differently get two entries. `cobol_xstate.dynamic_calls.expand_dynamic_calls(view)` puts a copy of each layout back into its source and drops the table.
 
 **Summary: what to call to get the previous form.** None of these functions rewrites `formatVersion`; set it yourself if you compare against old goldens.
 
-| view | version 5 | version 6 | version 7 (planned) |
+| view | version 5 | version 6 | version 7 |
 |---|---|---|---|
 | bundle | unchanged | `harel.expand_charts` gives v5 | `interface.expand_fields` gives v6 |
 | business | `business.expand_business_view` gives v4 | unchanged | `business.expand_business_fields` gives v6; `expand_business_view` gives v4 |
@@ -63,7 +64,7 @@ To turn a version-7 bundle into version 5's form, call `expand_fields` and then 
 
 * `86b7e6b`: a business transition's `guards` and `via` are now its shortest route from any call context. Which transitions there are did not change.
 * `7c4a148`: a run of three or more ORs, or of ANDs, in one condition is now one `{"op": "or"}` (or `"and"`) node whose `args` hold every term. It used to be two-term nodes nested one inside the next. A parenthesized group stays its own node. If you walk condition trees assuming `args` has exactly two entries, allow any number. No golden of ours moved, because no example joined three terms with one operator before this commit. The same commit leaves an arithmetic expression `notModeled`, with the reason stated, when it nests more than 500 operations or 100 parentheses. These shapes come from generated COBOL; they used to crash the run.
-* Lineage (planned for version 7): the origins fixpoint now always runs to the end. The flag `lineage fixpoint hit its iteration bound` no longer appears, and the rows it marked now carry their real origin. A group containing FILLER that is filled by input and later cleared now reads as its input instead of as "internally set". Both are described under `claude/lineage-cap` below.
+* Lineage (version 7): the origins fixpoint now always runs to the end. The flag `lineage fixpoint hit its iteration bound` no longer appears, and the rows it marked now carry their real origin. A group containing FILLER that is filled by input and later cleared now reads as its input instead of as "internally set". Both are described under the lineage section below.
 
 **8. Re-record any goldens you keep over our output** at each version. Every view's golden moves on the `formatVersion` line, and the views named above also move in shape. Our own goldens reproduce byte for byte through the expand functions at each step; the counts are in each section below.
 
@@ -102,11 +103,11 @@ The renderer also has no code for version 5's route tables or version 6's `{"ref
 
 ---
 
-## Planned for `formatVersion` 7: four follow-ups
+## `formatVersion` 7: four follow-ups
 
-Each follow-up was implemented on its own branch, then reviewed by a second agent who tried to break it, then fixed where the review found problems. Three reviews found problems and one found none. The fixes have not been reviewed a second time. Each branch passed our full suite on its own, 1,093 to 1,102 tests, with the Node-backed XState tests running; the one skip is a conventions test that needs mfdep. `claude/read-lists` is built on top of `claude/business-thru`; the other two branch from master. The four have not been run together yet. The integrator does that when merging.
+Each follow-up was implemented on its own branch, then reviewed by a second agent who tried to break it, then fixed where the review found problems. Three reviews found problems and one found none. The fixes have not been reviewed a second time. Each passed our full suite on its own, and all four together pass it too (1,117 tests, with the Node-backed XState tests running; the one skip is a conventions test that needs mfdep).
 
-### `claude/business-thru`: the business walk on overlapping `THRU` ranges (`bbae650`, `f9d98b9`)
+### The business walk on overlapping `THRU` ranges (`bbae650`, `f9d98b9`)
 
 **What it fixes.** On restart programs the business view's *size* was already linear, but the *work* to build it was quadratic. Each `PERFORM STEP-k THRU STEP-LAST-EXIT` frame was a separate call context at every step it holds, so every step was walked once per range holding it. At 400 steps the view needed 643,997 walk steps and 18 s, and was refused at the default budget of 250,000.
 
@@ -138,7 +139,7 @@ Walk steps are now exactly 6N+3. The output is unchanged. At 400 steps it is the
 
 No output shape changes, so this one needs nothing from you.
 
-### `claude/read-lists`: each field list written once (`ee35418`, `36d8628`, `28e99a1`)
+### Each field list written once (`ee35418`, `36d8628`, `28e99a1`)
 
 **What it fixes.** A READ with no INTO carries every field of every record its FD declares, and that list was written in full at every READ site. In the bundle and the reactive view it was on the interface event. In the business view it appeared up to three more times per site. Size grew with READ sites times record width. The new shape is step 5 above.
 
@@ -165,9 +166,9 @@ No output shape changes, so this one needs nothing from you.
 * We have not run F100WB01, so whether READ field lists are what made its `interface` 16.5 MB is still our guess.
 * The renderer patch has not landed.
 * We did not check mainframe-tracer's reads of `interface.events[i].fields`; they will get an int.
-* The lineage view still repeats the READ field list at every site. On the reviewer's stress program, one field name appears 320 times in a 77 MB lineage file. Fixing that is a separate shape change and is not in this branch.
+* The lineage view still repeats the READ field list at every site. On the reviewer's stress program, one field name appears 320 times in a 77 MB lineage file. Fixing that is a separate shape change and is not in version 7.
 
-### `claude/dyncalls-layout`: each record layout written once (`3f78e91`)
+### Each record layout written once (`ff7af62`)
 
 **What it fixes.** In the dynamic-calls view, every source fed from a file field copied that record's whole layout into `extract.layout`, so the view grew with sources times record width. The new shape is step 6 above. Each program's record is now also laid out once, instead of once per source; that changes no output.
 
@@ -185,7 +186,7 @@ No output shape changes, so this one needs nothing from you.
 * Only one of our examples, `sqlcallvar.cbl`, has a non-empty `layouts` table, so the goldens cover the substitution thinly. The new tests and the stress programs cover it further.
 * We did not check mainframe-tracer's reads of `extract.layout`.
 
-### `claude/lineage-cap`: lineage runs to its fixpoint (`7cc378f`, `1349c26`)
+### Lineage runs to its fixpoint (`8331919`, `925cfa4`)
 
 **What it fixes.** The lineage origins fixpoint stopped after `max(50,000, states × 500)` iterations, a limit that was a guess. A long loop-carried chain of MOVEs could reach it. The row then said the field had no external origin ("internally set") and carried the flag `lineage fixpoint hit its iteration bound`. On a 502-field shift loop, `DISPLAY F502` lost its real origin, `GET.CONSOLE.SYSIN`. The limit is gone: the loop runs until nothing changes, which is the fixpoint.
 
@@ -204,7 +205,7 @@ This was an older bug, present on master too: `MOVE G TO T` after `ACCEPT G` pub
 **What changes for you.**
 
 * A row that used to carry the iteration-bound flag now carries its real origin.
-* Lineage can take longer on such programs, since it no longer stops early. The reviewer measured about 20 s for a 600-field chain on the first version of this branch; we have not re-timed it on the fixed version.
+* Lineage can take longer on such programs, since it no longer stops early. The reviewer measured about 20 s for a 600-field chain on the first version of this branch; we have not re-timed it on the final version.
 * If the fixpoint ever failed to settle, which would be a bug on our side, the whole run fails with a `RuntimeError` and writes nothing. The failure is not limited to the lineage view, because the artifact manifest is built from the same fixpoint.
 
 **Open.** That the maps only grow is argued for each write site and checked on 989 programs, but it is not enforced mechanically. A future write that set a group without its leaf keys would make that group read as empty, and no test guards every write site generically.

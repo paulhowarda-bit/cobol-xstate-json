@@ -1195,7 +1195,7 @@ so a corpus joined on it can assert that two programs share state when they do n
 ```jsonc
 {
   "format":     "xstate-v5-config",
-  "formatVersion": 6,   // per-distribution; `--target business` and `reactive` carry
+  "formatVersion": 7,   // per-distribution; `--target business` and `reactive` carry
                         // their OWN format names, cobol-xstate-business / -reactive
   "metadata":   { "program": "...", "source": "...", "generator": "...", "disclaimer": "..." },
   "machine":    { "id", "context", "states", "initial" },

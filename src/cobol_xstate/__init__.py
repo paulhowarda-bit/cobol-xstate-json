@@ -62,7 +62,16 @@ PRODUCER = "cobol-xstate"
 #: their ``inline`` entries share ``return`` and ``retField``, ``states`` lists only what
 #: sits under the range's own prefix, and ``sharedParagraphs`` names the range whose
 #: prefix holds the rest.
-VIEW_SCHEMA_VERSION = 6
+#:
+#: 7: each distinct field list and record layout is written once. The bundle, the reactive
+#: view and the business view gain ``fieldSets`` (id 0 is always the empty list) and an
+#: interface event's ``fields`` - and in the business view a boundary action's ``fields``
+#: and a node's ``meta.inputFields`` / ``outputFields`` - is an id into it; the business
+#: view's ``pics`` gives each field's PICTURE. The dynamic-calls view gains ``layouts`` and
+#: a source's ``extract.layout`` is an id into it. `interface.expand_fields`,
+#: `business.expand_business_fields` and `dynamic_calls.expand_dynamic_calls` rebuild the
+#: version-6 forms.
+VIEW_SCHEMA_VERSION = 7
 
 from .errors import (
     CobolXstateError,
