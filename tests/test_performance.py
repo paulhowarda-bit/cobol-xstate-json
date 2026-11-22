@@ -10,7 +10,7 @@ import cobol_xstate.interface as iface_mod
 import cobol_xstate.lineage as lineage_mod
 import cobol_xstate.statechart as statechart_mod
 from cobol_xstate.artifacts import build_artifacts
-from cobol_xstate.business import build_business_view
+from cobol_xstate.business import build_business_view, expand_business_view
 from cobol_xstate.interface import _DataView, _state_index
 from cobol_xstate.lexer import Token, tokenize
 from cobol_xstate.lineage import _Lineage, build_lineage
@@ -651,7 +651,8 @@ def test_reconverging_diamonds_grow_linearly_not_exponentially():
 def _view_of(name: str):
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "examples" / name).read_text()
-    return build_business_view(build_machine(parse_program(src), source_name=name))
+    return expand_business_view(
+        build_business_view(build_machine(parse_program(src), source_name=name)))
 
 
 def test_alternative_routes_are_still_reported_separately():
@@ -673,7 +674,7 @@ def test_the_collapsed_path_survives_being_carried_as_a_cons_chain():
     walk's own depth. The risk that buys is the flattening: `via` must still come out
     complete and in the order control took, not reversed or truncated."""
     n = 300
-    view = build_business_view(_goto_chain(n))
+    view = expand_business_view(build_business_view(_goto_chain(n)))
     via = view["entry"][0]["via"]
     steps = [s for s in via if s.endswith("-STEP")]
     assert steps == sorted(steps), "the collapsed path must read in execution order"

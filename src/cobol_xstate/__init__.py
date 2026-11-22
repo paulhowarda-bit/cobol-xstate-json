@@ -46,7 +46,14 @@ PRODUCER = "cobol-xstate"
 #:
 #: 4: a lineage row no longer carries ``changedBy``; the write sites are stated once per
 #: field in the document's ``changedBy`` table (``doc["changedBy"][row["field"]]``).
-VIEW_SCHEMA_VERSION = 4
+#:
+#: 5: the business view writes each guard and collapsed state once. A route's ``guards``
+#: and ``via`` (in ``entry`` and ``transitions``) are ids into the document's ``guards``
+#: and ``stateNames``; a chart edge's ``meta`` is ``{"transition": i}`` (or
+#: ``{"entry": i}``) instead of a copy of that route; an edge with more than one guard is
+#: labelled ``guards#i``, naming that same route rather than listing its guards.
+#: `business.expand_business_view` rebuilds the version-4 form.
+VIEW_SCHEMA_VERSION = 5
 
 from .errors import (
     CobolXstateError,

@@ -10,7 +10,8 @@ import json
 
 import pytest
 
-from cobol_xstate.business import build_business_view, _is_control_guard
+from cobol_xstate.business import (_is_control_guard, build_business_view,
+                                   expand_business_view)
 from cobol_xstate.parser import parse_program
 from cobol_xstate.statechart import build_machine
 from pathlib import Path
@@ -19,6 +20,15 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 
 def _view(name):
+    """The view with every index resolved (`expand_business_view`), which is the form
+    these tests read: guard objects and state names rather than ids into the tables."""
+    src = (EXAMPLES / name).read_text()
+    return expand_business_view(
+        build_business_view(build_machine(parse_program(src), source_name=name)))
+
+
+def _raw_view(name):
+    """The view exactly as written: routes as ids into `guards` / `stateNames`."""
     src = (EXAMPLES / name).read_text()
     return build_business_view(build_machine(parse_program(src), source_name=name))
 
@@ -207,13 +217,18 @@ def test_business_machine_carries_the_view_in_meta():
 
 
 def test_business_edges_keep_the_collapsed_path_and_guards():
-    m = _view("banktran.cbl")["machine"]
-    edges = m["states"]["2000-DISPATCH"]["always"]
+    raw = _raw_view("banktran.cbl")
+    edges = raw["machine"]["states"]["2000-DISPATCH"]["always"]
     guarded = [e for e in edges if e.get("guard")]
     assert guarded, "the dispatch fan-out must carry its guards as edge labels"
     for e in edges:
-        assert "via" in e["meta"]        # what this edge collapsed, for a hover
-        assert "guards" in e["meta"]     # the full list (XState allows only one guard)
+        # The edge names its transition, which holds what it collapsed (`via`, for a
+        # hover) and the full guard list (XState allows only one guard) - once.
+        t = raw["transitions"][e["meta"]["transition"]]
+        assert (t["from"], t["to"]) == ("2000-DISPATCH", e["target"])
+    full = expand_business_view(raw)["machine"]["states"]["2000-DISPATCH"]["always"]
+    for e in full:
+        assert "via" in e["meta"] and "guards" in e["meta"]
 
 
 def test_business_terminal_states_are_final():
@@ -370,7 +385,8 @@ def _guardp_view():
         "           END-IF\n"
         "           STOP RUN.\n"
     )
-    return build_business_view(build_machine(parse_program(src), source_name="guardp.cbl"))
+    return expand_business_view(
+        build_business_view(build_machine(parse_program(src), source_name="guardp.cbl")))
 
 
 def test_the_compiler_tags_mechanical_guards_as_control():
@@ -506,6 +522,7 @@ def test_a_view_over_its_budget_is_refused_not_cut_short():
 
 
 def _edges(view):
+    view = expand_business_view(view)
     return sorted((t["from"], t["to"], json.dumps(t["guards"]), tuple(t["events"]))
                   for t in view["transitions"])
 
@@ -592,9 +609,11 @@ def _loop_nest(depth, k=3):
     return "\n".join(a(s) for s in out) + "\n"
 
 
-def _splitter(reports):
+def _splitter(reports, prime=True):
     """A report splitter: the main paragraph runs one loop per report, and every report
-    paragraph writes its record and PERFORMs the one shared read paragraph."""
+    paragraph writes its record and PERFORMs the one shared read paragraph. Without the
+    priming read (``prime=False``) the main paragraph's OPEN reaches every report
+    directly, report k through k-1 loop exits - routes that are long and genuine."""
     a = lambda s: "       " + s
     out = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. SPLITTER.", "ENVIRONMENT DIVISION.",
            "INPUT-OUTPUT SECTION.", "FILE-CONTROL.", "    SELECT IN-FILE ASSIGN TO INDD.",
@@ -602,8 +621,9 @@ def _splitter(reports):
            "FD IN-FILE.", "01 IN-REC.", "   05 IN-RPT PIC 9(4).", "   05 IN-DATA PIC X(76).",
            "FD OUT-FILE.", "01 OUT-REC PIC X(80).", "WORKING-STORAGE SECTION.",
            "01 WS-EOF PIC X VALUE 'N'.", "01 WS-F PIC 9(4) VALUE 0.",
-           "PROCEDURE DIVISION.", "0000-MAIN.", "    OPEN INPUT IN-FILE OUTPUT OUT-FILE",
-           "    PERFORM X-100-READ"]
+           "PROCEDURE DIVISION.", "0000-MAIN.", "    OPEN INPUT IN-FILE OUTPUT OUT-FILE"]
+    if prime:
+        out.append("    PERFORM X-100-READ")
     for r in range(1, reports + 1):
         out += [f"    PERFORM A-{r}-RPT THRU A-{r}-EXIT",
                 f"        UNTIL IN-RPT NOT = {r} OR WS-EOF = 'Y'"]
@@ -619,6 +639,7 @@ def _splitter(reports):
 
 
 def _business_steps(view):
+    view = expand_business_view(view)
     return [(t["from"], t["to"],
              frozenset(g["name"] for g in t["guards"] if g["kind"] == "business"),
              tuple(t["events"])) for t in view["transitions"]]
@@ -670,3 +691,49 @@ def test_an_if_branch_keeps_its_arrow_when_the_else_reaches_the_same_state():
     guards = sorted(tuple(g["name"] for g in t["guards"] if g["kind"] == "business")
                     for t in _tx(view, "0000-MAIN__if2", "0000-MAIN__end1"))
     assert guards == [(), ("SQLCODE_eq_0",)]
+
+
+def test_each_guard_and_route_is_written_once():
+    """F100WB01's routes are genuine: OPEN reaches report k through k-1 loop exits. Its
+    view wrote every route twice, with each guard's whole condition tree at every use -
+    half a million guard objects for 33 distinct guards, 926 MB. Each guard object is
+    now written once, routes are ids into the tables, and an edge names its transition."""
+    raw = build_business_view(build_machine(parse_program(_splitter(60, prime=False)),
+                                            source_name="splitter.cbl"))
+    names = [g["name"] for g in raw["guards"]]
+    assert len(names) == len(set(names))                  # each guard object once
+    used = {i for t in raw["entry"] + raw["transitions"] for i in t["guards"]}
+    assert used == set(range(len(names)))                 # ...and every one is used
+    longest = max(raw["transitions"], key=lambda t: len(t["guards"]))
+    assert len(longest["guards"]) >= 59                   # the long route is all there
+    assert all(isinstance(i, int) for i in longest["guards"] + longest["via"])
+    for name, st in raw["machine"]["states"].items():
+        for edge in st.get("always", []):
+            ref = edge["meta"]
+            assert set(ref) <= {"transition", "entry"} and len(ref) == 1
+            route = (raw["transitions"][ref["transition"]] if "transition" in ref
+                     else raw["entry"][ref["entry"]])
+            assert route["to"] == edge["target"]
+            if "transition" in ref:
+                assert route["from"] == name
+            label = edge.get("guard")
+            if label and label.startswith("guards#"):
+                assert label == f"guards#{ref.get('transition', ref.get('entry'))}"
+                assert len(route["guards"]) > 1
+
+
+def test_the_expanded_view_is_the_full_form():
+    """`expand_business_view` gives every route its guard objects and state names back,
+    and each edge its route and an AND-joined label - what formatVersion 4 wrote."""
+    raw = _raw_view("banktran.cbl")
+    full = expand_business_view(raw)
+    assert "guards" not in full and "stateNames" not in full
+    for t, r in zip(full["transitions"], raw["transitions"]):
+        assert [g["name"] for g in t["guards"]] == [raw["guards"][i]["name"]
+                                                     for i in r["guards"]]
+        assert t["via"] == [raw["stateNames"][i] for i in r["via"]]
+    for st in full["machine"]["states"].values():
+        for edge in st.get("always", []):
+            assert {"via", "guards", "events"} <= set(edge["meta"])
+            assert not (edge.get("guard") or "").startswith("guards#")
+    assert raw["formatVersion"] == 5

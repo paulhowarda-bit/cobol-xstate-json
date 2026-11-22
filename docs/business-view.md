@@ -61,10 +61,11 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
 - **`machine`** — `{id: "<PROG>__business", initial, states}`. Each state carries its
   distillation in **`meta`**: `role`, `boundaryActions`, `decisions`, `internalSteps` (the
   stripped-out MOVE/COMPUTE detail), `cobol` provenance, `perimeter`, and
-  `suggestedName: null`. Each edge carries `meta.via` (the technical states it collapsed),
-  the full `meta.guards` list (XState allows only one `guard` per transition, so the
-  readable label rides on `guard` and the detail stays in meta), and `meta.label: null`.
-  Terminals are `type: "final"`. A synthetic **`__ENTRY__`** state fans out to the first
+  `suggestedName: null`. Each edge's `meta` names its transition — `{"transition": i}`,
+  an index into `transitions` (`{"entry": i}` into `entry` on the `__ENTRY__` edges) —
+  where its route is kept once. XState allows only one `guard` per transition: an edge
+  with one guard is labelled with that guard's name, and one with more by
+  `guards#k`, `k` being the route its `meta` names. Terminals are `type: "final"`. A synthetic **`__ENTRY__`** state fans out to the first
   business state(s) — the collapse can reach several under different guards, which a
   single XState `initial` cannot express.
 - **`interface`** — the external perimeter, in the same shape as the faithful bundle's:
@@ -78,6 +79,22 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
 - **The report keys remain** for querying rather than drawing: `businessStates` (each
   boundary action carrying its typed `fields`), `entry`, `transitions`, `collapsed`
   (every removed state, with its reason), `counts`, `nameFillIn`, `flags`.
+- **Routes are ids into tables, each thing written once** (`formatVersion` 5). Each
+  `entry` and `transitions` item has `via` (the technical states it collapsed, in order)
+  and `guards` (every guard on the route, in order) as ids: `via` indexes `stateNames`,
+  `guards` indexes `guards`, whose entries are the guard objects (`name`, `kind`
+  business/control, `field`, `condition`). A `guards#k` edge label stands for route
+  `k`'s business guards (all its guards if it has no business guard). `cobol_xstate.business.expand_business_view(view)` returns the
+  full form — guard objects and state names in place, each edge's `meta` carrying its
+  route, labels joined with AND — which is exactly what `formatVersion` 4 wrote.
+
+  Version 4 wrote every route out whole, twice (on the edge and in `transitions`), with
+  each guard's condition tree copied at every use. Routes on a report splitter are long
+  and genuine — the step from the main paragraph to report k exits k−1 report loops —
+  so a 27,627-line splitter's business view was 926 MB, half a million guard objects for
+  33 distinct guards. On our 1,000-report reproduction the tables take it from
+  782 MB to 18.7 MB as written (283.5 MB to 6.4 MB compact), and
+  `expand_business_view` gives back the version-4 document exactly.
 
 ### Limitation: parallel machines
 

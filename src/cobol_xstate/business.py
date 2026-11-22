@@ -23,6 +23,7 @@ need call/return contraction and are flagged, not faked.
 
 from __future__ import annotations
 
+import copy
 import heapq
 from typing import Dict, List, Optional, Tuple
 
@@ -699,7 +700,11 @@ class _BusinessView:
         # Collapse to the business flow by reachability over configurations (call/return
         # aware), so out-of-line PERFORM is followed - not flagged-and-skipped.
         entry, transitions = self._build_flow()
-        config = self._as_machine(business_states, entry, transitions)
+        tables = _Tables()
+        for t in entry + transitions:
+            t["guards"] = [tables.guard(g) for g in t["guards"]]
+            t["via"] = [tables.state(n) for n in t["via"]]
+        config = self._as_machine(business_states, entry, transitions, tables)
 
         return {
             # Distinct from the default bundle's `xstate-v5-config`, which this view
@@ -732,6 +737,10 @@ class _BusinessView:
             "businessStates": business_states,
             "entry": entry,
             "transitions": transitions,
+            # What the ids in `entry`, `transitions` and the edges' labels index - each
+            # thing written once, however many routes use it (see `_Tables`).
+            "guards": tables.guards,
+            "stateNames": tables.states,
             "collapsed": [{"state": n, "reason": "technical scaffolding"}
                           for n in technical_names],
             "counts": {"faithfulStates": len(self.states),
@@ -791,17 +800,24 @@ class _BusinessView:
             "parameters": self.iface.get("parameters", {}),
         }
 
-    def _guard_label(self, guards: List[dict]) -> Optional[str]:
-        """A single edge label from the guards accumulated along a collapsed path.
-        XState allows one guard per transition; the full list stays in meta."""
-        names = [g["name"] for g in guards if g.get("kind") == "business"] \
-            or [g["name"] for g in guards]
-        if not names:
+    @staticmethod
+    def _guard_label(ids: List[int], tables: "_Tables", route: int) -> Optional[str]:
+        """A single edge label from the guards (ids) accumulated along a collapsed path:
+        its business guards, else all of them (`_label_guards`). XState allows one guard
+        per transition, so one guard is named as itself, and more than one as
+        ``guards#<route>`` - the index of the route the edge's ``meta`` names - rather
+        than every name joined with AND, which on a route through a thousand report
+        loops was a label of 998 names. The label is a function of the route, so it
+        points there instead of writing the guards a second time."""
+        chosen = _label_guards(ids, tables.guards)
+        if not chosen:
             return None
-        return names[0] if len(names) == 1 else " AND ".join(names)
+        if len(chosen) == 1:
+            return tables.guards[chosen[0]]["name"]
+        return f"{_GUARD_SET_LABEL}{route}"
 
     def _as_machine(self, business_states: Dict[str, dict], entry: List[dict],
-                    transitions: List[dict]) -> dict:
+                    transitions: List[dict], tables: "_Tables") -> dict:
         states: Dict[str, dict] = {}
         for name, s in business_states.items():
             node: dict = {}
@@ -826,17 +842,18 @@ class _BusinessView:
             node["meta"] = meta
             states[name] = node
 
-        for t in transitions:
+        # An edge names its transition (`meta.transition`, an index into `transitions`)
+        # instead of carrying a second copy of its route, guards and events.
+        for i, t in enumerate(transitions):
             src = states.get(t["from"])
             if src is None or src.get("type") == "final":
                 continue
             edge: dict = {}
-            g = self._guard_label(t["guards"])
+            g = self._guard_label(t["guards"], tables, i)
             if g:
                 edge["guard"] = g
             edge["target"] = t["to"]
-            edge["meta"] = {"via": t["via"], "guards": t["guards"],
-                            "events": t["events"], "label": t["label"]}
+            edge["meta"] = {"transition": i}
             src.setdefault("always", []).append(edge)
 
         # A synthetic entry node: the collapse can reach several first business states
@@ -845,14 +862,13 @@ class _BusinessView:
             ent: dict = {"meta": {"role": "entry",
                                   "note": "synthetic: the program's first business "
                                           "state(s) after collapsing scaffolding"}}
-            for e in entry:
+            for i, e in enumerate(entry):
                 edge = {}
-                g = self._guard_label(e["guards"])
+                g = self._guard_label(e["guards"], tables, i)
                 if g:
                     edge["guard"] = g
                 edge["target"] = e["to"]
-                edge["meta"] = {"via": e["via"], "guards": e["guards"],
-                                "events": e["events"]}
+                edge["meta"] = {"entry": i}               # an index into `entry`
                 ent.setdefault("always", []).append(edge)
             states[self._ENTRY] = ent
 
@@ -862,6 +878,82 @@ class _BusinessView:
         elif states:
             cfg["initial"] = next(iter(states))
         return cfg
+
+
+#: The prefix of an edge label standing for its route's guards: ``guards#<i>``, where
+#: ``i`` is the index the edge's ``meta`` names (`_BusinessView._guard_label`).
+_GUARD_SET_LABEL = "guards#"
+
+
+def _label_guards(ids: list, guards: list) -> list:
+    """The guards an edge's label stands for: its route's business guards, else all."""
+    return [i for i in ids if guards[i]["kind"] == "business"] or list(ids)
+
+
+class _Tables:
+    """The business view's interned tables: each guard and each technical state
+    written ONCE, and every route pointing at them by index.
+
+    A route is the guards and technical states one business step passes through, and
+    on a report splitter they are long and genuine: the step from the main paragraph to
+    report k exits k-1 report loops, so a thousand reports meant half a million guards
+    on the routes - each written out whole, condition tree and all, for 33 distinct
+    ones, and every route written twice (once more on its chart edge). That was 926 MB
+    for one program. Indexes into these tables say exactly the same thing:
+    `expand_business_view` rebuilds the full form from them.
+    """
+
+    def __init__(self) -> None:
+        self.guards: List[dict] = []
+        self.states: List[str] = []
+        self._guard_ids: Dict[str, int] = {}
+        self._state_ids: Dict[str, int] = {}
+
+    def guard(self, g: dict) -> int:
+        i = self._guard_ids.get(g["name"])
+        if i is None:
+            i = self._guard_ids[g["name"]] = len(self.guards)
+            self.guards.append(g)
+        return i
+
+    def state(self, name: str) -> int:
+        i = self._state_ids.get(name)
+        if i is None:
+            i = self._state_ids[name] = len(self.states)
+            self.states.append(name)
+        return i
+
+
+def expand_business_view(view: dict) -> dict:
+    """The business view with every index resolved: a copy in which each route's
+    ``guards`` are the guard objects and its ``via`` the state names, each chart edge's
+    ``meta`` carries its route again, and a ``guards#N`` label is the names of the
+    guards it stands for joined with AND - the form ``formatVersion`` 4 wrote. It holds exactly what the
+    view holds, for a reader that wants the full form and can afford its size."""
+    v = copy.deepcopy(view)
+    guards = v.pop("guards")
+    names = v.pop("stateNames")
+    ids = {}                                  # route -> its guard ids, before resolving
+    for t in v["entry"] + v["transitions"]:
+        ids[id(t)] = t["guards"]
+        t["guards"] = [dict(guards[i]) for i in t["guards"]]
+        t["via"] = [names[i] for i in t["via"]]
+    for st in v["machine"]["states"].values():
+        for edge in st.get("always", []) or []:
+            m = edge.get("meta") or {}
+            if "transition" in m:
+                route = v["transitions"][m["transition"]]
+                edge["meta"] = {"via": route["via"], "guards": route["guards"],
+                                "events": route["events"], "label": route["label"]}
+            else:
+                route = v["entry"][m["entry"]]
+                edge["meta"] = {"via": route["via"], "guards": route["guards"],
+                                "events": route["events"]}
+            label = edge.get("guard")
+            if label and label.startswith(_GUARD_SET_LABEL):
+                edge["guard"] = " AND ".join(
+                    guards[i]["name"] for i in _label_guards(ids[id(route)], guards))
+    return v
 
 
 def build_business_view(machine: Machine, budget: int = BUSINESS_BUDGET,

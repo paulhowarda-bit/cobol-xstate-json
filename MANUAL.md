@@ -761,9 +761,13 @@ semantics.
 **It is a real XState v5 config**, so the same renderer that draws the faithful bundle
 draws this — which matters, because this is the view a human actually wants to look at.
 Each state's distillation (`role`, `boundaryActions`, `decisions`, the stripped
-`internalSteps`, `cobol` provenance, `suggestedName`) rides in `meta`; each edge carries
-`meta.via`, the technical states it collapsed. A synthetic `__ENTRY__` fans out to the
-first business state(s). It is a *view*, not runnable — use `--target js` to execute.
+`internalSteps`, `cobol` provenance, `suggestedName`) rides in `meta`; each edge's
+`meta.transition` indexes `transitions`, which hold its route once: `via`, the technical
+states it collapsed, and `guards`, as ids into the document's `stateNames` and `guards`
+tables (`formatVersion` 5; an edge with several guards is labelled `guards#k`, where `k`
+is the route its `meta` names). `cobol_xstate.business.expand_business_view(view)` resolves every id
+back to the full form. A synthetic `__ENTRY__` fans out to the first business state(s).
+It is a *view*, not runnable — use `--target js` to execute.
 
 ```bash
 cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage.json
@@ -1169,7 +1173,7 @@ so a corpus joined on it can assert that two programs share state when they do n
 ```jsonc
 {
   "format":     "xstate-v5-config",
-  "formatVersion": 4,   // per-distribution; `--target business` and `reactive` carry
+  "formatVersion": 5,   // per-distribution; `--target business` and `reactive` carry
                         // their OWN format names, cobol-xstate-business / -reactive
   "metadata":   { "program": "...", "source": "...", "generator": "...", "disclaimer": "..." },
   "machine":    { "id", "context", "states", "initial" },
