@@ -124,9 +124,11 @@ def _successors(st: dict) -> List[Tuple[dict, str]]:
 #: The collapse walk visits each (state, top PERFORM frame) at most once per source state
 #: and business guard set, so most programs need steps in proportion to their size. The
 #: exception is a program whose PERFORMs could recurse: it is walked per whole stack
-#: (`_call_sites`), and stacks can be exponentially many. Every step costs about 10 us,
-#: so 250,000 is a few seconds. No example program needs more than 33, an 11,000-line
-#: generated one needs 9,213, and a thousand-report splitter 72,066.
+#: (`_call_sites`), and stacks can be exponentially many. A state with several call
+#: contexts is walked a second time, from all of them at once, for each transition's
+#: shortest route (`_build_flow`). Every step costs about 10 us, so 250,000 is a few
+#: seconds. No example program needs more than 33, an 11,000-line generated one needs
+#: 9,213, and a thousand-report splitter 143,131.
 #:
 #: Exceeding it is a FAILURE of this view, never a shorter answer: a cut-off walk would
 #: return a transition list that reads as complete, and nothing downstream could tell.
@@ -406,7 +408,7 @@ class _BusinessView:
                         return True
         return False
 
-    def _walk(self, cfg: tuple, below) -> List[dict]:
+    def _walk(self, cfgs: List[tuple], below, arrived: set) -> List[dict]:
         """From a business config, walk through technical configs (following calls and
         returns) to the next business / terminal configs, collecting the guards, events
         and technical states (``via``) met on the way.
@@ -440,25 +442,22 @@ class _BusinessView:
         every full stack - k^d of them for k callers per level, d levels deep. Without
         ``below`` the stack is the whole stack and nothing is hidden.
 
+        **Several configs of one state at once.** ``cfgs`` are configs of the same
+        state, and the walk starts from all of them together, so the route it keeps to
+        each place is the one with the fewest guards from ANY of them (see
+        `_build_flow`). ``arrived`` holds ``(config, events, business guards)`` of every
+        place already walked; the caller decides how widely it is shared.
+
         Over an EXPLICIT worklist, not the interpreter's stack: as recursion a chain of
         a hundred nested PERFORMs overflowed the default 1000-frame limit, and the
         RecursionError took every companion view down with it.
+
+        Each result's ``guards`` and ``via`` are still cons chains (`_chain` reads them),
+        and ``business`` is its set of business guard names.
         """
         results: List[dict] = []
-        src_state, src_stack = cfg
-        if (src_state in self.finals) and not src_stack:
-            return results
+        src_state = cfgs[0][0]
         callsite = below is not None
-        # (state, stack, hidden, events, business guards) of every place already walked
-        # FROM THIS SOURCE STATE - shared by the walks from each of its configs. A place
-        # one of them reached under some business guards, another one reaching it under
-        # the same guards would find nothing new: the same targets, so the same
-        # (from, to, business guards, events) steps and the same configs to walk next.
-        # A shared read paragraph PERFORMed from a thousand places is a thousand configs,
-        # and every one of them returned into the same main-line loops; walked once per
-        # config, that was a thousand times a thousand steps. Never shared across source
-        # STATES: a place one state's walk reached is still a real step from another.
-        arrived: set = self._arrived.setdefault(src_state, set())
 
         # `via` and `guards` ride as CONS CHAINS - (head, rest) - rather than lists:
         # extending a list copies it, so a long path paid for itself again at every
@@ -494,9 +493,12 @@ class _BusinessView:
                                       biz, guards, events, via))
                 seq += 1
 
-        cur_stack = src_stack
-        for lab, nxt in self._step(src_state, src_stack, not callsite):
-            push(lab, nxt, callsite and bool(src_stack), 0, frozenset(), None, (), None)
+        for state, cur_stack in cfgs:
+            if (state in self.finals) and not cur_stack:
+                continue
+            for lab, nxt in self._step(state, cur_stack, not callsite):
+                push(lab, nxt, callsite and bool(cur_stack), 0, frozenset(), None, (),
+                     None)
 
         while heap:
             self._steps += 1
@@ -514,8 +516,8 @@ class _BusinessView:
             if ((state in self.finals) and not stack) or self._is_business(state):
                 results.append({"to": state,
                                 "to_config": (state, stack[-1:] if callsite else stack),
-                                "guards": _chain(guards),
-                                "events": list(events), "via": _chain(via)})
+                                "guards": guards, "business": biz,
+                                "events": list(events), "via": via})
                 continue
             via2 = (state, via)
             cur_stack = stack
@@ -536,7 +538,28 @@ class _BusinessView:
         A transition is one business step: (from, to, its BUSINESS guards, events). A
         second route for the same step - reached from another call context, through
         other loop exits, or with the same guards met in another order - is not a
-        second transition; the first one found is kept."""
+        second transition.
+
+        **The route a transition shows is its fewest-guard one from ANY of the state's
+        call contexts**, which takes two passes. The first finds the configs and the
+        transitions. The walks from one state's configs share where they have been
+        (``_arrived``): a place one of them reached under some business guards, another
+        reaching it under the same guards finds nothing new - the same targets, so the
+        same steps and the same configs to walk next. A shared read paragraph PERFORMed
+        from a thousand places is a thousand configs, all returning into the same
+        main-line loops; walked once per config, that was a thousand times a thousand
+        steps. Never shared across source STATES: a place one state's walk reached is
+        still a real step from another.
+
+        But sharing hands each place to whichever config got there first, and that
+        config's route was the one kept. From the read paragraph under report 1, the
+        route on to report 1,000 exits 999 report loops, so every transition from the
+        read to a later report was written out with up to 999 loop exits - when under
+        the report just before it, the same step exits one. So the second pass walks
+        each state that has more than one config ONCE, from all of them together, in
+        order of guard count: the first route to reach a step is the fewest-guard one
+        from any context, and it replaces the first pass's. Which transitions there are
+        does not change, only the route each one shows."""
         initial = self.config.get("initial")
         entry: List[dict] = []
         transitions: List[dict] = self._found
@@ -549,13 +572,14 @@ class _BusinessView:
             entry.append({"to": initial, "guards": [], "events": [], "via": []})
             worklist.append((initial, ()))
         else:
-            for nb in self._walk((initial, ()), below):
-                entry.append({"to": nb["to"], "guards": nb["guards"],
-                              "events": nb["events"], "via": nb["via"]})
+            for nb in self._walk([(initial, ())], below, set()):
+                entry.append({"to": nb["to"], "guards": _chain(nb["guards"]),
+                              "events": nb["events"], "via": _chain(nb["via"])})
                 worklist.append(nb["to_config"])
 
         seen_cfg: set = set()
-        tr_seen: set = set()
+        tr_at: Dict[tuple, dict] = {}                 # step key -> its transition
+        cfgs_of: Dict[str, List[tuple]] = {}          # state -> its configs, in order
         while worklist:
             cfg = worklist.pop()
             if cfg in seen_cfg:
@@ -565,16 +589,28 @@ class _BusinessView:
             state, stack = cfg
             if (state in self.finals) and not stack:
                 continue
-            for nb in self._walk(cfg, below):
-                k = (state, nb["to"],
-                     frozenset(g["name"] for g in nb["guards"] if g["kind"] == "business"),
-                     tuple(nb["events"]))
-                if k not in tr_seen:
-                    tr_seen.add(k)
-                    transitions.append({"from": state, "to": nb["to"], "via": nb["via"],
-                                        "guards": nb["guards"], "events": nb["events"],
-                                        "label": None})
+            cfgs_of.setdefault(state, []).append(cfg)
+            for nb in self._walk([cfg], below, self._arrived.setdefault(state, set())):
+                k = (state, nb["to"], nb["business"], tuple(nb["events"]))
+                if k not in tr_at:
+                    tr_at[k] = {"from": state, "to": nb["to"], "via": nb["via"],
+                                "guards": nb["guards"], "events": nb["events"],
+                                "label": None}
+                    transitions.append(tr_at[k])
                 worklist.append(nb["to_config"])
+        self._arrived.clear()
+
+        for state, cfgs in cfgs_of.items():
+            if len(cfgs) < 2:
+                continue
+            best: set = set()
+            for nb in self._walk(cfgs, below, set()):
+                k = (state, nb["to"], nb["business"], tuple(nb["events"]))
+                if k not in best and k in tr_at:
+                    best.add(k)
+                    tr_at[k]["guards"], tr_at[k]["via"] = nb["guards"], nb["via"]
+        for t in transitions:
+            t["guards"], t["via"] = _chain(t["guards"]), _chain(t["via"])
         return entry, transitions
 
     def _pic(self, field: str) -> Optional[str]:

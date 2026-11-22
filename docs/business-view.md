@@ -127,8 +127,18 @@ read together: the business view shows *which steps matter*, the lineage table s
   Before this, every combination of loop exits was its own transition: k loops per
   paragraph, d levels deep, gave k^(d-1) transitions between one pair of states. A
   report splitter whose shared read paragraph returns into a thousand report loops
-  produced millions, and was killed at 16.8 GB; its shape now takes 72,066 walk steps
-  and 3,062 transitions (1.7 s).
+  produced millions, and was killed at 16.8 GB; its shape now takes 143,131 walk steps
+  and 3,062 transitions (1.2 s).
+- **A transition shows its shortest route from any call context.** The walks from one
+  state's call contexts share where they have been, so each place belongs to whichever
+  context reached it first, and its route was the one kept. From a read paragraph
+  PERFORMed under a thousand report loops, the context under report 1 reached every
+  later report first, so the transition to report 1,000 listed 999 loop exits in its
+  guards and `via` — on every such transition, which made the splitter's business view
+  808 MB. A state with more than one call context is now walked once more, from all of
+  them together in order of guard count, and each transition takes the route with the
+  fewest guards from any of them (one loop exit here: 4.3 MB). Which transitions there
+  are does not change, only the route each one shows.
 - **A view that needs too much work is refused, not cut short.** The walk has a budget
   of 250,000 steps (`--business-budget`, `analyze(business_budget=)`; `0` means no
   limit). A view that needs more raises `ViewBudgetExceeded`, and nothing partial is

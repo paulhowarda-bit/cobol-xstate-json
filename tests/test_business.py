@@ -634,7 +634,7 @@ def test_routes_that_differ_only_in_loop_exits_are_one_business_step():
                                              source_name="loopnest.cbl"), stats=stats)
     steps = _business_steps(view)
     assert len(steps) == len(set(steps)) == 234
-    assert stats["walkSteps"] < 5_000
+    assert stats["walkSteps"] < 10_000           # 47,778 before; both passes, now
 
 
 def test_a_shared_read_returning_into_many_loops_is_walked_in_proportion():
@@ -649,6 +649,18 @@ def test_a_shared_read_returning_into_many_loops_is_walked_in_proportion():
         return stats["walkSteps"]
     small, large = walk_steps(50), walk_steps(200)
     assert large < 5 * small
+
+
+def test_a_transition_shows_its_shortest_route_from_any_call_context():
+    """The read paragraph under report 1 reaches every later report first, through every
+    report loop in between. That route was the one kept, so the step from the read to
+    report 50 listed 49 loop exits; under report 49 the same step exits one. Each
+    transition now shows its fewest-guard route from any of the state's contexts."""
+    view = build_business_view(build_machine(parse_program(_splitter(50)),
+                                             source_name="splitter.cbl"))
+    assert len(view["transitions"]) > 50
+    assert max(len(t["guards"]) for t in view["transitions"]) <= 2
+    assert max(len(t["via"]) for t in view["transitions"]) < 10   # 51 before
 
 
 def test_an_if_branch_keeps_its_arrow_when_the_else_reaches_the_same_state():
