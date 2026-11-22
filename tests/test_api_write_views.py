@@ -236,16 +236,12 @@ def test_an_embedding_caller_reproduces_a_cli_run_byte_for_byte(tmp_path):
         assert theirs == written[name].read_bytes(), name
 
 
-def test_a_business_view_over_its_budget_is_an_error_and_nothing_partial(tmp_path, caplog,
-                                                                         monkeypatch):
+def test_a_business_view_over_its_budget_is_an_error_and_nothing_partial(tmp_path, caplog):
     """A view that needs more walk steps than its budget is not written at all - a
     shortened one would read as complete - and the run says so at ERROR, naming how to
     lift the limit. Everything else the run writes still lands. The same holds under
     debug: there is no defect to show a traceback for."""
     from cobol_xstate import ViewBudgetExceeded
-    # A CLI run earlier in the session (configure_logging) stops the package logger
-    # propagating, which would hide its records from caplog's root handler.
-    monkeypatch.setattr(logging.getLogger("cobol_xstate"), "propagate", True)
     analysis = analyze(SOURCE, source_name="custrpt.cbl", retrieve=False,
                        business_budget=1)
     with pytest.raises(ViewBudgetExceeded):

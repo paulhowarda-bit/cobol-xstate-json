@@ -57,3 +57,30 @@ def _pin_conventions_off(monkeypatch):
     """
     from cobol_xstate import statechart
     monkeypatch.setattr(statechart, "_load_conventions", lambda: None)
+
+
+#: The loggers `cli.run` configures (cobol_xstate's own, cobol_parser's, and the
+#: shared mainframe_artifacts one).
+_CLI_LOGGERS = ("cobol_xstate", "cobol_parser", "mainframe_artifacts")
+
+
+@pytest.fixture(autouse=True)
+def _restore_cli_logging():
+    """Undo what `cli.run` does to the package loggers when a test ends.
+
+    `configure_logging` turns propagation off, sets a level and installs a stderr
+    handler, because the CLI owns stderr. Left in place, that outlived the test that ran
+    the CLI: every later test that reads log records through `caplog` - whose handler
+    sits on the root logger - saw nothing. So the suite passed or failed by test order:
+    test_business.py (which runs the CLI) before test_api_write_views.py failed four
+    tests that pass alone. Each test now leaves the package loggers as it found them."""
+    import logging
+    saved = []
+    for name in _CLI_LOGGERS:
+        logger = logging.getLogger(name)
+        saved.append((logger, logger.propagate, logger.level, list(logger.handlers)))
+    yield
+    for logger, propagate, level, handlers in saved:
+        logger.propagate = propagate
+        logger.setLevel(level)
+        logger.handlers[:] = handlers
