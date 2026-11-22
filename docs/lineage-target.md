@@ -245,13 +245,20 @@ A **flow-sensitive reaching-origins fixpoint** over the emitted state graph:
    - an assignment gives its target the **union** of its operands' origins;
    - `STRING`/`UNSTRING`/`INSPECT` propagate **dependencies** (see below);
    - a `CALL`'s by-reference arguments gain a **maybe** origin.
-3. **Join** at merge points (union), iterate to a fixpoint. The lattice is finite and the
-   transfer monotone, so it terminates: there is no iteration limit. Each change of a
-   state's output adds at least one field or origin to it, which the run checks as it
-   goes; a run that breaks that (a transfer that stopped being monotone, a defect) is
-   refused with an error, never published cut short. An earlier limit, `max(50_000,
-   states x 500)` visits, stopped a loop needing ~500 loop-carried hops early and
-   published "internally set" for a field the input reached.
+3. **Join** at merge points (union), iterate to a fixpoint. The lattice is finite, so the
+   iteration terminates if the transfer is monotone (more origins in, never fewer out),
+   and there is no iteration limit. Monotone is a property the transfer has to keep, not
+   one it gets for free: every value it computes is a union of values read from the
+   map, and the one read that once broke that - a group that read its own entry until
+   a leaf or FILLER key arrived, then switched to their union, so an `ACCEPT G` whose
+   `G#FILLER` a `MOVE SPACES TO G` had emptied lost its origin - now always reads the
+   union, with every write of a group (input fill, SET ADDRESS OF, LINKAGE seed) writing
+   those keys too. Each change of a state's output after its first must then add at
+   least one field or origin, which the run checks as it goes; a run that breaks that
+   (a transfer that stopped being monotone, a defect) is refused with an error, never
+   published cut short. An earlier limit, `max(50_000, states x 500)` visits, stopped a
+   loop needing ~500 loop-carried hops early and published "internally set" for a field
+   the input reached.
 4. **Emit** a row at every event, using the origins that actually reach it.
 
 PERFORM is followed as a real call and returned from, using the same target resolution as

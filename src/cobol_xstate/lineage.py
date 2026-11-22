@@ -1150,7 +1150,10 @@ class _Lineage:
             # 1. an INPUT event fills its fields: they originate HERE. A GROUP field
             # (a VARCHAR host structure, whose one host variable is the parent of a
             # length/text pair) fills its elementary children too: a MOVE out of the
-            # text child must find the event, not "internally set".
+            # text child must find the event, not "internally set". And its FILLER
+            # bytes: a group reads as its leaves and FILLERs (`_read`), so a fill that
+            # left `G#FILLER` holding an older `MOVE SPACES TO G` made `ACCEPT G` /
+            # `MOVE G TO T` say T was "internally set".
             for h in got:
                 ev = _iface._event("get", h["etype"], h["endpoint"])
                 for f in h["fields"]:
@@ -1159,6 +1162,8 @@ class _Lineage:
                     for leaf in self.dv.leaves(fu):
                         if leaf != fu:
                             cur[leaf] = cur[fu]
+                    for key in self.sub_fillers.get(fu, ()):
+                        cur[key] = cur[fu]
                 if rows is not None:
                     for f in h["fields"]:
                         rows.append(self._row(name, h, "input", f, cur, aname, line))
@@ -1224,6 +1229,8 @@ class _Lineage:
                     cur[x] = frozenset(acc)
                     for leaf in self.dv.leaves(x):
                         cur[leaf] = cur[x]
+                    for key in self.sub_fillers.get(x, ()):
+                        cur[key] = cur[x]
                     if why:
                         self._flag(f"SET ADDRESS OF {x} TO {ptr}: the storage {x} "
                                    f"addresses cannot be followed - {why}")
@@ -1365,19 +1372,26 @@ class _Lineage:
 
     def _read(self, name: str, cur: State) -> Set[Origin]:
         """The origins a read of ``name`` sees. A group's value is its fields' bytes, so
-        a group reads as the union over its leaves: every write to a group also writes
-        its leaves (``_store``), so a leaf rewritten since is never hidden behind an
-        older entry for the group. A group none of whose leaves was ever written reads
-        its own entry, if it has one. Callers only read the result: a field's own
-        (immutable) entry is returned as it is, not copied."""
+        a group reads as the union over its leaves and FILLER keys (``group_reads``),
+        ALWAYS - never its own entry: every write to a group also writes those keys
+        (``_store``, the input fill, SET ADDRESS OF, the LINKAGE seed), so a leaf
+        rewritten since is never hidden behind an older entry for the group.
+
+        It used to fall back to the group's own entry while none of those keys was
+        set, and switch to their union once one arrived. That switch made the read -
+        and so the fixpoint's transfer - non-monotone: an input fill wrote G but not
+        ``G#FILLER``, a ``MOVE SPACES TO G`` on the back edge then brought an EMPTY
+        ``G#FILLER`` in, and the read dropped the fill's origin (a published "T is
+        internally set" after ``ACCEPT G`` / ``MOVE G TO T``). A union of keys is
+        monotone in the map by construction, which is what `run`'s termination
+        argument rests on. Callers only read the result: a field's own (immutable)
+        entry is returned as it is, not copied."""
         fu = name.upper()
         keys = self.group_reads.get(fu)
-        if keys:
-            vals = [v for v in cur.many(keys) if v is not None]
-            if vals:
-                acc: Set[Origin] = set()
-                acc.update(*vals)
-                return acc
+        if keys is not None:
+            acc: Set[Origin] = set()
+            acc.update(*[v for v in cur.many(keys) if v is not None])
+            return acc
         return cur.get(fu, _NO_ORIGINS)
 
     def _subgroups(self, name: str) -> List[str]:
@@ -1608,6 +1622,10 @@ class _Lineage:
                     and it.get("kind") != "condition-name" \
                     and n.upper() not in self.own_linkage:
                 seed[n.upper()] = frozenset({(caller, False, None)})
+                # and its FILLER bytes, which the caller filled too: a group reads
+                # as its leaves and FILLER keys only (`_read`)
+                for key in self.sub_fillers.get(n.upper(), ()):
+                    seed[key] = seed[n.upper()]
         return seed
 
     def _changers(self) -> Dict[str, List[dict]]:
@@ -1916,8 +1934,15 @@ class _Lineage:
         # over-reports - origins only grow - so a cut-off answer is a confident "no".
         #
         # Termination is a proof, not a budget. Every map starts unset and the join is
-        # union; the transfer is monotone (more origins in, more origins out), so each
-        # OUT[s] only grows, and a state is queued only when a predecessor's OUT changed.
+        # union. The transfer is monotone (more origins in, never fewer out) because
+        # every value `_apply` writes is a constant (an input event's own origin) or a
+        # union of values it reads from the map, chosen by the statement alone, and
+        # every read is a union over fixed keys - `_read` of a group used to switch from
+        # the group's own entry to its leaf/FILLER keys once one arrived, which made an
+        # OUT map SHRINK (`ACCEPT G` then `MOVE SPACES TO G` on the back edge), and no
+        # longer does. That is an invariant of the transfer to keep, not a law: each
+        # OUT[s] only grows while it holds, and a state is queued only when a
+        # predecessor's OUT changed.
         # Each change of OUT[s] after its first adds at least one key or one origin to
         # it, so by the time OUT[s] has changed n times, n <= 1 + its height (the keys
         # it holds plus the origins under them), which the finite fields x origins bound

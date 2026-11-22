@@ -1623,10 +1623,20 @@ def _shift_loop(fields: int, fillers: int) -> str:
     return "\n".join("       " + s for s in lines) + "\n"
 
 
-def test_a_long_loop_carried_chain_is_solved_to_its_fixpoint(monkeypatch):
+def test_a_long_loop_carried_chain_is_solved_to_its_fixpoint():
     """112 states, 56,115 visits: the old limit (56,000 here) cut this run off and the
-    DISPLAY row read "internally set". The convergence check is reached (the shifting
-    state's output changes ~500 times) and holds, so it is not a blind guard."""
+    DISPLAY row read "internally set"."""
+    d = _lin_src(_shift_loop(502, 36))
+    r = _row(d, "F502")
+    assert _origins(r) == {"GET.CONSOLE.SYSIN"}
+    assert "note" not in r
+    assert not [f for f in d["flags"] if "bound" in f or "converg" in f]
+
+
+def test_the_convergence_check_is_reached_and_holds(monkeypatch):
+    """The shifting state's output changes once per field the origin advances, so a
+    40-field history passes the check's first counts (16, 32): it is not a blind guard,
+    and a monotone run satisfies it."""
     import cobol_xstate.lineage as lineage_mod
     checked = []
     real = lineage_mod._Lineage._check_height
@@ -1636,12 +1646,9 @@ def test_a_long_loop_carried_chain_is_solved_to_its_fixpoint(monkeypatch):
         return real(self, state, n, out, steps)
 
     monkeypatch.setattr(lineage_mod._Lineage, "_check_height", spy)
-    d = _lin_src(_shift_loop(502, 36))
-    r = _row(d, "F502")
-    assert _origins(r) == {"GET.CONSOLE.SYSIN"}
-    assert "note" not in r
-    assert not [f for f in d["flags"] if "bound" in f or "converg" in f]
-    assert max(checked) >= 256
+    d = _lin_src(_shift_loop(40, 0))
+    assert _origins(_row(d, "F40")) == {"GET.CONSOLE.SYSIN"}
+    assert max(checked) >= 32
 
 
 def test_a_fixpoint_that_does_not_converge_is_refused_not_cut_off(monkeypatch):
@@ -1669,3 +1676,84 @@ def test_a_fixpoint_that_does_not_converge_is_refused_not_cut_off(monkeypatch):
         _lin_src(src)
     with pytest.raises(RuntimeError, match="not converging"):
         analyze(src, source_name="shift.cbl", retrieve=False)
+
+
+# --------------------------------------------------------------------------- #
+# a group reads as its leaves and FILLER bytes, always
+#
+# A group's read used to fall back to the group's own entry until one of its leaf or
+# FILLER keys arrived, then switch to their union. An input fill wrote the group but
+# not its `#FILLER` key, so a `MOVE SPACES TO G` reaching the read (over the loop's
+# back edge, or from the other arm of an IF) brought an EMPTY `G#FILLER` and the fill's
+# origin vanished: T said "internally set" after ACCEPT G / MOVE G TO T, with no flag.
+# The switch also made the fixpoint's transfer non-monotone (an OUT map shrank), and
+# the termination argument in `_Lineage.run` rests on monotonicity.
+# --------------------------------------------------------------------------- #
+
+def _filler_group(body: str, linkage: bool = False, using: str = "") -> str:
+    """G is a group of one FILLER, in WORKING-STORAGE or (``linkage``) LINKAGE."""
+    lines = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. FGRP.", "DATA DIVISION.",
+             "WORKING-STORAGE SECTION.", "01 WS-EOF PIC X VALUE 'N'.",
+             "01 WS-ON PIC 9 VALUE 1.", "01 WS-AREA PIC X(10).", "01 T PIC X(10)."]
+    if linkage:
+        lines.append("LINKAGE SECTION.")
+    lines += ["01 G.", "   05 FILLER PIC X(10).",
+              f"PROCEDURE DIVISION{using}.", "0000-MAIN."]
+    lines += body.splitlines() + ["    STOP RUN."]
+    return "\n".join("       " + s for s in lines) + "\n"
+
+
+def test_a_filled_filler_group_read_after_a_move_spaces_on_the_back_edge():
+    d = _lin_src(_filler_group("""    PERFORM UNTIL WS-EOF = 'Y'
+        ACCEPT G
+        MOVE G TO T
+        DISPLAY T
+        MOVE SPACES TO G
+        ACCEPT WS-EOF
+    END-PERFORM."""))
+    t = _row(d, "T")
+    assert _origins(t) == {"GET.CONSOLE.SYSIN"}
+    assert "note" not in t
+    assert _origins(_row(d, "G", "input")) == {"GET.CONSOLE.SYSIN"}
+
+
+def test_a_filler_group_filled_on_one_arm_and_cleared_on_the_other():
+    d = _lin_src(_filler_group("""    PERFORM UNTIL WS-EOF = 'Y'
+        IF WS-ON = 1
+            ACCEPT G
+        ELSE
+            MOVE SPACES TO G
+        END-IF
+        MOVE G TO T
+        DISPLAY T
+        ACCEPT WS-EOF
+    END-PERFORM."""))
+    assert _origins(_row(d, "T")) == {"GET.CONSOLE.SYSIN"}
+
+
+def test_a_linkage_filler_group_reads_as_the_callers():
+    """The LINKAGE seed fills the group's FILLER bytes too: they are the caller's."""
+    d = _lin_src(_filler_group("""    MOVE G TO T
+    DISPLAY T.""", linkage=True, using=" USING G"))
+    assert _origins(_row(d, "T")) == {"GET.CALLER.CALLER"}
+
+
+def test_a_filler_group_addressed_onto_filled_storage_reads_that_storage():
+    """SET ADDRESS OF writes the aliased group's FILLER bytes too."""
+    d = _lin_src(_filler_group("""    ACCEPT WS-AREA
+    SET ADDRESS OF G TO ADDRESS OF WS-AREA
+    MOVE G TO T
+    DISPLAY T.""", linkage=True))
+    assert _origins(_row(d, "T")) == {"GET.CONSOLE.SYSIN"}
+
+
+def test_a_group_read_never_shrinks_as_its_map_grows():
+    """The read is a union over fixed keys, never a switch on which keys are present,
+    so a map holding more never reads as fewer origins (monotone)."""
+    from cobol_xstate.lineage import _Lineage, _Tracked
+    lin = _Lineage(build_machine(parse_program(_filler_group("    DISPLAY T.")),
+                                 source_name="sub"))
+    o = ("GET.CONSOLE.SYSIN", False, None)
+    less = _Tracked.of({"G": frozenset({o})})
+    more = _Tracked.of({"G": frozenset({o}), "G#FILLER": frozenset()})
+    assert lin._read("G", less) <= lin._read("G", more)
