@@ -238,13 +238,13 @@ between that and the view not having run.
 
 The most walk steps the business view may take. Default 250,000; `0` means no limit.
 
-Collapsing a program to its business flow can, on some programs, need exponentially many
-steps. One case is a technical region whose paragraphs are both PERFORMed and fallen into,
-which doubles the paths to cover at every level. The other is a program whose PERFORMs
-could recurse, which is walked one whole PERFORM stack at a time. A step costs about
-10 µs, and at most about 1 KB while its walk is live, so the default is a few seconds
-and at most a couple of hundred MB. No example program needs more than 35 steps; an
-11,000-line generated program needs 5,614. `--timing` reports each run's count
+Most programs need walk steps in proportion to their size: the walk visits each place
+(a state under its top PERFORM) at most once per source state and business condition.
+The exception is a program whose PERFORMs could recurse, which is walked one whole
+PERFORM stack at a time, and stacks can be exponentially many. A step costs about 10 µs,
+so the default is a few seconds. No example program needs more than 33 steps; an
+11,000-line generated program needs 9,213, and a report splitter with a thousand report
+loops sharing one read paragraph needs 72,066. `--timing` reports each run's count
 (`walkSteps` on its `view:business` line), so the budget can be set from your own
 programs rather than these.
 

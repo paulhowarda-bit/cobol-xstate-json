@@ -107,17 +107,28 @@ read together: the business view shows *which steps matter*, the lineage table s
 - **Nested PERFORMs are walked per call site, not per call path.** Distinct stacks of
   PERFORMs multiply — k call sites per level, d levels deep, is k^d of them — so the flow
   carries only the top PERFORM of each stack. A pre-pass records which call site can sit
-  under which. A walk runs without knowing what is under its top frame, and if it ever
-  returns out of that frame, it is rerun once for each frame that can sit there. So
-  every finished walk is exactly the walk from each real stack it stands for. The
-  transitions are the same set as walking every stack, but their order may differ, and
-  so may which of several collapsed paths is kept as an edge's `via`. A 387-line program
-  nesting 8 levels with 3 call sites each went from 157,457 walks (12 s, 65 MB) to 737
-  (0.1 s, 1 MB), and 16 levels takes 0.3 s.
+  under which. A walk runs without knowing what is under its top frame, and when it
+  returns out of that frame it carries on, in the same walk, at the return point once for
+  each frame that can sit there. A 387-line program nesting 8 levels with 3 call sites
+  each went from 157,457 walks (12 s, 65 MB) to well under a second.
 
   The one exception is a program where a PERFORM could land inside a range already on the
   stack: the recursion check reads the whole stack, so such a program keeps the per-stack
   walk.
+- **One transition per business step, not per route.** Past its first step a walk only
+  steps through technical states, which carry no business guards, so the only business
+  condition a route can have is its first step's: an IF branch, an EVALUATE WHEN. Routes
+  that differ only in control guards — which loops they exited, AT END, ON OVERFLOW —
+  are the same step, and the view keeps the one with the fewest guards. Each IF branch
+  and WHEN arm still gets its own transition to every business state it reaches, even
+  when another branch reaches the same state. A place already walked from a state under
+  the same business guards is not walked again, from any of that state's call contexts.
+
+  Before this, every combination of loop exits was its own transition: k loops per
+  paragraph, d levels deep, gave k^(d-1) transitions between one pair of states. A
+  report splitter whose shared read paragraph returns into a thousand report loops
+  produced millions, and was killed at 16.8 GB; its shape now takes 72,066 walk steps
+  and 3,062 transitions (1.7 s).
 - **A view that needs too much work is refused, not cut short.** The walk has a budget
   of 250,000 steps (`--business-budget`, `analyze(business_budget=)`; `0` means no
   limit). A view that needs more raises `ViewBudgetExceeded`, and nothing partial is

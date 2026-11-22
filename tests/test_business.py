@@ -572,3 +572,89 @@ def test_a_perform_that_could_recurse_keeps_the_per_stack_walk():
     assert any("recursive PERFORM" in f for f in build_business_view(machine)["flags"])
     layered = build_machine(parse_program(_layered(3)), source_name="layers.cbl")
     assert _BusinessView(layered)._call_sites() is not None
+
+
+def _loop_nest(depth, k=3):
+    """Every paragraph does one ADD, then PERFORMs each paragraph of the next level in
+    its own PERFORM ... UNTIL loop, whose condition is unique to that call site."""
+    a = lambda s: "       " + s
+    out = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. LOOPNEST.", "DATA DIVISION.",
+           "WORKING-STORAGE SECTION."] + [f"01 X{m} PIC 9(4) VALUE 0." for m in range(k)]
+    out += ["PROCEDURE DIVISION.", "MAIN-PARA."]
+    out += [f"    PERFORM L1-{m} UNTIL X{m} > 9000" for m in range(k)] + ["    STOP RUN."]
+    for i in range(1, depth + 1):
+        for j in range(k):
+            out += [f"L{i}-{j}.", f"    ADD 1 TO X{j}"]
+            if i < depth:
+                out += [f"    PERFORM L{i + 1}-{m} UNTIL X{m} > {i * 100 + j * 10 + m}"
+                        for m in range(k)]
+            out.append("    .")
+    return "\n".join(a(s) for s in out) + "\n"
+
+
+def _splitter(reports):
+    """A report splitter: the main paragraph runs one loop per report, and every report
+    paragraph writes its record and PERFORMs the one shared read paragraph."""
+    a = lambda s: "       " + s
+    out = ["IDENTIFICATION DIVISION.", "PROGRAM-ID. SPLITTER.", "ENVIRONMENT DIVISION.",
+           "INPUT-OUTPUT SECTION.", "FILE-CONTROL.", "    SELECT IN-FILE ASSIGN TO INDD.",
+           "    SELECT OUT-FILE ASSIGN TO OUTDD.", "DATA DIVISION.", "FILE SECTION.",
+           "FD IN-FILE.", "01 IN-REC.", "   05 IN-RPT PIC 9(4).", "   05 IN-DATA PIC X(76).",
+           "FD OUT-FILE.", "01 OUT-REC PIC X(80).", "WORKING-STORAGE SECTION.",
+           "01 WS-EOF PIC X VALUE 'N'.", "01 WS-F PIC 9(4) VALUE 0.",
+           "PROCEDURE DIVISION.", "0000-MAIN.", "    OPEN INPUT IN-FILE OUTPUT OUT-FILE",
+           "    PERFORM X-100-READ"]
+    for r in range(1, reports + 1):
+        out += [f"    PERFORM A-{r}-RPT THRU A-{r}-EXIT",
+                f"        UNTIL IN-RPT NOT = {r} OR WS-EOF = 'Y'"]
+    out += ["    CLOSE IN-FILE OUT-FILE", "    STOP RUN."]
+    for r in range(1, reports + 1):
+        out += [f"A-{r}-RPT.", "    MOVE IN-DATA TO OUT-REC", "    WRITE OUT-REC",
+                "    PERFORM X-100-READ.", f"A-{r}-EXIT.", "    EXIT."]
+    out += ["X-100-READ.", "    READ IN-FILE AT END MOVE 'Y' TO WS-EOF END-READ"]
+    for i in range(5):
+        out += [f"    IF IN-DATA({i + 1}:1) = 'X'", "       ADD 1 TO WS-F", "    END-IF"]
+    out.append("    .")
+    return "\n".join(a(s) for s in out) + "\n"
+
+
+def _business_steps(view):
+    return [(t["from"], t["to"],
+             frozenset(g["name"] for g in t["guards"] if g["kind"] == "business"),
+             tuple(t["events"])) for t in view["transitions"]]
+
+
+def test_routes_that_differ_only_in_loop_exits_are_one_business_step():
+    """Returning up through nested PERFORM ... UNTIL loops, every combination of loop
+    exits is a different set of control guards. Each was its own transition: 3 loops per
+    paragraph, 6 levels deep, gave 5,469 transitions among 20 business states - up to
+    243 between one pair - and an exponential walk. They are one business step each."""
+    stats = {}
+    view = build_business_view(build_machine(parse_program(_loop_nest(6)),
+                                             source_name="loopnest.cbl"), stats=stats)
+    steps = _business_steps(view)
+    assert len(steps) == len(set(steps)) == 234
+    assert stats["walkSteps"] < 5_000
+
+
+def test_a_shared_read_returning_into_many_loops_is_walked_in_proportion():
+    """A thousand-report splitter's shared read paragraph returns into every report
+    loop, and from each return point the walk went on through all the later loops: a
+    walk per caller, each as long as the rest of the program. Walks from one state now
+    share where they have been, so the steps grow with the reports, not their square."""
+    def walk_steps(n):
+        stats = {}
+        build_business_view(build_machine(parse_program(_splitter(n)),
+                                          source_name="splitter.cbl"), stats=stats)
+        return stats["walkSteps"]
+    small, large = walk_steps(50), walk_steps(200)
+    assert large < 5 * small
+
+
+def test_an_if_branch_keeps_its_arrow_when_the_else_reaches_the_same_state():
+    """`IF SQLCODE = 0 ... ELSE ... END-IF` with both branches running on to the program
+    end: each branch is a business step of its own, so each gets its transition."""
+    view = _view("sqlsel.cbl")
+    guards = sorted(tuple(g["name"] for g in t["guards"] if g["kind"] == "business")
+                    for t in _tx(view, "0000-MAIN__if2", "0000-MAIN__end1"))
+    assert guards == [(), ("SQLCODE_eq_0",)]
