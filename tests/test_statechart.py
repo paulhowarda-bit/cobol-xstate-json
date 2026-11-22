@@ -550,7 +550,7 @@ def test_bundle_is_json_serializable_and_well_formed():
     # machine-only path drops the review-contract material but is the SAME machine as
     # the bundle presents (the Harel machine + its charts), NOT the raw pre-Harel IR
     bare = json.loads(machine.to_json(machine_only=True))
-    assert set(bare) == {"machine", "charts"}
+    assert set(bare) == {"machine", "charts", "paragraphs"}
     assert "format" not in bare and "provenance" not in bare
     assert bare["machine"] == obj["machine"] and bare["charts"] == obj["charts"]
     # PERFORM is resolved to a real call/return here, not left as an inert marker

@@ -183,7 +183,7 @@ class Machine:
         # IR's state nodes, and the Harel view is derived from that IR - so it has to
         # run before the restructuring copies the nodes, or the boundary tags are lost.
         iface = self.interface()
-        config, charts = to_harel(self)
+        config, charts, paragraphs = to_harel(self)
         return {
             "format": "xstate-v5-config",
             "formatVersion": VIEW_SCHEMA_VERSION,
@@ -215,6 +215,9 @@ class Machine:
             # subroutine (a classical Harel chart has no call stack; a child chart that
             # runs to completion and returns is the faithful equivalent).
             "charts": charts,
+            # A paragraph node more than one chart holds (overlapping PERFORM ... THRU
+            # ranges), once; those charts hold {"ref": id}. harel.expand_charts inlines it.
+            "paragraphs": paragraphs,
             "data": self.data,
             "semantics": {"actions": self.semantics.get("actions", {}),
                           "guards": self.semantics.get("guards", {})},
@@ -234,7 +237,8 @@ class Machine:
             # never transfers, the callee is an unreachable sibling paragraph, and the
             # child `charts` are absent entirely. Deriving it from the bundle here means
             # the two can never disagree again.
-            obj: dict = {"machine": bundle["machine"], "charts": bundle["charts"]}
+            obj: dict = {"machine": bundle["machine"], "charts": bundle["charts"],
+                         "paragraphs": bundle["paragraphs"]}
         else:
             obj = bundle
         return _dumps_json(obj, indent=indent)

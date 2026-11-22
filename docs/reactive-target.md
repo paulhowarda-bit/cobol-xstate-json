@@ -106,7 +106,7 @@ bury every wait where no event could reach it. The reactive target therefore **f
    `THRU` ranges and all).
 2. Each callee's body is inlined into the single machine under its own namespace (a
    paragraph can appear both standalone and inside a `THRU` range; the copies stay
-   disjoint).
+   disjoint unless they behave the same - see below).
 3. Call/return becomes a **return-address context field** — the mechanism already proven
    for `ALTER` switches: the call site assigns `RET-<para> := '<site>'` and jumps in; the
    callee's return is a state whose guarded edges dispatch back to the right site.
@@ -120,6 +120,19 @@ Context is then genuinely shared — *more* faithful to COBOL WORKING-STORAGE th
 target's invoke input/output copying. Every dispatch guard is real and evaluable, never an
 external stub, and every edge is guarded: a stall beats jumping somewhere plausible but
 wrong.
+
+**Overlapping ranges share their states.** Restart-from-step code performs
+`STEP-k THRU STEP-EXIT` for every k, so each range holds every later step, and inlining
+each range whole gave N^2/2 states (76 MB for 400 steps). Ranges that hold the same
+paragraphs and never call one another - directly or through other calls - can never be
+active at once, so they share one return state and one return-address field, its
+dispatch covering all their call sites. A paragraph's states are then written once for
+every range whose copy behaves the same: the same paragraph, the same return, and edges
+that lead to copies that are themselves shared (a partition refinement decides it). They
+sit under the first such range's prefix; the manifest's `inline` entry for each other
+range lists them under `sharedParagraphs` (paragraph -> the range whose `states` holds
+it), and its `return` and `retField` are that shared return's. Ranges where one calls
+another keep a copy and a return each, exactly as before.
 
 **Recursion is refused, not flattened.** With one return-address field per paragraph, a
 re-entrant call overwrites the address and would return to the wrong place, so a call
@@ -155,6 +168,8 @@ Proven end-to-end under stock XState by *sending events* (`tests/test_reactive.p
 - **`retdisp`** — one paragraph PERFORMed from three sites (including from inside an
   inlined `THRU` range) returns to the right one each time.
 - **`sectperf` / `thrurange` / `accum`** — sections, `THRU` ranges, `PERFORM UNTIL`.
+- **`restart`** — overlapping `THRU` ranges sharing states and a return, restarted at each
+  step, one range performed from two sites.
 - **`sqlsel`** — inbound row + `SQLCODE` response branch.
 - **`twogets`** — two reads folded in one state split into two waits.
 - **`recur`** — refused.

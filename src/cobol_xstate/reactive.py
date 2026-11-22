@@ -41,8 +41,9 @@ from . import interface as _iface
 from .errors import ReactiveLoweringError
 from .emitter import (
     RUNTIME_IMPORT, _HELPERS, _build_guards, _build_ops, _collect_referenced,
-    _emit_guard, _field_table, _invoke_transform, _js_context, _js_str,
-    _negated_externals, _strip_meta, retarget_on, segment_entry,
+    ActorGroups, _emit_guard, _field_table, _invoke_groups, _js_context, _js_str,
+    _negated_externals, _para_of, _strip_meta, copy_tree, edge_target, iter_transitions,
+    retarget_on, segment_entry,
 )
 from .statechart import Machine
 
@@ -122,33 +123,131 @@ def _ns(actor: str, state_id: str) -> str:
     return f"{actor}__RET" if state_id == "__RET__" else f"{actor}__{state_id}"
 
 
-def _retarget(node: dict, actor: str) -> dict:
-    """Rewrite every target inside one actor-body state into the actor's namespace."""
+def _retarget(node: dict, actor: str, where=None) -> dict:
+    """Rewrite every target inside one actor-body state into the flat machine's ids:
+    ``where(target)`` when given (`_share_plan`), else ``actor``'s own namespace."""
+    where = where or (lambda t: _ns(actor, t))
     for t in node.get("always", []) or []:
         if t.get("target"):
-            t["target"] = _ns(actor, t["target"])
+            t["target"] = where(t["target"])
     inv = node.get("invoke")
     if inv and (inv.get("onDone") or {}).get("target"):
-        inv["onDone"]["target"] = _ns(actor, inv["onDone"]["target"])
+        inv["onDone"]["target"] = where(inv["onDone"]["target"])
     on = node.get("on")
     if isinstance(on, dict):
         # Bare-string handler targets (on: {EVENT: "__H_x"}) must be namespaced too; the
         # dict-only version here dropped them, the same bug harel._retarget was fixed for.
-        retarget_on(on, lambda t: _ns(actor, t))
+        retarget_on(on, where)
     return node
 
 
-def _actor_call_graph(actor_configs: Dict[str, dict]) -> Dict[str, set]:
+def _actor_call_graph(groups: ActorGroups) -> Dict[str, set]:
     """actor target -> the actor targets it invokes."""
-    graph: Dict[str, set] = {}
-    for name, cfg in actor_configs.items():
-        deps = set()
-        for st in cfg.get("states", {}).values():
-            src = (st.get("invoke") or {}).get("src") or ""
-            if src.startswith("actor:"):
-                deps.add(src[len("actor:"):])
-        graph[name[len("actor:"):]] = deps
-    return graph
+    calls: Dict[str, set] = {}
+    for gid, states in groups.groups.items():
+        calls[gid] = {src[len("actor:"):] for st in states.values()
+                      for src in [(st.get("invoke") or {}).get("src") or ""]
+                      if src.startswith("actor:")}
+    return {name[len("actor:"):]: set().union(*(calls[g] for g in a["groups"]))
+            for name, a in groups.actors.items()}
+
+
+def _share_plan(groups: ActorGroups, graph: Dict[str, set]
+                ) -> Tuple[Dict[str, str], Dict[Tuple[str, str], str]]:
+    """Which inlined actor bodies can share states: ``(home, rep)``.
+
+    Overlapping ``PERFORM ... THRU`` ranges hold the same paragraphs - restart-from-step
+    code (``PERFORM S-k THRU S-LAST-EXIT`` for every k) inlined every paragraph once per
+    range that held it, N^2/2 states. A paragraph's states can be written once for
+    several ranges when two things hold:
+
+    * the ranges share their return: one return state and one return-address field,
+      dispatching to all their call sites. Sound only when no two of them can be active
+      at once - none calls another, directly or through others - since a range's frame
+      can only sit on the stack above a range that (transitively) called it. ``home``
+      maps each actor to the first actor of the set it returns with: itself, unless it
+      shares; a set where one calls another keeps a return each and shares nothing.
+    * the copies go on to the same states: each of their successor paragraphs is itself
+      shared. A partition refinement over (actor, paragraph group) - starting from the
+      group and the return, and splitting by where each copy's edges lead until nothing
+      splits - gives exactly the copies that behave the same.
+
+    ``rep`` maps each (actor, group) to the actor whose namespace holds those states:
+    the first actor of its class. With nothing shared, every copy is its own class and
+    every actor its own home, so the flat machine is exactly what it was."""
+    names = sorted(groups.actors)
+    parent = {n: n for n in names}
+
+    def find(n: str) -> str:
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    holders: Dict[str, List[str]] = {}
+    for n in names:
+        for g in groups.actors[n]["groups"]:
+            holders.setdefault(g, []).append(n)
+    for hs in holders.values():
+        for n in hs[1:]:
+            a, b = find(hs[0]), find(n)
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+    members: Dict[str, List[str]] = {}
+    for n in names:
+        members.setdefault(find(n), []).append(n)
+    home: Dict[str, str] = {}
+    for ms in members.values():
+        targets = {n[len("actor:"):] for n in ms}
+        safe = len(ms) == 1 or not any(_reaches(graph, n[len("actor:"):], targets)
+                                       for n in ms)
+        for n in ms:
+            home[n] = ms[0] if safe else n
+
+    gid_of = {n: {groups.para[g]: g for g in groups.actors[n]["groups"]} for n in names}
+    succ: Dict[str, List[str]] = {}
+    for g, states in groups.groups.items():
+        out = set()
+        for st in states.values():
+            for _, edge in iter_transitions(st, invoke=True):
+                t = edge_target(edge)
+                if t and t != "__RET__" and _para_of(t) != groups.para[g]:
+                    out.add(_para_of(t))
+        succ[g] = sorted(out)
+    insts = [(n, g) for n in names for g in groups.actors[n]["groups"]]
+    label: Dict[Tuple[str, str], int] = {}
+    ids: Dict[tuple, int] = {}
+    for i in insts:
+        label[i] = ids.setdefault((i[1], home[i[0]]), len(ids))
+    while True:
+        ids = {}
+        new: Dict[Tuple[str, str], int] = {}
+        for n, g in insts:
+            # A target outside the actor's span (a handler's, never rerouted) keeps the
+            # actor itself in the key: such a copy is never shared.
+            nxt = tuple(label[(n, gid_of[n][p])] if p in gid_of[n] else n
+                        for p in succ[g])
+            new[(n, g)] = ids.setdefault((label[(n, g)], nxt), len(ids))
+        if len(ids) == len(set(label.values())):
+            break
+        label = new
+    first: Dict[int, str] = {}
+    rep = {i: first.setdefault(label[i], i[0]) for i in insts}
+    return home, rep
+
+
+def _reaches(graph: Dict[str, set], start: str, targets: set) -> bool:
+    """Whether ``start`` calls any of ``targets``, directly or through other calls."""
+    seen: set = set()
+    stack = list(graph.get(start, ()))
+    while stack:
+        t = stack.pop()
+        if t in targets:
+            return True
+        if t not in seen:
+            seen.add(t)
+            stack.extend(graph.get(t, ()))
+    return False
 
 
 def _find_cycle(graph: Dict[str, set]) -> Optional[List[str]]:
@@ -204,12 +303,13 @@ def _flatten(config: dict, ordered: List[str], sections: Dict[str, List[str]],
     if not states or not initial:
         return out
 
-    main_states, actor_configs = _invoke_transform(states, initial, ordered, sections)
+    main_states, groups = _invoke_groups(states, initial, ordered, sections)
     config["states"] = main_states
-    if not actor_configs:
-        return out          # PERFORM-free program: _invoke_transform is an identity
+    if not groups.actors:
+        return out          # PERFORM-free program: _invoke_groups is an identity
 
-    cycle = _find_cycle(_actor_call_graph(actor_configs))
+    graph = _actor_call_graph(groups)
+    cycle = _find_cycle(graph)
     if cycle:
         raise ReactiveLoweringError(
             "reactive target: recursive PERFORM cycle "
@@ -221,34 +321,61 @@ def _flatten(config: dict, ordered: List[str], sections: Dict[str, List[str]],
         )
 
     flat: Dict[str, dict] = dict(main_states)
+    home, rep = _share_plan(groups, graph)
 
     # 1. namespace every actor body into the one map (a paragraph can appear both
-    #    standalone and inside a THRU range - the copies must stay disjoint).
-    for name, cfg in sorted(actor_configs.items()):
+    #    standalone and inside a THRU range - the copies stay disjoint unless they
+    #    behave the same, `_share_plan`).
+    for name in sorted(groups.actors):
+        a = groups.actors[name]
         target = name[len("actor:"):]
-        ret_key = f"RET-{target}"
-        n = 2
-        while ret_key in taken:                       # never shadow real COBOL data
-            ret_key, n = f"RET-{target}-{n}", n + 1
-        taken.add(ret_key)
-        out.ret_fields[target] = ret_key
+        back = home[name][len("actor:"):]               # whose return it returns through
+        if back == target:
+            ret_key = f"RET-{target}"
+            n = 2
+            while ret_key in taken:                     # never shadow real COBOL data
+                ret_key, n = f"RET-{target}-{n}", n + 1
+            taken.add(ret_key)
+            out.ret_fields[target] = ret_key
+        else:
+            out.ret_fields[target] = out.ret_fields[back]
+        gid_of = {groups.para[g]: g for g in a["groups"]}
+
+        def where(t: str, name=name, back=back, gid_of=gid_of) -> str:
+            if t == "__RET__":
+                return _ns(back, t)
+            g = gid_of.get(_para_of(t))
+            return _ns((rep[(name, g)] if g else name)[len("actor:"):], t)
+
         origin: Dict[str, str] = {}
-        for sid, st in cfg.get("states", {}).items():
-            nsid = _ns(target, sid)
-            flat[nsid] = _retarget(st, target)    # actor states are private copies
-            origin[nsid] = sid
+        elsewhere: Dict[str, str] = {}
+        for g in a["groups"]:
+            if rep[(name, g)] != name:
+                elsewhere[groups.para[g]] = rep[(name, g)][len("actor:"):]
+                continue
+            for sid, st in groups.groups[g].items():
+                nsid = _ns(target, sid)
+                flat[nsid] = _retarget(copy_tree(st), target, where)
+                origin[nsid] = sid
+        if back == target:
+            flat[_ns(target, "__RET__")] = {"type": "final"}
+            origin[_ns(target, "__RET__")] = "__RET__"
         out.inline[target] = {
             "prefix": f"{target}__",
-            "initial": _ns(target, cfg["initial"]),
-            "return": _ns(target, "__RET__"),
-            "retField": ret_key,
+            "initial": where(a["initial"]),
+            "return": _ns(back, "__RET__"),
+            "retField": out.ret_fields[target],
             "states": origin,
-            "sites": {},
         }
+        if elsewhere:
+            # The paragraphs this range runs from another range's namespace (overlapping
+            # THRU ranges), each with the range whose `states` lists them.
+            out.inline[target]["sharedParagraphs"] = elsewhere
+        out.inline[target]["sites"] = {}
 
     # 2. every invoke site (in main OR inside another inlined body) becomes
     #    "record where to come back to, then jump into the callee".
-    dispatch: Dict[str, List[Tuple[str, str]]] = {}
+    dispatch: Dict[str, List[Tuple[str, str, str]]] = {}   # return state -> its sites
     for sid, st in list(flat.items()):
         src = (st.get("invoke") or {}).get("src") or ""
         if not src.startswith("actor:"):
@@ -264,7 +391,7 @@ def _flatten(config: dict, ordered: List[str], sections: Dict[str, List[str]],
         ret_key = out.ret_fields[target]
         set_action = f"set_ret_{target}_at_{sid}"
         out.set_ops[set_action] = (ret_key, sid)
-        dispatch.setdefault(target, []).append((sid, cont))
+        dispatch.setdefault(out.inline[target]["return"], []).append((target, sid, cont))
         out.inline[target]["sites"][sid] = cont
         flat[sid] = {"entry": [set_action],
                      "always": [{"target": out.inline[target]["initial"]}]}
@@ -272,16 +399,17 @@ def _flatten(config: dict, ordered: List[str], sections: Dict[str, List[str]],
     # 3. each inlined body's return becomes a guarded dispatch back to its call sites.
     #    Every edge is guarded: the set-actions enumerate exactly these site literals, so
     #    a non-match is impossible absent a bug - and stalling is more honest than
-    #    jumping somewhere plausible but wrong.
-    for target, sites in dispatch.items():
-        ret_key = out.ret_fields[target]
+    #    jumping somewhere plausible but wrong. Ranges sharing a return share its field,
+    #    and the site literal alone says where to go back to.
+    for ret_state, sites in dispatch.items():
         edges = []
-        for site, cont in sites:
+        for target, site, cont in sites:
+            ret_key = out.ret_fields[target]
             g = f"ret_{target}_at_{site}"
             out.guards[g] = {"op": "rel", "left": ret_key, "rel": "=",
                              "right": f"'{site}'"}
             edges.append({"guard": g, "target": cont})
-        flat[out.inline[target]["return"]] = {"always": edges}
+        flat[ret_state] = {"always": edges}
 
     config["states"] = flat
     return out

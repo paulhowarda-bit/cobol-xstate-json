@@ -53,7 +53,16 @@ PRODUCER = "cobol-xstate"
 #: ``{"entry": i}``) instead of a copy of that route; an edge with more than one guard is
 #: labelled ``guards#i``, naming that same route rather than listing its guards.
 #: `business.expand_business_view` rebuilds the version-4 form.
-VIEW_SCHEMA_VERSION = 5
+#:
+#: 6: overlapping PERFORM ... THRU ranges no longer copy each paragraph into every range.
+#: The bundle (and ``--machine-only``) gains ``paragraphs``: each paragraph node that more
+#: than one chart holds, once, with those charts holding ``{"ref": id}`` in its place
+#: (`harel.expand_charts` inlines them; the table is empty when nothing is shared). In the
+#: reactive view, ranges that never call one another share those states and one return:
+#: their ``inline`` entries share ``return`` and ``retField``, ``states`` lists only what
+#: sits under the range's own prefix, and ``sharedParagraphs`` names the range whose
+#: prefix holds the rest.
+VIEW_SCHEMA_VERSION = 6
 
 from .errors import (
     CobolXstateError,

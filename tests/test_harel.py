@@ -177,3 +177,34 @@ def test_perimeter_tags_survive_the_restructuring():
     found += [s for c in b["charts"].values() for _k, s in _walk(c["states"])
               if s.get("meta", {}).get("perimeter")]
     assert found, "perimeter tags were lost when the machine was restructured"
+
+
+def test_overlapping_thru_ranges_write_each_paragraph_once():
+    """restart.cbl performs STEP-k THRU STEP-EXIT for every k, so each range holds every
+    later step. Every chart used to carry its own copy of each paragraph it spans - N
+    ranges, N^2/2 copies, a 542 MB bundle for an 800-step program. A paragraph node more
+    than one chart holds is now in ``paragraphs`` once and those charts say ``{"ref"}``;
+    ``expand_charts`` gives back exactly the self-contained charts."""
+    import json
+    from cobol_xstate.emitter import _invoke_transform, copy_tree
+    from cobol_xstate.harel import _nest_chart, expand_charts
+    m = build_machine(parse_program((EXAMPLES / "restart.cbl").read_text()),
+                      source_name="restart.cbl")
+    bundle = m.bundle()
+    assert set(bundle["paragraphs"]) == {"STEP-2", "STEP-3", "STEP-EXIT"}
+    assert json.dumps(bundle).count('"id": "STEP-3"') == 1
+    chart = bundle["charts"]["actor:STEP-1__THRU__STEP-EXIT"]
+    assert chart["states"]["STEP-3"] == {"ref": "STEP-3"}
+    assert "id" in chart["states"]["STEP-1"]           # held by one chart: in place
+    src = copy_tree(m.config)
+    _, charts = _invoke_transform(src["states"], src["initial"], m.paragraph_order,
+                                  m.sections)
+    assert expand_charts(bundle)["charts"] == {n: _nest_chart(c) for n, c in charts.items()}
+    assert "paragraphs" not in expand_charts(bundle)
+
+
+def test_a_program_without_overlapping_ranges_has_an_empty_paragraphs_table():
+    bundle = _bundle("banktran.cbl")
+    assert bundle["paragraphs"] == {}
+    assert not any(set(s) == {"ref"} for c in bundle["charts"].values()
+                   for s in c["states"].values())

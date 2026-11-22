@@ -1173,10 +1173,12 @@ so a corpus joined on it can assert that two programs share state when they do n
 ```jsonc
 {
   "format":     "xstate-v5-config",
-  "formatVersion": 5,   // per-distribution; `--target business` and `reactive` carry
+  "formatVersion": 6,   // per-distribution; `--target business` and `reactive` carry
                         // their OWN format names, cobol-xstate-business / -reactive
   "metadata":   { "program": "...", "source": "...", "generator": "...", "disclaimer": "..." },
   "machine":    { "id", "context", "states", "initial" },
+  "charts":     { "actor:<target>": { "initial", "states" } },   // each performed range
+  "paragraphs": { /* paragraph nodes more than one chart holds, once */ },
   "data":       { /* typed data dictionary */ },
   "semantics":  { "actions": {...}, "guards": {...} },
   "interface":  { "endpoints": [], "events": [], "perimeterStates": {}, "parameters": {} },
@@ -1201,6 +1203,22 @@ A bare XState v5 `createMachine` config: `id`, `initial`, `context`, `states`.
   still sees the boundary.
 - With DECLARATIVES or CICS HANDLE the root becomes `type: "parallel"` with a `PROGRAM`
   region and an orthogonal `HANDLERS` region.
+
+### `charts` and `paragraphs`
+
+`charts` holds each PERFORM target's own chart, keyed `actor:<target>` — what the
+machine's `invoke` of that target runs, with a `__RET__` final for the return. A `THRU`
+range's chart holds every paragraph of its span; a section's, every member.
+
+Overlapping ranges hold the same paragraphs: restart-from-step code performs
+`STEP-k THRU STEP-EXIT` for every k, so each range holds every later step. A paragraph
+node that more than one chart holds is written once, in `paragraphs` (keyed by the
+paragraph name, `P#2` for a second form — a paragraph whose exits leave one range but not
+another), and each of those charts holds `{"ref": "<id>"}` in its place. Written whole
+into every chart, 800 such ranges made a 542 MB bundle; written once, it is linear but
+for one small reference per range per paragraph. `cobol_xstate.harel.expand_charts(bundle)`
+puts each node back in place, every chart a self-contained XState config again
+(`formatVersion` 5's form). With no overlap, `paragraphs` is `{}`.
 
 ### `data` — the typed data dictionary
 

@@ -736,4 +736,4 @@ def test_the_expanded_view_is_the_full_form():
         for edge in st.get("always", []):
             assert {"via", "guards", "events"} <= set(edge["meta"])
             assert not (edge.get("guard") or "").startswith("guards#")
-    assert raw["formatVersion"] == 5
+    assert raw["formatVersion"] >= 5      # the business form since version 5

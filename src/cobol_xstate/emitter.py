@@ -906,25 +906,73 @@ def _prune(states: dict, initial: str) -> dict:
     return {k: v for k, v in states.items() if k in seen}
 
 
-def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: List[str],
-                  sections: Optional[Dict[str, List[str]]] = None) -> Dict[str, dict]:
-    """Build an actor config for every PERFORM target reachable from `seed`, slicing the
-    owned paragraph(s) out of the shared `pool` (so cross-region and THRU-range PERFORMs
+class ActorGroups:
+    """Every actor's states, with each paragraph's processed states held ONCE.
+
+    Inside an actor, a paragraph's states differ from the pool only where an edge leaves
+    the actor's owned span and becomes the return (`_reroute_to_return`); the PERFORM
+    split depends on nothing actor-specific. So a paragraph has one processed form per set
+    of exits that leave - in practice one - and every actor whose span holds it can share
+    that form. Restart-from-step code (``PERFORM S-k THRU S-LAST-EXIT`` for every k) used
+    to copy every paragraph into every range that held it: N ranges, N^2/2 copies, a
+    542 MB bundle for an 800-step program.
+
+    ``groups`` maps a group id - the paragraph name, then ``P#2``, ``P#3`` for further
+    forms - to that paragraph's states (split and rerouted). ``actors`` maps each actor
+    name to ``{"initial", "groups"}``, its groups in the order its states run. ``uses``
+    counts the actors holding each group. `expand` gives one actor's full private config,
+    the form `_build_actors` returned before."""
+
+    def __init__(self) -> None:
+        self.groups: Dict[str, dict] = {}
+        self.para: Dict[str, str] = {}           # group id -> its paragraph
+        self.actors: Dict[str, dict] = {}
+        self.uses: Dict[str, int] = {}
+
+    def expand(self, name: str) -> dict:
+        a = self.actors[name]
+        states: dict = {}
+        for gid in a["groups"]:
+            states.update(copy_tree(self.groups[gid]))
+        states["__RET__"] = {"type": "final"}
+        return {"initial": a["initial"], "states": states}
+
+    def expand_all(self) -> Dict[str, dict]:
+        return {name: self.expand(name) for name in self.actors}
+
+
+def _exits(states: dict) -> List[str]:
+    """Every target `_reroute_to_return` may rewrite, in the order it meets them."""
+    out: List[str] = []
+    for st in states.values():
+        for t in st.get("always", []) or []:
+            if t.get("target"):
+                out.append(t["target"])
+        inv = st.get("invoke")
+        if inv and inv.get("onDone") and inv["onDone"].get("target"):
+            out.append(inv["onDone"]["target"])
+    return out
+
+
+def _actor_groups(pool: dict, buildable: Dict[str, str], seed: set, ordered: List[str],
+                  sections: Optional[Dict[str, List[str]]] = None) -> ActorGroups:
+    """Build an actor for every PERFORM target reachable from `seed`, slicing the owned
+    paragraph(s) out of the shared `pool` (so cross-region and THRU-range PERFORMs
     resolve). A range target owns its whole paragraph span; a section owns its members;
-    a plain target owns itself."""
-    actor_configs: Dict[str, dict] = {}
-    # Slicing an actor's states out of the pool used to be a scan of EVERY state per
-    # actor - a `_para_of` (a str.split) on each key, once per PERFORM target - which is
-    # quadratic in exactly the `PERFORM p THRU p-EXIT` house style: 23M calls and 7.3 s
-    # for one Harel view of a 1,600-paragraph program, paid again for the reactive view.
-    # Index the pool by paragraph once; an actor then takes the union of its owner's
-    # buckets. `position` restores pool order across those buckets, because the key
-    # order of an actor's states is what the goldens hash.
+    a plain target owns itself. Each paragraph's processed states are built once per form
+    and shared (`ActorGroups`)."""
+    out = ActorGroups()
+    # Index the pool by paragraph once; an actor then takes its owner's buckets. Slicing
+    # used to scan EVERY state per actor - quadratic in the `PERFORM p THRU p-EXIT` house
+    # style (23M calls, 7.3 s for one Harel view of a 1,600-paragraph program).
     by_para: Dict[str, List[str]] = {}
     position: Dict[str, int] = {}
     for i, k in enumerate(pool):
         position[k] = i
         by_para.setdefault(_para_of(k), []).append(k)
+    split: Dict[str, Tuple[dict, set, List[str]]] = {}   # paragraph -> states, calls, exits
+    forms: Dict[Tuple[str, Tuple[str, ...]], str] = {}  # (paragraph, exits leaving) -> gid
+    count: Dict[str, int] = {}                           # paragraph -> forms so far
     # Drain the work list in a DEFINED order. `seed` and `needed` are sets, so iterating
     # them directly made actor build order - and therefore the key order of actorConfigs
     # in the emitted module and of `charts` in the JSON bundle - vary run to run on
@@ -934,25 +982,51 @@ def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: Lis
     while work:
         target = work.pop()
         name = f"actor:{target}"
-        if name in actor_configs:
+        if name in out.actors:
             continue
         owner, initial = _target_owner(target, ordered, sections, index)
         if owner is None:
             continue
-        keys = [k for p in owner for k in by_para.get(p, ())]
-        keys.sort(key=position.__getitem__)
-        own = {k: copy_tree(pool[k]) for k in keys}   # private: rerouted in place below
-        if initial not in own:
+        # The owner's paragraphs in the order their states sit in the pool - the key order
+        # of an actor's states is what the goldens hash.
+        paras = sorted((p for p in owner if p in by_para),
+                       key=lambda p: position[by_para[p][0]])
+        if _para_of(initial) not in by_para or initial not in by_para[_para_of(initial)]:
             continue
         needed: set = set()
-        states: dict = {}
-        for k, st in own.items():
-            _emit_split(k, st, states, buildable, needed)
-        _reroute_to_return(states, owner)
-        states["__RET__"] = {"type": "final"}
-        actor_configs[name] = {"initial": initial, "states": states}
+        gids: List[str] = []
+        for para in paras:
+            if para not in split:
+                states: dict = {}
+                calls: set = set()
+                for k in by_para[para]:
+                    _emit_split(k, pool[k], states, buildable, calls)
+                split[para] = (states, calls, _exits(states))
+            states, calls, exits = split[para]
+            needed |= calls
+            leaving = tuple(sorted({t for t in exits
+                                    if _para_of(t) not in owner or t == "__END__"}))
+            gid = forms.get((para, leaving))
+            if gid is None:
+                n = count[para] = count.get(para, 0) + 1
+                gid = para if n == 1 else f"{para}#{n}"
+                forms[(para, leaving)] = gid
+                group = copy_tree(states)                # private: rerouted in place
+                _reroute_to_return(group, owner)
+                out.groups[gid] = group
+                out.para[gid] = para
+            gids.append(gid)
+            out.uses[gid] = out.uses.get(gid, 0) + 1
+        out.actors[name] = {"initial": initial, "groups": gids}
         work.extend(sorted(needed, reverse=True))
-    return actor_configs
+    return out
+
+
+def _build_actors(pool: dict, buildable: Dict[str, str], seed: set, ordered: List[str],
+                  sections: Optional[Dict[str, List[str]]] = None) -> Dict[str, dict]:
+    """Every actor as its own full config, ``{initial, states}`` with a `__RET__` final -
+    `_actor_groups` expanded, each actor's states a private copy."""
+    return _actor_groups(pool, buildable, seed, ordered, sections).expand_all()
 
 
 def _invoke_transform(orig_states: dict, initial: str, ordered: List[str],
@@ -960,12 +1034,20 @@ def _invoke_transform(orig_states: dict, initial: str, ordered: List[str],
                       ) -> Tuple[dict, Dict[str, dict]]:
     """Return (main_states, actor_configs). Performs become invokes of actor machines;
     main is pruned to what is reachable from `initial` (the un-performed paragraph copies
-    fall away). Each actor config is {initial, states} with a `__RET__` final.
+    fall away). Each actor config is {initial, states} with a `__RET__` final, its states
+    a private copy (`_invoke_groups` is the shared form)."""
+    main_new, groups = _invoke_groups(orig_states, initial, ordered, sections)
+    return main_new, groups.expand_all()
+
+
+def _invoke_groups(orig_states: dict, initial: str, ordered: List[str],
+                   sections: Optional[Dict[str, List[str]]] = None,
+                   ) -> Tuple[dict, ActorGroups]:
+    """`_invoke_transform` with each paragraph's actor states held once (`ActorGroups`).
 
     The main states returned SHARE objects with ``orig_states`` (splitting never writes
     to its input), so a caller hands in states it owns - every caller does, a private
-    copy of the machine's config. Actor states are copied, because one paragraph's
-    states can sit in several actors and each is rerouted in place."""
+    copy of the machine's config. The groups are copies, rerouted in place."""
     buildable = _buildable_targets(orig_states, ordered, sections)
     main_new: dict = {}
     sink: set = set()
@@ -975,7 +1057,7 @@ def _invoke_transform(orig_states: dict, initial: str, ordered: List[str],
 
     seed = {inv["src"][len("actor:"):] for s in main_new.values()
             for inv in [s.get("invoke") or {}] if inv.get("src")}
-    return main_new, _build_actors(orig_states, buildable, seed, ordered, sections)
+    return main_new, _actor_groups(orig_states, buildable, seed, ordered, sections)
 
 
 def _invoke_transform_parallel(regions: dict, ordered: List[str],
@@ -984,6 +1066,14 @@ def _invoke_transform_parallel(regions: dict, ordered: List[str],
     """Parallel (DECLARATIVES/HANDLE) machine: transform each region's flow into invokes,
     building actors from a pool unioned across all regions so a handler can PERFORM a
     main-flow paragraph and vice versa."""
+    new_regions, groups = _invoke_groups_parallel(regions, ordered, sections)
+    return new_regions, groups.expand_all()
+
+
+def _invoke_groups_parallel(regions: dict, ordered: List[str],
+                            sections: Optional[Dict[str, List[str]]] = None,
+                            ) -> Tuple[dict, ActorGroups]:
+    """`_invoke_transform_parallel` with the actors' states held once (`ActorGroups`)."""
     pool: dict = {}
     for r in regions.values():
         pool.update(r.get("states", {}))
@@ -1001,7 +1091,7 @@ def _invoke_transform_parallel(regions: dict, ordered: List[str],
         new_regions[name] = nr
         seed |= sink
 
-    return new_regions, _build_actors(pool, buildable, seed, ordered, sections)
+    return new_regions, _actor_groups(pool, buildable, seed, ordered, sections)
 
 
 # --------------------------------------------------------------------------- #

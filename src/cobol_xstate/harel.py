@@ -46,9 +46,10 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 from .emitter import (
+    ActorGroups,
     copy_tree,
-    _invoke_transform,
-    _invoke_transform_parallel,
+    _invoke_groups,
+    _invoke_groups_parallel,
     _para_of,
     retarget_on,
 )
@@ -157,17 +158,60 @@ def _nest_chart(chart: dict) -> dict:
     return out
 
 
-def to_harel(machine) -> Tuple[dict, Dict[str, dict]]:
-    """Return ``(config, charts)`` - the contract's Harel view of ``machine``.
+#: The key of a chart state standing for a paragraph node written once in the bundle's
+#: ``paragraphs`` table, because more than one chart holds it.
+REF = "ref"
+
+
+def _charts(groups: ActorGroups) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+    """(charts, paragraphs). Each paragraph's node is nested once; a chart holds it in
+    place when it is the only chart that does, and as ``{"ref": id}`` into ``paragraphs``
+    when several do - overlapping ``PERFORM ... THRU`` ranges, each of which used to
+    carry its own copy of every paragraph it spans (N ranges, N^2/2 copies)."""
+    nodes: Dict[str, dict] = {}
+    for gid, states in groups.groups.items():       # copies: nesting rewrites in place
+        (para, node), = _nest(states).items()
+        nodes[gid] = (para, node)
+    paragraphs = {gid: nodes[gid][1] for gid in groups.groups if groups.uses[gid] > 1}
+    charts: Dict[str, dict] = {}
+    for name, a in groups.actors.items():
+        states: Dict[str, dict] = {}
+        for gid in a["groups"]:
+            para, node = nodes[gid]
+            states[para] = {REF: gid} if gid in paragraphs else node
+        states.update(_nest({"__RET__": {"type": "final"}}))
+        init = a["initial"]
+        charts[name] = {"initial": _group_of(init) if _group_of(init) in states else init,
+                        "states": states}
+    return charts, paragraphs
+
+
+def expand_charts(bundle: dict) -> dict:
+    """The bundle (or ``--machine-only`` document) with every ``{"ref": id}`` chart state
+    replaced by its own copy of ``paragraphs[id]`` and the table dropped: each chart a
+    self-contained XState config again, as ``formatVersion`` 5 wrote them."""
+    out = dict(bundle)
+    table = out.pop("paragraphs", {})
+    out["charts"] = {
+        name: {**chart, "states": {k: (copy_tree(table[v[REF]])
+                                       if isinstance(v, dict) and set(v) == {REF} else v)
+                                   for k, v in chart["states"].items()}}
+        for name, chart in bundle["charts"].items()}
+    return out
+
+
+def to_harel(machine) -> Tuple[dict, Dict[str, dict], Dict[str, dict]]:
+    """Return ``(config, charts, paragraphs)`` - the contract's Harel view of ``machine``.
 
     ``config`` is the main chart: hierarchical, with PERFORM resolved to ``invoke`` and
     the never-executed physical fall-through pruned. ``charts`` maps each callee's actor
-    name to its own chart, the statechart model of a performed paragraph.
+    name to its own chart, the statechart model of a performed paragraph; a paragraph
+    node more than one chart holds is in ``paragraphs`` once (`_charts`).
     """
     src = copy_tree(machine.config)
     ordered = machine.paragraph_order
     sections = getattr(machine, "sections", {}) or {}
-    charts: Dict[str, dict] = {}
+    groups = ActorGroups()
 
     # Resolve PERFORM with the emitter's own transform - the runnable (`--target js`)
     # target's, tested under real XState - then add the two things a *drawable* statechart
@@ -179,13 +223,14 @@ def to_harel(machine) -> Tuple[dict, Dict[str, dict]]:
     # unioned across all regions (so a handler can PERFORM a main-flow paragraph and vice
     # versa) inside `_invoke_transform_parallel`; here each transformed region is nested.
     if src.get("type") == "parallel":
-        new_regions, charts = _invoke_transform_parallel(src["states"], ordered, sections)
+        new_regions, groups = _invoke_groups_parallel(src["states"], ordered, sections)
         src["states"] = {name: _nest_chart(nr) for name, nr in new_regions.items()}
     elif src.get("states") and src.get("initial"):
-        main_new, charts = _invoke_transform(
+        main_new, groups = _invoke_groups(
             src["states"], src["initial"], ordered, sections)
         nested = _nest_chart({"initial": src["initial"], "states": main_new})
         src["states"] = nested["states"]
         src["initial"] = nested["initial"]
 
-    return src, {name: _nest_chart(c) for name, c in charts.items()}
+    charts, paragraphs = _charts(groups)
+    return src, charts, paragraphs

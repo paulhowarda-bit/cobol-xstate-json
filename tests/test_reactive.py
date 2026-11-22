@@ -592,3 +592,93 @@ def test_the_cycle_check_survives_a_perform_chain_thousands_deep():
     assert _find_cycle(chain) is None
     chain["P3000"] = {"P2998"}
     assert _find_cycle(chain) == ["P2998", "P2999", "P3000", "P2998"]
+
+
+def _restart(step: str, src: str = None):
+    src = src or (EXAMPLES / "restart.cbl").read_text().replace(
+        "PIC 9    VALUE 2.", f"PIC 9    VALUE {step}.")
+    return build_machine(parse_program(src), source_name="restart.cbl")
+
+
+def test_overlapping_thru_ranges_inline_each_step_once():
+    """Each overlapping THRU range used to be inlined with its own copy of every step it
+    spans (N ranges, N^2/2 states: 76 MB for 400 steps). Ranges that never call one
+    another now share those states and one return: the same return field, one dispatch
+    over all their call sites, and the manifest says whose namespace holds what."""
+    mod = emit_reactive_module(_restart("2"))
+    config = _extract(mod, "machineConfig")
+    assert [k for k in config["states"] if k.endswith("__STEP-3")] == [
+        "STEP-1__THRU__STEP-EXIT__STEP-3"]
+    inline = _extract(mod, "manifest")["inline"]
+    one, two = inline["STEP-1__THRU__STEP-EXIT"], inline["STEP-2__THRU__STEP-EXIT"]
+    assert two["retField"] == one["retField"] and two["return"] == one["return"]
+    assert two["initial"] == "STEP-1__THRU__STEP-EXIT__STEP-2"
+    assert two["states"] == {}
+    assert two["sharedParagraphs"] == {p: "STEP-1__THRU__STEP-EXIT"
+                                       for p in ("STEP-2", "STEP-3", "STEP-EXIT")}
+    dispatch = config["states"][one["return"]]["always"]
+    assert len(dispatch) == 4      # every call site of all three ranges
+
+
+_NESTED_RANGES = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NESTED.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-CNT PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           PERFORM S-1 THRU S-EXIT
+           STOP RUN.
+       S-1.
+           ADD 1 TO WS-CNT
+           PERFORM S-2 THRU S-EXIT.
+       S-2.
+           ADD 10 TO WS-CNT.
+       S-EXIT.
+           EXIT.
+"""
+
+
+def test_ranges_that_call_one_another_keep_their_own_copies():
+    """S-1 THRU S-EXIT performs S-2 THRU S-EXIT, so both can be active at once: one
+    shared return field would be overwritten by the inner call. They keep a return and a
+    copy each, exactly as before."""
+    inline = _extract(emit_reactive_module(_restart("", _NESTED_RANGES)), "manifest")["inline"]
+    outer, inner = inline["S-1__THRU__S-EXIT"], inline["S-2__THRU__S-EXIT"]
+    assert outer["retField"] != inner["retField"]
+    assert "sharedParagraphs" not in outer and "sharedParagraphs" not in inner
+    assert "S-2__THRU__S-EXIT__S-2" in inner["states"]
+
+
+def _run_reactive_to_done(repo_tmp, machine, want):
+    (repo_tmp / "machine.mjs").write_text(emit_reactive_module(machine))
+    (repo_tmp / "cobolRuntime.mjs").write_text(RUNTIME.read_text())
+    driver = repo_tmp / "run.mjs"
+    driver.write_text(
+        "import { createActor } from 'xstate';\n"
+        "import machine from './machine.mjs';\n"
+        "const a = createActor(machine); a.start();\n"
+        "const s = a.getSnapshot();\n"
+        "if (s.status !== 'done') { console.error('status', s.status); process.exit(1); }\n"
+        f"const want = {json.dumps(want)};\n"
+        "for (const k in want) if (String(s.context[k]) !== want[k]) "
+        "{ console.error(k, 'got', s.context[k], 'want', want[k]); process.exit(1); }\n"
+        "process.exit(0);\n"
+    )
+    r = node_session.run(driver)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+@pytest.mark.parametrize("step,cnt,audit", [("1", "211", "1"), ("2", "210", "1"),
+                                            ("3", "200", "0")])
+def test_shared_ranges_return_to_the_right_call_site(repo_tmp, step, cnt, audit):
+    """Restarting at step k runs steps k..3 through the shared states, returns to the
+    EVALUATE, then runs STEP-3 THRU STEP-EXIT again from the second call site."""
+    _run_reactive_to_done(repo_tmp, _restart(step), {"WS-CNT": cnt, "WS-AUDIT": audit})
+
+
+@pytest.mark.skipif(not (NODE and HAS_XSTATE), reason="node+xstate not available")
+def test_ranges_that_call_one_another_still_run_correctly(repo_tmp):
+    _run_reactive_to_done(repo_tmp, _restart("", _NESTED_RANGES), {"WS-CNT": "21"})
