@@ -762,6 +762,8 @@ semantics.
 
 **It is a real XState v5 config**, so the same renderer that draws the faithful bundle
 draws this — which matters, because this is the view a human actually wants to look at.
+Both need the renderer to look interface `fields` up in `fieldSets` (see
+[`fieldSets`](#fieldsets--each-field-list-written-once)).
 Each state's distillation (`role`, `boundaryActions`, `decisions`, the stripped
 `internalSteps`, `cobol` provenance, `suggestedName`) rides in `meta`; each edge's
 `meta.transition` indexes `transitions`, which hold its route once: `via`, the technical
@@ -1558,6 +1560,16 @@ table across its interface, boundary actions and state `meta` (see `--target bus
 form `formatVersion` 6 wrote — for the bundle or the reactive view. The overlay a
 program's views read in memory (`Machine.interface()`) keeps its lists; only the
 written document indexes them.
+
+**A reader of the written document must resolve the index.** `fields` used to be a
+list and is now an integer, so a consumer that iterates it fails loudly on a
+`formatVersion` 7 document rather than drawing the wrong thing. That includes the
+statechart renderer (`harel-statechart-renderer`): until it looks `fields` up in
+`fieldSets`, it stops with `TypeError: 'int' object is not iterable` on the bundle, the
+business view and the reactive view alike. The change it needs is the same one
+`expand_fields` makes — replace each event's `fields` id with `fieldSets[id]` before
+reading the interface — and with it the renderer draws every view exactly as it drew
+the `formatVersion` 6 document.
 
 ### `columns` — the cross-program state identity
 

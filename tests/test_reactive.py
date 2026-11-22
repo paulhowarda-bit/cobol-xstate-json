@@ -20,7 +20,7 @@ from cobol_xstate.reactive import (_event_slug, _find_cycle, build_reactive_view
 from cobol_xstate.statechart import build_machine
 from manyread import READ_FIELDS, many_reads
 
-REPO =Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
 RUNTIME = REPO / "src" / "cobol_xstate" / "runtime" / "cobolRuntime.mjs"
 

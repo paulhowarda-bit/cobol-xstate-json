@@ -71,14 +71,18 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
 - **`interface`** — the external perimeter, in the same shape as the faithful bundle's:
   `endpoints` (typed external actors), `events` (each with `direction`, `endpoint`, the
   **`fields`** crossing, and `params` for data flowing the other way), and `parameters`
-  (the caller contract). A renderer draws the boundary here exactly as it does there.
-  Each boundary state's `meta` also carries `perimeter`, `inputFields` and
-  `outputFields`, so a consumer reading only `machine` sees the data crossing without
-  joining to `interface`. Boundary states are never collapsed, so an event's host
-  survives; the program's own parameter events re-anchor to `__ENTRY__`.
+  (the caller contract). An event's `fields` is an id into the top-level `fieldSets`
+  (below), as in the bundle; a renderer that resolves it there draws the boundary here
+  exactly as it does there. Each boundary state's `meta` also carries `perimeter`,
+  `inputFields` and `outputFields`, so a consumer reading `machine` sees which data
+  crosses without joining to `interface` — the two lists are `fieldSets` ids too, so it
+  still needs the document's `fieldSets` to name the fields. Boundary states are never
+  collapsed, so an event's host survives; the program's own parameter events re-anchor
+  to `__ENTRY__`.
 - **The report keys remain** for querying rather than drawing: `businessStates` (each
-  boundary action carrying its typed `fields`), `entry`, `transitions`, `collapsed`
-  (every removed state, with its reason), `counts`, `nameFillIn`, `flags`.
+  boundary action's `fields` a `fieldSets` id, typed through `pics`), `entry`,
+  `transitions`, `collapsed` (every removed state, with its reason), `counts`,
+  `nameFillIn`, `flags`.
 - **Routes are ids into tables, each thing written once** (`formatVersion` 5). Each
   `entry` and `transitions` item has `via` (the technical states it collapsed, in order)
   and `guards` (every guard on the route, in order) as ids: `via` indexes `stateNames`,
@@ -87,6 +91,14 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
   `k`'s business guards (all its guards if it has no business guard). `cobol_xstate.business.expand_business_view(view)` returns the
   full form — guard objects and state names in place, each edge's `meta` carrying its
   route, labels joined with AND — which is exactly what `formatVersion` 4 wrote.
+
+  Version 4 wrote every route out whole, twice (on the edge and in `transitions`), with
+  each guard's condition tree copied at every use. Routes on a report splitter are long
+  and genuine — the step from the main paragraph to report k exits k−1 report loops —
+  so a 27,627-line splitter's business view was 926 MB, half a million guard objects for
+  33 distinct guards. On our 1,000-report reproduction the tables take it from
+  782 MB to 18.7 MB as written (283.5 MB to 6.4 MB compact), and
+  `expand_business_view` gives back the version-4 document exactly.
 - **Field lists are ids into `fieldSets`, each distinct list written once**
   (`formatVersion` 7). An interface event's `fields`, a boundary action's `fields` and a
   state's `meta.inputFields` / `outputFields` are indexes into the view's top-level
@@ -99,14 +111,6 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
   40-record, 2,000-field FD made a 168 MB business view; written once it is 11.0 MB, built
   in 3.1 s instead of 38.8 s. `expand_business_fields(view)` resolves only these ids (the
   `formatVersion` 6 form); `expand_business_view` resolves them along with the routes.
-
-  Version 4 wrote every route out whole, twice (on the edge and in `transitions`), with
-  each guard's condition tree copied at every use. Routes on a report splitter are long
-  and genuine — the step from the main paragraph to report k exits k−1 report loops —
-  so a 27,627-line splitter's business view was 926 MB, half a million guard objects for
-  33 distinct guards. On our 1,000-report reproduction the tables take it from
-  782 MB to 18.7 MB as written (283.5 MB to 6.4 MB compact), and
-  `expand_business_view` gives back the version-4 document exactly.
 
 ### Limitation: parallel machines
 
