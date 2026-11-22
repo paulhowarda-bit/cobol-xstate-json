@@ -1835,8 +1835,12 @@ class FieldSets:
     and ``business.expand_business_view`` rebuild the full form from it."""
 
     def __init__(self) -> None:
-        self.lists: List[List[str]] = []
-        self._ids: Dict[Tuple[str, ...], int] = {}
+        # Id 0 is always the empty list. A reader written for the old form typically
+        # reads `ev.get("fields") or []`; 0 is the one falsy id, so it must mean what
+        # that reader takes it to mean, or the reader silently draws a populated list
+        # as no fields. Every other id is a nonzero int and fails such a reader loudly.
+        self.lists: List[List[str]] = [[]]
+        self._ids: Dict[Tuple[str, ...], int] = {(): 0}
 
     def id(self, fields: Sequence[str]) -> int:
         key = tuple(fields)

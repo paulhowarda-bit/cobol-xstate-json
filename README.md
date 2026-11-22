@@ -175,10 +175,10 @@ The default output is a JSON **bundle**:
   },
   "interface": {
     "endpoints": [ { "endpoint": "CUST", "type": "db2", "directions": ["get"] }, { "endpoint": "POSTLOG", "type": "program", "directions": ["create"] } ],
-    "events":    [ { "event": "GET.DB2.CUST", "direction": "get", "endpointType": "db2", "endpoint": "CUST", "fields": 0, "state": "1000-LOOKUP", "region": "PROGRAM", "line": 42 } ],
+    "events":    [ { "event": "GET.DB2.CUST", "direction": "get", "endpointType": "db2", "endpoint": "CUST", "fields": 1, "state": "1000-LOOKUP", "region": "PROGRAM", "line": 42 } ],
     "perimeterStates": { "1000-LOOKUP": { "region": "PROGRAM", "gets": ["GET.DB2.CUST"], "creates": [] } }
   },
-  "fieldSets": [ ["CUST-NAME","CUST-BALANCE"] ],   // each distinct field list once; an event's `fields` indexes it
+  "fieldSets": [ [], ["CUST-NAME","CUST-BALANCE"] ],   // each distinct field list once (0 is always []); an event's `fields` indexes it
   "provenance": { "<name>": { "kind": "state|guard|action", "cobol": "...", "line": N, "member": "COPYBOOK?" } },
   "flags":    [ { "paragraph": "...", "line": N, "message": "..." } ],
   "notes":    [ "..." ]

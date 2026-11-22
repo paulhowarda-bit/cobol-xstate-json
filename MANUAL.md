@@ -1553,7 +1553,8 @@ reads one file at many sites: written whole at each one, the same list grew the 
 with READ sites times record width — 300 READs of a 40-record, 2,000-field FD made a
 23.7 MB bundle and a 168 MB business view; with each list written once they are 8.8 MB
 and 11.0 MB.
-Every event carries an index, an empty list included. The reactive view writes its
+Every event carries an index, an empty list included, and index 0 is always the empty
+list (the table starts `[[], ...]` even when no event has one). The reactive view writes its
 `interface` the same way, beside its own `fieldSets`; the business view shares one
 table across its interface, boundary actions and state `meta` (see `--target business`).
 `cobol_xstate.interface.expand_fields(doc)` resolves every index back to its list — the
@@ -1563,10 +1564,16 @@ written document indexes them.
 
 **A reader of the written document must resolve the index.** `fields` used to be a
 list and is now an integer, so a consumer that iterates it fails loudly on a
-`formatVersion` 7 document rather than drawing the wrong thing. That includes the
-statechart renderer (`harel-statechart-renderer`): until it looks `fields` up in
-`fieldSets`, it stops with `TypeError: 'int' object is not iterable` on the bundle, the
-business view and the reactive view alike. The change it needs is the same one
+`formatVersion` 7 document rather than drawing the wrong thing. That is why 0 is
+reserved for the empty list: it is the one falsy id, and a reader that writes
+`ev.get("fields") or []` would otherwise read a populated list stored at 0 as no
+fields at all and carry on. With 0 meaning `[]`, such a reader is right wherever it
+does not fail.
+
+The statechart renderer (`harel-statechart-renderer`) is such a reader: until it looks
+`fields` up in `fieldSets`, it stops with `TypeError: 'int' object is not iterable` on
+the bundle, the business view and the reactive view of any program with an event that
+moves data. The change it needs is the same one
 `expand_fields` makes — replace each event's `fields` id with `fieldSets[id]` before
 reading the interface — and with it the renderer draws every view exactly as it drew
 the `formatVersion` 6 document.

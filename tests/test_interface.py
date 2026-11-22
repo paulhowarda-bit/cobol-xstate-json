@@ -1514,6 +1514,22 @@ def test_expanding_the_bundle_gives_back_the_overlay_every_view_reads():
     assert all(isinstance(e["fields"], list) for e in m.interface()["events"])
 
 
+def test_field_set_zero_is_the_empty_list():
+    """0 is the one falsy id, and a reader written for the list form typically reads
+    `ev.get("fields") or []`. Reserving 0 for the empty list means such a reader is
+    right whenever it does not fail: every populated list has a nonzero id, which it
+    cannot iterate, so it stops loudly instead of drawing a READ as moving no data."""
+    from cobol_xstate.business import build_business_view
+    from cobol_xstate.reactive import build_reactive_view
+    m = many_reads(3)
+    for doc in (m.bundle(), build_reactive_view(m), build_business_view(m)):
+        sets = doc["fieldSets"]
+        assert sets[0] == []
+        assert all(sets[i] for i in range(1, len(sets)))      # no other empty list
+        for e in doc["interface"]["events"]:
+            assert (e["fields"] == 0) == (sets[e["fields"]] == [])
+
+
 def test_the_machine_only_bundle_carries_no_field_sets():
     import json
     assert "fieldSets" not in json.loads(many_reads(2).to_json(machine_only=True))

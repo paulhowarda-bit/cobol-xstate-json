@@ -102,7 +102,7 @@ cobol-xstate prog.cbl --target business   # -> prog.business.json + prog.lineage
 - **Field lists are ids into `fieldSets`, each distinct list written once**
   (`formatVersion` 7). An interface event's `fields`, a boundary action's `fields` and a
   state's `meta.inputFields` / `outputFields` are indexes into the view's top-level
-  `fieldSets`; `pics` maps each field a boundary action carries to its picture (`null`
+  `fieldSets` (id 0 is always the empty list); `pics` maps each field a boundary action carries to its picture (`null`
   where the data division declares none), so the action's typed list is
   `[{"name": f, "pic": pics[f]} for f in fieldSets[i]]`. A `READ` with no `INTO` carries
   every leaf of every record its FD declares, and that list used to be written in full at
