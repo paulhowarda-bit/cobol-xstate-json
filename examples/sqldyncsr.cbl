@@ -4,7 +4,7 @@
       * A cursor DECLAREd FOR a PREPAREd statement, not FOR a select    *
       * list. Its columns do not exist until run time, so there is      *
       * nothing to recover - and that is an INHERENT unknown, not a     *
-      * failed recovery.                                                *
+      * failed recovery: its text is ACCEPTed (see sqlprepcand.cbl).    *
       *                                                                 *
       * Before the DECLARE's FOR form was recorded, an empty select     *
       * list here was indistinguishable from an unreadable one, so this *
@@ -35,7 +35,7 @@
            END-EXEC.
        PROCEDURE DIVISION.
        0000-MAIN.
-           MOVE 'SELECT ID, NAME FROM T_ANY' TO WS-STMT
+           ACCEPT WS-STMT
            EXEC SQL
                PREPARE DYNSTMT FROM :WS-STMT
            END-EXEC

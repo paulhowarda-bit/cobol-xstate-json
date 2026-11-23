@@ -1686,3 +1686,77 @@ def test_no_write_in_sqlwrite_leaves_a_field_without_a_column_or_a_reason():
             continue
         mapped = {c["hostVar"] for c in e.get("columns") or []}
         assert e.get("columnsUnresolved") or set(e["fields"]) <= mapped, e["endpoint"]
+
+
+# --------------------------------------------------------------------------- #
+# sqlprepcand (ledger item 153): a PREPAREd statement whose text the program builds
+# only from literals. The select list is in the source after all - once per way the
+# text is built - so the FETCH publishes each as numbered `dynamic` candidates, and a
+# text that takes anything else (here a LINKAGE item) still publishes none.
+# --------------------------------------------------------------------------- #
+
+def _cand_fetches():
+    iface = _iface("sqlprepcand.cbl")
+    return {e["cursor"]: e for e in iface["events"] if e["verb"] == "FETCH"}
+
+
+def test_filler_values_strung_into_a_varchar_give_one_candidate():
+    ev = _cand_fetches()["CSR_ONE"]
+    assert ev["endpointType"] == "dynamic_sql" and ev["dynamic"] is True
+    assert ev["columns"] == [
+        {"table": "ZZ_PRTC", "column": "ZZ_BRCH", "hostVar": "WS-A",
+         "dynamic": True, "candidate": 1},
+        {"table": "ZZ_PRTC", "column": "ZZ_BASE", "hostVar": "WS-B",
+         "dynamic": True, "candidate": 1}]
+    assert "1 candidate select list" in ev["columnNote"]
+
+
+def test_a_statement_built_on_two_paths_gives_two_candidates():
+    ev = _cand_fetches()["CSR_TWO"]
+    assert [(c["candidate"], c.get("table"), c["column"], c["hostVar"])
+            for c in ev["columns"]] == [
+        (1, "ZZ_TAB_A", "COL_A", "WS-A"), (1, "ZZ_TAB_A", "COL_B", "WS-B"),
+        (2, "ZZ_TAB_B", "COL_C", "WS-A"), (2, "ZZ_TAB_C", "COL_D", "WS-B")]
+    assert all(c["dynamic"] is True for c in ev["columns"])
+
+
+def test_a_statement_moved_from_linkage_gives_none():
+    ev = _cand_fetches()["CSR_LINK"]
+    assert "columns" not in ev
+    assert "no column mapping can exist" in ev["columnNote"]
+
+
+def test_candidates_stay_flagged_and_reach_every_view():
+    m = _machine_of("sqlprepcand.cbl")
+    flags = [f["message"] for f in m.flags if "FETCH on cursor" in f["message"]]
+    assert sum("candidate column mapping" in f for f in flags) == 2
+    assert sum("not statically knowable" in f for f in flags) == 1
+    fills = [f for f in m.lineage().run()["fills"] if f["verb"] == "FETCH"]
+    assert any(c.get("candidate") == 2 for f in fills for c in f["columns"])
+    for view in (build_business_view(m), build_reactive_view(m)):
+        assert '"candidate": 2' in json.dumps(view)
+
+
+@pytest.mark.parametrize("store", [
+    "READ ZZ-FILE INTO WS-SQL-TWO",            # an I-O statement fills it
+    "ACCEPT WS-SQL-TWO",
+    "CALL 'ZZFILL' USING WS-SQL-TWO",           # BY REFERENCE: the callee may store
+    "STRING 'X' DELIMITED BY SIZE INTO WS-SQL-TWO\n               WITH POINTER WS-P",
+    "STRING 'X' DELIMITED BY SIZE INTO WS-SQL-TWO (2:1)",
+    "MOVE 'X' TO WS-SQL-TWO(5:1)",              # reference-modified: part of the text
+    "MOVE WS-MODE TO WS-SQL-TWO",               # an item something else stores into
+])
+def test_one_store_that_is_not_literal_text_means_no_candidate(store):
+    from cobol_xstate.prepared_text import prepared_selects
+    src = (EXAMPLES / "sqlprepcand.cbl").read_text().replace(
+        "           END-IF\n", f"           END-IF\n           {store}\n", 1)
+    assert store in src and max(len(l) for l in src.splitlines()) <= 72
+    assert prepared_selects(parse_program(src), "STMT_TWO") == []
+    assert len(prepared_selects(parse_program(src), "STMT_ONE")) == 1
+
+
+def test_a_value_source_stored_into_is_not_literal_text():
+    from cobol_xstate.prepared_text import prepared_selects
+    src = (EXAMPLES / "sqlprepcand.cbl").read_text().replace(
+        "           GOBACK.", "           MOVE LK-STMT TO WS-SEL-ONE\n           GOBACK.")
+    assert prepared_selects(parse_program(src), "STMT_ONE") == []

@@ -211,7 +211,9 @@ def _column_of(fill: dict) -> Optional[str]:
 
 def _column_entry(fill: dict) -> Optional[dict]:
     for col in (fill.get("columns") or []):
-        if isinstance(col, dict) and \
+        # A `dynamic` entry is one candidate of a PREPAREd statement (ledger item 153),
+        # not what the source proves: never the column a reader is sent to.
+        if isinstance(col, dict) and not col.get("dynamic") and \
                 str(col.get("hostVar", "")).upper() == str(fill["field"]).upper():
             return col
     return None

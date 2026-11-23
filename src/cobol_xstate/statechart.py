@@ -1718,6 +1718,34 @@ def _mark_unfetched_opens(ctx: "_BuildCtx") -> None:
             spec["unfetchedCursor"] = m.group(1).upper()
 
 
+def _candidate_columns(program: Program, stmt: Optional[str], cursor: str,
+                       into: List[str]) -> List[dict]:
+    """A dynamic cursor's FETCH correlated against each candidate select list its
+    PREPAREd statement is built with (``prepared_text``): one entry per host variable
+    per candidate, each ``dynamic`` and numbered ``candidate``. A candidate whose arity
+    disagrees with the FETCH is dropped, as a static cursor's would get no mapping."""
+    from .interface import _fetch_columns
+    from .prepared_text import prepared_selects
+    if not stmt:
+        return []
+    out: List[dict] = []
+    n = 0
+    for row in prepared_selects(program, stmt):
+        cols, _note, _ = _fetch_columns(cursor, into, {cursor: row["selectList"]},
+                                        {cursor: row.get("selectDerivations") or []})
+        if not cols:
+            continue
+        n += 1
+        slot_tables = row.get("selectTables") or []
+        only = row["tables"][0] if len(row.get("tables") or []) == 1 else None
+        for k, entry in enumerate(cols):
+            table = slot_tables[k] if len(slot_tables) == len(cols) else only
+            if table and "column" in entry:
+                entry = {"table": table, **entry}
+            out.append({**entry, "dynamic": True, "candidate": n})
+    return out
+
+
 def _correlate_fetches(ctx: "_BuildCtx", program: Program,
                        program_tables: FrozenSet[str] = frozenset()) -> None:
     """Zip every FETCH's host variables against its cursor's DECLARE, once the whole
@@ -1816,6 +1844,25 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
             spec["cursorDynamic"] = True
             if stmt:
                 spec["preparedStatement"] = stmt
+            # Ledger item 153: when every store into the PREPAREd text is literal text,
+            # the select list IS in the source - once per way the text is built. Each
+            # is published as a CANDIDATE (`dynamic`, numbered), never as the mapping:
+            # which build reaches this FETCH is control flow.
+            candidates = _candidate_columns(program, stmt, cname, into)
+            if candidates:
+                spec["columns"] = candidates
+                n = max(c["candidate"] for c in candidates)
+                spec["columnNote"] = (
+                    f"cursor {cname} reads the PREPAREd statement {stmt}, whose text the "
+                    f"program builds only from literals: {n} candidate select list(s), "
+                    f"one per build, each entry marked dynamic - which one this FETCH "
+                    f"reads is decided at run time")
+                ctx.flag(para, line,
+                         f"dynamic SQL: EXEC SQL FETCH on cursor {cname}, DECLAREd FOR a "
+                         f"PREPAREd statement built from literal text - {n} candidate "
+                         f"column mapping(s) published, marked dynamic; which one is read "
+                         f"is decided at run time")
+                continue
             spec["columnNote"] = (
                 f"cursor {cname} reads the PREPAREd statement "
                 f"{stmt or f'named by {cname} (not recovered)'}; its select list is "

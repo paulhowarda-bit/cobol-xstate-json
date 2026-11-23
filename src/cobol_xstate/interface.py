@@ -760,8 +760,11 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                     # uses. The `<cursor X>` db2 endpoint this replaces was
                     # table-typed for something that has no statically knowable table,
                     # and never will have one.
+                    # `columns` only when the statement's text is built from literals
+                    # (ledger item 153): candidates, every entry marked `dynamic`.
                     hit = _hit("get", _DYNAMIC_SQL, "<dynamic-sql>", verb, into_fields,
-                               _dedup([h for h in host_vars if h not in into_fields]))
+                               _dedup([h for h in host_vars if h not in into_fields]),
+                               columns)
                     hit["dynamic"] = True
                     if cname:
                         hit["cursor"] = cname
