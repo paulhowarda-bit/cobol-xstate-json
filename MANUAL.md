@@ -1623,6 +1623,28 @@ Recovered from five shapes, and **only** where the source proves the corresponde
 | `DECLARE cur CURSOR FOR SELECT …` + `FETCH cur INTO …` | the columns are on the DECLARE and the host variables on the FETCH; the two are joined by cursor name after the whole program is compiled |
 | `INSERT INTO t VALUES (:a, :b)` (no column list) | Db2 defines the slots as the table's **declared order** — taken from the table's `DECLARE TABLE` (its DCLGEN, usually already in the source via `EXEC SQL INCLUDE`), joined after the whole program is compiled |
 
+**`valueColumns` — a column written from no host variable** (ledger item 161). An
+`INSERT ... VALUES` slot, an `UPDATE ... SET` assignment, or a `MERGE` arm's `SET` /
+`INSERT VALUES` that writes a column from a Db2 clock register or a literal names no
+field, so it has no `columns` entry. The statement's action spec (`semantics.actions`,
+and a `dataChange` write) carries it beside `columns` instead, in the shape a derived
+select-list item already uses:
+
+```json
+"valueColumns": [
+  { "column": "ZZ_STAT", "expression": "literal", "derivedFrom": [] },
+  { "column": "ZZ_UPD_TS", "expression": "register",
+    "register": "CURRENT TIMESTAMP", "derivedFrom": [] }
+]
+```
+
+`SET C = C + 1` gives `{"expression": "expression", "derivedFrom": ["C"]}`; a `MERGE`'s
+`USING` slot holding a literal counts as that literal, and a column both arms write from
+the same value is listed once. A slot that reads a host variable (`UPPER(:H)`) keeps its
+`derived` entry in `columns` and gets no `valueColumns` row. `columns` keeps its meaning
+and `columnNote` its prose. Not covered: a column-list-less `INSERT`, whose slots are
+zipped against the `DECLARE TABLE` at build time - its literal slots stay in the note.
+
 **Declarations are found by a whole-stream scan** — DATA DIVISION and copybooks
 included, where production code actually keeps them. A cursor `DECLARE` in
 WORKING-STORAGE (the common estate pattern: declared beside the DCLGEN in a copybook)

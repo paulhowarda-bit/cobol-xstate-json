@@ -464,6 +464,10 @@ def _with_columns(spec: dict, st: ExecStmt) -> dict:
         # that was never a contract - which is what the FETCH path already offered
         # and the two parser-side refusals did not.
         spec["columnsUnresolved"] = st.column_unresolved
+    if st.value_columns:
+        # The machine-readable form of what the note says in prose: a column written
+        # from the clock or a constant, rather than from no write at all.
+        spec["valueColumns"] = st.value_columns
     if st.cursor:
         spec["cursor"] = st.cursor               # a FETCH's join back to its DECLARE
     # Only the DYNAMIC form is stamped. `semantics.actions` is serialized into the

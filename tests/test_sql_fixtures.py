@@ -1760,3 +1760,46 @@ def test_a_value_source_stored_into_is_not_literal_text():
     src = (EXAMPLES / "sqlprepcand.cbl").read_text().replace(
         "           GOBACK.", "           MOVE LK-STMT TO WS-SEL-ONE\n           GOBACK.")
     assert prepared_selects(parse_program(src), "STMT_ONE") == []
+
+
+# --------------------------------------------------------------------------- #
+# sqlvalcol (ledger item 161): a column written from a clock register or a literal
+# --------------------------------------------------------------------------- #
+
+_TS = {"expression": "register", "register": "CURRENT TIMESTAMP", "derivedFrom": []}
+
+
+def _valcol_actions():
+    src = (EXAMPLES / "sqlvalcol.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="sqlvalcol.cbl")
+    return m.bundle()["semantics"]["actions"]
+
+
+def test_value_columns_reach_the_statement_spec():
+    """The spec holds `valueColumns` beside `columns`, so a consumer can tell a column
+    written from the clock or a constant from one the program never writes."""
+    acts = _valcol_actions()
+    ins = acts["exec_sql_insert"]
+    assert ins["columns"] == [{"column": "ZZ_ID", "hostVar": "WS-ID"}]
+    assert ins["valueColumns"] == [
+        {"column": "ZZ_STAT", "expression": "literal", "derivedFrom": []},
+        {"column": "ZZ_UPD_TS", **_TS}]
+    assert "columnNote" in ins                  # the prose note stays as it was
+    upd = acts["exec_sql_update"]
+    assert "columns" not in upd                 # `columns` keeps its meaning
+    assert upd["valueColumns"] == ins["valueColumns"]
+    assert acts["exec_sql_update_2"]["valueColumns"] == [
+        {"column": "ZZ_RUN_DT", "expression": "register", "register": "CURRENT DATE",
+         "derivedFrom": []},
+        {"column": "ZZ_RETRY", "expression": "expression", "derivedFrom": ["ZZ_RETRY"]}]
+    assert acts["exec_sql_merge"]["valueColumns"] == [
+        {"column": "ZZ_STAT", "expression": "literal", "derivedFrom": []},
+        {"column": "ZZ_UPD_TS", **_TS}]
+
+
+def test_a_write_from_host_variables_only_has_no_value_columns():
+    src = (EXAMPLES / "sqldml.cbl").read_text()
+    m = build_machine(parse_program(src), source_name="sqldml.cbl")
+    assert not any("valueColumns" in spec
+                   for spec in m.bundle()["semantics"]["actions"].values()
+                   if spec.get("verb") in ("INSERT", "UPDATE"))
