@@ -1757,3 +1757,98 @@ def test_a_group_read_never_shrinks_as_its_map_grows():
     less = _Tracked.of({"G": frozenset({o})})
     more = _Tracked.of({"G": frozenset({o}), "G#FILLER": frozenset()})
     assert lin._read("G", less) <= lin._read("G", more)
+
+
+# --------------------------------------------------------------------------- #
+# ledger items 154-160: fields that published no origin
+# --------------------------------------------------------------------------- #
+
+def _fills(d: dict, field: str) -> list:
+    return [f["event"] for f in d["fills"] if f["field"] == field]
+
+
+def _sources(d: dict, target: str) -> list:
+    return [f["sources"] for f in d["flow"] if f["target"] == target]
+
+
+def test_a_name_declared_in_several_records_is_filled_in_each():
+    # item 154: the READ fills IN-REC's members although the key for each name is the
+    # last declaration; the group MOVE is placed byte by byte into ORD-ENTRY.
+    d = _lin("dupnames.cbl")
+    assert _fills(d, "ORD-N") == ["GET.FILE.IN-FILE"]
+    assert _fills(d, "CUST-REF-N") == ["GET.FILE.IN-FILE"]
+    assert _origins(_row(d, "WS-OUT")) == {"GET.FILE.IN-FILE"}
+    assert not d["flags"]
+
+
+def test_a_qualified_reference_is_one_field_not_its_qualifier():
+    # item 155
+    d = _lin("qualref.cbl")
+    targets = {f["target"] for f in d["flow"]}
+    assert not targets & {"OF", "IN", "H", "R"}
+    assert _sources(d, "OPEN-DATE") == [["ACC-OPEN-D"]]
+    assert _sources(d, "B") == [["A"]] and _sources(d, "C") == [["A"]]
+    assert _sources(d, "CNT") == [["CNT", "N"]]
+    # INITIALIZE X OF R clears X only: CNT keeps N's origin
+    assert _origins(_row(d, "CNT")) == {"GET.CONSOLE.SYSIN"}
+    assert _sources(d, "WS-LEN") == [[]]          # LENGTH OF R is no value source
+    assert not any("cannot be placed" in f for f in d["flags"])
+
+
+def test_a_literal_that_spells_a_data_name_is_a_constant():
+    # item 156
+    d = _lin("litname.cbl")
+    assert _sources(d, "WS-TABLE-NM") == [[]]
+    assert _sources(d, "WS-X") == [[], []]
+    assert sorted(_sources(d, "WS-MSG")) == [[], ["TBL-KEY"]]
+    assert _sources(d, "TBL-GRP") == [[]]
+    assert _origins(_row(d, "WS-TABLE-NM")) == set()
+    assert not any("cannot be placed" in f for f in d["flags"])
+
+
+def test_get_diagnostics_fills_every_target_from_db2():
+    # item 157
+    d = _lin("getdiag.cbl")
+    for f in ("WS-ROWCNT", "WS-RC", "WS-ROWNUM", "WS-MSGTXT", "WS-ALL"):
+        assert set(_fills(d, f)) == {"GET.SYSTEM.DB2-DIAGNOSTICS"}, f
+    assert not _fills(d, "WS-COND")       # the condition number is a param
+    assert _origins(_row(d, "WS-OUT")) == {"GET.SYSTEM.DB2-DIAGNOSTICS"}
+
+
+def test_cics_receiving_options_are_fills():
+    # item 158
+    d = _lin("cicsrecv.cbl")
+    assert _fills(d, "WS-APPLID") == ["GET.SYSTEM.CICS-ASSIGN"]
+    assert _fills(d, "WS-ABCODE") == ["GET.SYSTEM.CICS-ASSIGN"]
+    assert set(_fills(d, "WS-RESP")) == {"GET.SYSTEM.CICS-RESPONSE"}
+    assert _fills(d, "WS-RESP2") == ["GET.SYSTEM.CICS-RESPONSE"]
+    assert _fills(d, "WS-CONT") == ["GET.CALLER.CALLER"]
+    assert _fills(d, "WS-WEB") == ["GET.CALLER.CALLER"]
+    assert _fills(d, "WS-IN") == ["GET.TERMINAL.terminal"]
+    assert _fills(d, "LK-REC") == ["GET.FILE.F2"] and _fills(d, "LK-A") == ["GET.FILE.F2"]
+    assert not _fills(d, "F2")            # no phantom field named after the file
+    assert "GET.SYSTEM.CICS-RESPONSE" in _origins(_row(d, "WS-OUT"))
+
+
+def test_a_store_is_carried_across_a_redefines():
+    # item 159: ACCEPT C-TIME reaches C-TIME-HOUR through FILLER REDEFINES C-TIME;
+    # a MOVE into F1 reaches G1 (the same bytes), not G2; bytes nothing writes give
+    # their alias no origin.
+    d = _lin("redefalias.cbl")
+    assert _origins(_row(d, "WS-OUT")) == {"GET.SYSTEM.SYSTEM-TIME"}
+    assert _origins(_row(d, "OUT-G1")) == {"GET.CONSOLE.SYSIN"}
+    assert _origins(_row(d, "OUT-G2")) == set()
+    assert _origins(_row(d, "OUT-NB")) == set()
+
+
+def test_the_file_status_field_is_filled_by_every_io_on_its_file():
+    # item 160
+    d = _lin("filestat.cbl")
+    fs = [f for f in d["fills"] if f["field"] == "WS-FS"]
+    assert {f["event"] for f in fs} == {"GET.RESPONSE.IN-FILE"}
+    assert len(fs) == 3                   # the OPEN, the READ and the CLOSE
+    assert _origins(_row(d, "WS-MSG")) == {"GET.RESPONSE.IN-FILE"}
+    assert _origins(_row(d, "WS-OFS")) == {"GET.RESPONSE.OUT-FILE"}
+    assert _sources(d, "OUT-REC") == [["WS-REC"]]     # WRITE ... FROM still flows
+    assert not [f for f in d["fills"]
+                if f["endpoint"] == "NOSTAT-FILE" and f["endpointType"] == "response"]

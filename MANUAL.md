@@ -834,6 +834,16 @@ is a deposit.*
   plus the `action`, whose `kind` in the bundle's `semantics.actions` tells a copy from a
   computation). Both carry `state`/`baseState`. See
   [docs/lineage-target.md](docs/lineage-target.md#fills-and-flow--the-chain-between-the-two-ends).
+  Every `OPEN`/`READ`/`WRITE`/`REWRITE`/`DELETE`/`START`/`CLOSE` on a file with a
+  `FILE STATUS` clause also fills the status field (`GET.RESPONSE.<file>`, the event a
+  branch on it publishes). A qualified reference `X OF G` is one reference to `X` (the
+  qualifier is never a source or a target, nor is the object of `LENGTH OF`), and a
+  literal that spells a data name is a constant, never a read of that field.
+- **REDEFINES** carries a store across: a write to an item is also a write to every item
+  of another alternative of the same bytes (the redefined item, each named
+  `REDEFINES`, each `FILLER REDEFINES`) - placed by byte offset within the alternative
+  when every item of both can be sized, otherwise to every item of the other
+  alternative. It is a union, never a replacement.
 - **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
   `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
 - **`changedByProgram`** means the program *assigns* it. An input event's own fill
@@ -1276,6 +1286,8 @@ Every DATA DIVISION item, keyed by name:
 | `redefines` | the item redefined |
 | `value` | the `VALUE` clause |
 | `type` | category, usage, pic, digits, decimal scale, signed |
+| `declarations` | only on a name declared **more than once** (a record and its work copy, one copybook in an input and an output layout): every declaration, in declaration order, each with the keys that can differ (`level`, `line`, `parent`, `parentLine`, `section`, `file`, `member`, `redefines`, `occurs`, `occursDependingOn`, `sync`, `signSeparate`, `type`, and a group's `fillers`). The key itself is the **last** declaration, as always; a record's members are every item declared under it, whichever declaration kept the key |
+| `parentLine` | on an item whose `parent` is `FILLER`: the `line` of that FILLER, whose object (in its group's `fillers`) lists the item under `members` - so an item under `FILLER REDEFINES X` can be followed to X |
 
 88-levels appear as `{"kind": "condition-name", "of": parent, "values": [...], "ranges": [[lo,hi]]}`.
 
@@ -1782,6 +1794,12 @@ it is not among the event's `fields`.
 | `ACCEPT x FROM DATE/DAY/TIME` | a **system-clock** read, not terminal input |
 | CICS `ASKTIME ABSTIME(x)` | `x`, a `SYSTEM-TIME` read (the same clock read). `FORMATTIME` crosses nothing: each output option is written from its `ABSTIME` operand, a lineage `flow` record |
 | SQL `SET :x = …` / `VALUES … INTO :x` | `CURRENT DATE` / `TIME` / `TIMESTAMP` is a `SYSTEM-DATE` / `SYSTEM-TIME` read filling `x`; a fullselect is a read of its first table (its host vars in `params`); other host vars in the expression are a lineage `flow` record into `x` |
+| SQL `GET DIAGNOSTICS [CONDITION n] :x = item, …` | every target, a `get` of `system` endpoint `DB2-DIAGNOSTICS` (Db2's own diagnostics area); a host variable after `CONDITION` is in `params` |
+| CICS `RESP(x)` / `RESP2(x)`, any command | `x`, a `get` of `system` endpoint `CICS-RESPONSE`, beside the command's own event |
+| CICS `ASSIGN opt(x) …` | every option's field, a `get` of `system` endpoint `CICS-ASSIGN` |
+| CICS `GET CONTAINER … INTO(x)` / `WEB RECEIVE INTO(x)` | `x`, a `get` of `CALLER` (the invoker's channel / web request) |
+| CICS `CONVERSE … INTO(x)` | `x`, a mapless `terminal` read carrying `terminalInput`, like a mapless `RECEIVE` |
+| CICS `READ … SET(ADDRESS OF x)` | `x` and its fields (locate mode); with neither `INTO` nor `SET`, no field |
 | SQL `SELECT/FETCH … INTO` | INTO host vars in `fields`; `WHERE` host vars in `params` |
 | SQL `INSERT/UPDATE/DELETE` | its host variables |
 | SQL cursor `FETCH` | endpoint resolves to the **table** via `DECLARE … CURSOR FOR … FROM t`, including a rowset `FETCH NEXT ROWSET FROM cur` (the positioning keywords are not mistaken for the cursor name) |

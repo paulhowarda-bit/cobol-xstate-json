@@ -1416,8 +1416,21 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
     directly contains - a value table or a report line is all FILLER ... VALUE, and
     without the list those constants were not in the bundle at all. A FILLER's object
     carries the keys a named item has, less ``parent`` (the list it is in says that);
-    a FILLER group's own FILLERs are listed on its object."""
+    a FILLER group's own FILLERs are listed on its object.
+
+    A name declared more than once (a record and its work copy, one copybook in an input
+    and an output layout) keeps its LAST declaration as the key, as it always did, and
+    the key also lists EVERY declaration under ``declarations``, in declaration order,
+    with the keys that differ between them (ledger item 154) - so a record keeps the
+    members whose name the last declaration took elsewhere.
+
+    A named item under a FILLER group records ``parent: "FILLER"``, which cannot say
+    which FILLER; it also carries that FILLER's ``parentLine``, and the FILLER's object
+    lists its named ``members`` (ledger item 159), so a consumer can follow the item to
+    the bytes a ``FILLER REDEFINES`` renames."""
     out: Dict[str, dict] = {}
+    # name -> [(declaration object, the item's full entry)], in declaration order.
+    decls: Dict[str, List[tuple]] = {}
     # (level, name, entry) of the groups enclosing the current item, innermost last:
     # the entry a FILLER's object goes into, even when that group is itself a FILLER.
     open_groups: List[tuple] = []
@@ -1436,8 +1449,20 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
             entry["member"] = it.origin
         if it.section:
             entry["section"] = it.section
+        # Popped to this item's level BEFORE its parent is read: the innermost open
+        # group is then the one that contains it.
+        if it.level in (66, 77) or it.level == 1:
+            open_groups = []
+        else:
+            while open_groups and open_groups[-1][0] >= it.level:
+                open_groups.pop()
         if it.parent:
             entry["parent"] = it.parent
+            if it.parent == "FILLER" and open_groups and open_groups[-1][1] == "FILLER":
+                # Which FILLER: the line of the one whose `fillers` object holds it.
+                entry["parentLine"] = open_groups[-1][2]["line"]
+                if it.name != "FILLER":
+                    open_groups[-1][2].setdefault("members", []).append(it.name)
         if it.redefines:
             entry["redefines"] = it.redefines
         if getattr(it, "file", None):
@@ -1459,18 +1484,32 @@ def _data_dictionary(program: Program) -> Dict[str, dict]:
         elif it.type is not None:
             entry["type"] = it.type.to_dict()
         out[it.name] = entry
-        if it.level in (66, 77) or it.level == 1:
-            open_groups = []
-        else:
-            while open_groups and open_groups[-1][0] >= it.level:
-                open_groups.pop()
-        if it.name == "FILLER" and it.parent and open_groups                 and open_groups[-1][1] == it.parent:
-            filler = {k: v for k, v in entry.items() if k != "parent"}
+        if it.name != "FILLER":
+            decls.setdefault(it.name, []).append(
+                ({k: entry[k] for k in _DECLARATION_KEYS if k in entry}, entry))
+        if it.name == "FILLER" and it.parent and open_groups \
+                and open_groups[-1][1] == it.parent:
+            filler = {k: v for k, v in entry.items() if k not in ("parent", "parentLine")}
             open_groups[-1][2].setdefault("fillers", []).append(filler)
             entry = filler
         if it.is_group:
             open_groups.append((it.level, it.name, entry))
+    for name, ds in decls.items():
+        if len(ds) > 1:
+            # A group's FILLERs arrive on its entry after its declaration was copied.
+            for d, entry in ds:
+                if "fillers" in entry:
+                    d["fillers"] = entry["fillers"]
+            out[name]["declarations"] = [d for d, _ in ds]
     return out
+
+
+# The keys a declaration of a name declared more than once carries: everything that can
+# differ between two declarations of it, and the layout-only clauses `storage.py` needs
+# to size the member it describes.
+_DECLARATION_KEYS = ("level", "line", "parent", "parentLine", "section", "file", "member",
+                     "redefines", "occurs", "occursDependingOn", "sync", "signSeparate",
+                     "type")
 
 
 def _build_handlers_region(program: Program, ctx: "_BuildCtx"):

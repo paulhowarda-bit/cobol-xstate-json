@@ -60,7 +60,7 @@ from .emitter import (
     perform_target as _perform_target, segment_entry,
 )
 from .statechart import Machine
-from .storage import children_index, record_layout
+from .storage import children_index, item_size, record_layout
 
 # An origin: (event name, maybe?, program that would resolve a `maybe`).
 Origin = Tuple[str, bool, Optional[str]]
@@ -367,9 +367,18 @@ _ATEND = re.compile(r"^(.*?)_(not)?[Aa]t[Ee]nd$")
 # --------------------------------------------------------------------------- #
 
 def _operands(expr: str, known: Set[str]) -> List[str]:
-    """Field names referenced by an expression (literals/keywords dropped)."""
+    """Field names referenced by an expression (literals/keywords dropped).
+
+    Masked first (ledger item 156): a literal that SPELLS a data name (``MOVE 'TBL-GRP'
+    TO T`` beside a DCLGEN group TBL-GRP) is a constant, not a read of that field. A word
+    after OF/IN (ledger item 155) qualifies the word before it - ``A OF G`` reads A,
+    not the whole of G - and the object of LENGTH OF / ADDRESS OF is no value source
+    either."""
     out = []
-    for w in _WORD.findall((expr or "").upper()):
+    words = _WORD.findall(mask_literals((expr or "").upper()))
+    for i, w in enumerate(words):
+        if i and words[i - 1] in ("OF", "IN"):
+            continue
         if w in known and w not in out:
             out.append(w)
     return out
@@ -542,6 +551,11 @@ class _Lineage:
         # source bytes each target field of a group MOVE overlaps, are computed once -
         # not at every visit of every group MOVE (`_place_bytes` / `_placement`).
         self._kids = None
+        # name -> the items sharing its bytes through a REDEFINES (ledger item 159): a
+        # store under one name is a store under the other. Coarse - every item of one
+        # alternative against every item of the other - unless both alternatives can
+        # be laid out, when the byte overlap says which.
+        self.aliases: Dict[str, Tuple[str, ...]] = self._redefines_aliases()
         self._layouts: Dict[str, dict] = {}
         self._placements: Dict[Tuple[str, str], tuple] = {}
         self._canon: Dict[OriginSet, OriginSet] = {}
@@ -1131,6 +1145,11 @@ class _Lineage:
             if not hits and spec:
                 made = [h for h in _iface._classify_dataflow(spec, self.linkage)
                         if h["direction"] == "create"]
+            # Every I/O statement on a file sets its FILE STATUS field (ledger item
+            # 160): the file system's response, the same event the interface publishes
+            # for a branch on it. Kept apart from `got`, which would skip a WRITE ...
+            # FROM's store; CLOSE is classified as no crossing, so it is read here.
+            status = self._status_fills(hits, cobol)
             # An EXEC statement's writes inside the program (FORMATTIME, Db2 SET /
             # VALUES INTO). Their sources' origins are read now, before step 1 fills
             # this statement's own targets: Db2 evaluates every expression first.
@@ -1154,16 +1173,18 @@ class _Lineage:
             # bytes: a group reads as its leaves and FILLERs (`_read`), so a fill that
             # left `G#FILLER` holding an older `MOVE SPACES TO G` made `ACCEPT G` /
             # `MOVE G TO T` say T was "internally set".
-            for h in got:
+            for h in got + status:
                 ev = _iface._event("get", h["etype"], h["endpoint"])
                 for f in h["fields"]:
                     fu = f.upper()
-                    cur[fu] = frozenset({(ev, False, None)})
+                    filled = frozenset({(ev, False, None)})
+                    values = {fu: filled}
                     for leaf in self.dv.leaves(fu):
                         if leaf != fu:
-                            cur[leaf] = cur[fu]
+                            values[leaf] = filled
                     for key in self.sub_fillers.get(fu, ()):
-                        cur[key] = cur[fu]
+                        values[key] = filled
+                    self._put(values, cur)
                 if rows is not None:
                     for f in h["fields"]:
                         rows.append(self._row(name, h, "input", f, cur, aname, line))
@@ -1204,7 +1225,7 @@ class _Lineage:
                         self._group_store(base, a.get("expr", ""), srcs, acc, cur,
                                           line)
                     else:
-                        cur[base] = frozenset(acc)
+                        self._store(base, frozenset(acc), cur)
                     if rows is not None:
                         rec = {
                             "target": base, "sources": list(srcs), "state": name,
@@ -1334,6 +1355,24 @@ class _Lineage:
                         })
         return cur
 
+    _CLOSE = re.compile(r"^\s*CLOSE\b(.*)$", re.I | re.S)
+
+    def _status_fills(self, hits: List[dict], cobol: str) -> List[dict]:
+        """A ``get`` RESPONSE hit filling the FILE STATUS field of each file this
+        statement does I/O on - one per file, whatever its hits' directions."""
+        named = [h["endpoint"] for h in hits if h["etype"] == _iface._FILE]
+        m = self._CLOSE.match(cobol or "")
+        if m:
+            named += [w for w in _WORD.findall(mask_literals(m.group(1)).upper())
+                      if w in self.files]
+        out = []
+        for f in dict.fromkeys(named):
+            sf = str((self.files.get(f) or {}).get("statusField") or "").upper()
+            if sf in self.known:
+                out.append(_iface._hit("get", _iface._RESPONSE, f,
+                                       f"file status ({sf})", [sf]))
+        return out
+
     _ADDRESS_OF = _iface._ADDRESS_OF_EXPR
 
     def _address_target(self, ptr: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1416,7 +1455,114 @@ class _Lineage:
             values[leaf] = origins
         for key in self.sub_fillers.get(name, ()):
             values[key] = origins
+        self._put(values, cur)
+
+    def _put(self, values: Dict[str, OriginSet], cur: State) -> None:
+        """``cur.put(values)``, carried across every REDEFINES of a written item: the
+        alias gains the store's origins as a UNION, never a replacement - it may cover
+        bytes this store does not reach. A union keeps the transfer monotone."""
+        if self.aliases:
+            extra: Dict[str, Set[Origin]] = {}
+            for written, origins in values.items():
+                for a in self.aliases.get(written, ()):
+                    if a not in values:
+                        extra.setdefault(a, set()).update(origins)
+            for a, origins in extra.items():
+                values[a] = frozenset(origins.union(cur.get(a) or ()))
         cur.put(values)
+
+    def _redefines_aliases(self) -> Dict[str, Tuple[str, ...]]:
+        """Every elementary item -> the elementary items of the OTHER alternatives of
+        the same bytes. An alternative is the redefined item itself, each named item
+        that REDEFINES it, and each ``FILLER REDEFINES`` it (whose named items its
+        ``members`` list, ledger item 159). Pairs are placed by byte offset within the
+        alternative when every item of both can be sized; otherwise every item of one
+        is an alias of every item of the other - a superset, the safe direction."""
+        bases: Dict[str, List[Tuple[str, dict]]] = {}
+        for n, e in self.data.items():
+            if isinstance(e, dict) and e.get("redefines") and n != _FILLER:
+                bases.setdefault(str(e["redefines"]).upper(), []).append((n, e))
+        stack = [f for e in self.data.values() if isinstance(e, dict)
+                 for f in e.get("fillers") or ()]
+        while stack:
+            f = stack.pop()
+            stack.extend(f.get("fillers") or ())
+            if f.get("redefines"):
+                bases.setdefault(str(f["redefines"]).upper(), []).append((_FILLER, f))
+        if not bases:
+            return {}
+        if self._kids is None:
+            self._kids = children_index(self.data)
+        out: Dict[str, Set[str]] = {}
+        for base in sorted(bases):
+            entry = self.data.get(base)
+            if not isinstance(entry, dict) or base not in self.known:
+                continue
+            alts = [self._alternative(base, entry)] + [
+                self._alternative(n, e) for n, e in
+                sorted(bases[base], key=lambda p: int(p[1].get("line") or 0))]
+            for i, (leaves_a, spans_a) in enumerate(alts):
+                for leaves_b, spans_b in alts[i + 1:]:
+                    placed = spans_a is not None and spans_b is not None
+                    for a in leaves_a:
+                        for b in leaves_b:
+                            if a == b:
+                                continue
+                            if placed and not (spans_a[a][0] < spans_b[b][1]
+                                               and spans_b[b][0] < spans_a[a][1]):
+                                continue
+                            out.setdefault(a, set()).add(b)
+                            out.setdefault(b, set()).add(a)
+        return {k: tuple(sorted(v)) for k, v in sorted(out.items())}
+
+    def _alternative(self, name: str, entry: dict
+                     ) -> Tuple[List[str], Optional[Dict[str, Tuple[int, int]]]]:
+        """``(elementary items, {item: (start, end)} or None)`` of one alternative of a
+        REDEFINES, offsets counted from the alternative's first byte. ``None`` when an
+        item of it cannot be sized, or the alternative holds a REDEFINES of its own."""
+        leaves: List[str] = []
+        spans: Dict[str, Tuple[int, int]] = {}
+        provable = [True]
+
+        def kids(n: str, e: dict) -> List[Tuple[str, dict]]:
+            if n == _FILLER:      # a FILLER object: its members and its own FILLERs
+                named = [(k, d) for k, d in self._kids.get(_FILLER, ())
+                         if k != _FILLER and d.get("parentLine") == e.get("line")]
+            else:
+                named = [(k, d) for k, d in self._kids.get(n.upper(), ()) if k != _FILLER]
+            named = [(k, d) for k, d in named if d.get("kind") != "condition-name"]
+            merged = named + [(_FILLER, f) for f in e.get("fillers") or ()]
+            return sorted(merged, key=lambda p: int(p[1].get("line") or 0))
+
+        def walk(n: str, e: dict, offset: int, root: bool) -> int:
+            if not root and e.get("redefines"):
+                provable[0] = False
+            if e.get("occursDependingOn") or e.get("sync"):
+                provable[0] = False
+            try:
+                times = int(e.get("occurs") or 1)
+            except (TypeError, ValueError):
+                times, provable[0] = 1, False
+            ks = kids(n, e)
+            if ks:
+                cur = offset
+                for k, d in ks:
+                    nxt = walk(k, d, cur, False)
+                    if not d.get("redefines"):
+                        cur = nxt
+                return offset + (cur - offset) * times
+            size, _why = item_size(e)
+            if size is None:
+                provable[0] = False
+                size = 0
+            if n != _FILLER:
+                leaves.append(n.upper())
+                spans[n.upper()] = (offset, offset + size * times)
+            return offset + size * times
+
+        walk(name, entry, 0, True)
+        leaves = list(dict.fromkeys(leaves))
+        return leaves, (spans if provable[0] else None)
 
     _BARE_REF = re.compile(r"^([A-Z0-9][A-Z0-9-]*)(?:\s+(?:OF|IN)\s+[A-Z0-9][A-Z0-9-]*)*$")
 
@@ -1444,7 +1590,7 @@ class _Lineage:
                 filler = placed.get(_FILLER, _NO_ORIGINS)
                 for key in self.sub_fillers[tgt]:
                     values[key] = filler
-                cur.put(values)
+                self._put(values, cur)
                 return
         else:
             why = "the source is an expression, not one data item"

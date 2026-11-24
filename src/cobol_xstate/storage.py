@@ -40,7 +40,7 @@ provable rather than blocking the offset.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .data_division import expand_pic
 
@@ -100,12 +100,39 @@ def children_index(data: Dict[str, dict]) -> _Kids:
     """Every group's immediate children, in source order (the dict preserves it),
     keyed by the upper-cased parent name, in ONE pass over the dictionary: a scan of the
     whole dictionary per group node made a layout O(nodes x items). A caller laying out
-    many records of one dictionary builds it once and passes it to each layout."""
+    many records of one dictionary builds it once and passes it to each layout.
+
+    A name declared more than once (ledger item 154) is a child of EVERY group it is
+    declared under, each pair carrying the object of the declaration under that group -
+    so a member is sized with its own PICTURE, not the key's. The key is a name's LAST
+    declaration, so in a parent's list such a member sits where its FIRST declaration
+    did; a list holding one is re-ordered by the declaration line, when every child in
+    it comes from the same member (a copybook's lines count from its own top, so lines
+    from two members do not order against each other - that list keeps its order)."""
     kids: _Kids = {}
+    redeclared: Set[str] = set()
     for name, entry in data.items():
-        if isinstance(entry, dict):
+        if not isinstance(entry, dict):
+            continue
+        ds = entry.get("declarations")
+        if not ds:
             kids.setdefault(str(entry.get("parent") or "").upper(), []).append(
                 (name, entry))
+            continue
+        # One pair per parent; a parent that holds the name twice is itself declared
+        # twice, and its key is its last declaration - whose child is the last one.
+        last: Dict[str, dict] = {}
+        for d in ds:
+            last[str(d.get("parent") or "").upper()] = d
+        for parent, d in last.items():
+            # The key's own declaration is reported as the key: same object as before.
+            kids.setdefault(parent, []).append(
+                (name, entry if d is ds[-1] else d))
+            redeclared.add(parent)
+    for parent in redeclared:
+        pairs = kids[parent]
+        if len({p[1].get("member") for p in pairs}) == 1:
+            pairs.sort(key=lambda p: int(p[1].get("line") or 0))
     return kids
 
 

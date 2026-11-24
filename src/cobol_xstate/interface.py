@@ -50,6 +50,9 @@ _DYNAMIC_SQL = "dynamic_sql"
 _SQL_PREPARED_NAME = re.compile(
     r"\s*(?:EXEC\s+SQL\s+)?(?:PREPARE|EXECUTE)\s+(?!IMMEDIATE\b)([A-Z0-9_#@$-]+)")
 
+# `GET [CURRENT | STACKED] DIAGNOSTICS`; what follows the match is its assignment list.
+_SQL_GET_DIAGNOSTICS = re.compile(
+    r"\s*(?:EXEC\s+SQL\s+)?GET\s+(?:(?:CURRENT|STACKED)\s+)?DIAGNOSTICS\b")
 _CICS_RESOURCE = re.compile(
     r"\b(?:PROGRAM|FILE|DATASET|MAP|MAPSET|QUEUE|QNAME|TSQUEUE|TDQUEUE)\s*\(\s*'?"
     r"([A-Z0-9_.$#@-]+)\s*'?\s*\)", re.I)
@@ -162,6 +165,7 @@ from .semantics import mask_literals  # noqa: E402
 # Every table a statement names. Lives with the parser, which needs it for a cursor
 # DECLAREd outside the procedure division and must not import this modelling module.
 from cobol_parser.parser import _sql_table_refs  # noqa: E402
+from .storage import children_index  # noqa: E402
 
 
 def _parse_call_args(cobol: str) -> List[str]:
@@ -170,10 +174,17 @@ def _parse_call_args(cobol: str) -> List[str]:
     if not m:
         return []
     out = []
-    for tok in re.split(r"[,\s]+", m.group(1).strip()):
+    toks = re.split(r"[,\s]+", m.group(1).strip())
+    for i, tok in enumerate(toks):
         u = tok.upper()
+        # `USING X OF R` passes X: OF/IN and the qualifying record are not arguments
+        # (ledger item 155). `ADDRESS OF X` still passes X - the callee can write it
+        # through the pointer - as `CallStmt.arguments` says; `LENGTH OF X` does not.
+        if u in ("OF", "IN") or (i and toks[i - 1].upper() in ("OF", "IN")
+                                 and not (i > 1 and toks[i - 2].upper() == "ADDRESS")):
+            continue
         if u and u not in ("BY", "REFERENCE", "CONTENT", "VALUE", "ON", "NOT",
-                           "EXCEPTION", "OVERFLOW") and not u.startswith(("'", '"')):
+                           "EXCEPTION", "OVERFLOW", "ADDRESS", "LENGTH") and not u.startswith(("'", '"')):
             out.append(u)
     return out
 
@@ -299,11 +310,15 @@ class _DataView:
         for name, it in self.data.items():
             if not isinstance(it, dict):
                 continue
-            parent = it.get("parent")
-            if parent:
-                self.children.setdefault(parent.upper(), []).append(name)
-            elif it.get("file") and it.get("kind") != "condition-name":
+            if not it.get("parent") and it.get("file") \
+                    and it.get("kind") != "condition-name":
                 self.records.setdefault(it["file"], []).append(name)
+        # Every group's members - each declaration of a name declared under several
+        # groups included (ledger item 154) - from the one index `storage` lays records
+        # out from, so a record's fields and its byte layout cannot disagree.
+        for parent, pairs in children_index(self.data).items():
+            if parent:
+                self.children[parent] = [n for n, _ in pairs]
         # `leaves` is a pure function of the data dictionary, which is fixed for this
         # object's lifetime - but it is called once per classification, and the lineage
         # fixpoint classifies every state once per VISIT. The deque made each walk
@@ -393,6 +408,8 @@ def _display_fields(cobol: str, data: dict) -> List[str]:
     # field REPORT and dropping every real operand after the literal.
     body = _STR_LIT.sub(" ", body)
     body = re.split(r"\bUPON\b", body, flags=re.I)[0]
+    # `DISPLAY X OF R` displays X: the qualifier is not an operand (ledger item 155).
+    body = re.sub(r"\b(?:OF|IN)\s+[A-Z0-9][A-Z0-9-]*", " ", body, flags=re.I)
     out = []
     for w in _WORD.findall(body.upper()):
         if w in ("NO", "WITH", "ADVANCING"):
@@ -934,6 +951,20 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 hits.append(_hit("get", _SYSTEM, _CLOCK_ENDPOINT[reg],
                                  f"{verb} CURRENT {reg}", fields))
             return _read_tables(hits, _sql_table_refs(mup), verb)
+        diag = _SQL_GET_DIAGNOSTICS.match(mup) if verb == "GET" else None
+        if diag:
+            # GET DIAGNOSTICS [CONDITION n] :hv = item, ... stores Db2's diagnostics
+            # area into each target (ledger item 157): a system read, like SET :hv =
+            # CURRENT TIMESTAMP. A host variable after CONDITION picks the condition;
+            # it is a param, not a target.
+            body = mup[diag.end():]
+            cond = re.match(r"\s*CONDITION\s+(:\s*[A-Z0-9][A-Z0-9-]*|\d+)\s*", body)
+            params = _sql_host_vars(cond.group(1)) if cond else []
+            if cond:
+                body = body[cond.end():]
+            targets = [t for t, _ in _sql_assignments("SET " + body, "SET")]
+            return [_hit("get", _SYSTEM, "DB2-DIAGNOSTICS", "SQL GET DIAGNOSTICS",
+                         _dedup(targets), params)] if targets else []
         change = (spec or {}).get("dataChange") if verb == "OPEN" else None
         if change:
             # A cursor over `FROM FINAL TABLE (INSERT ...)`: opening it runs the inner
@@ -970,115 +1001,11 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
         return []  # OPEN/CLOSE cursor, DECLARE, COMMIT, WHENEVER - not a data crossing
 
     if is_cics:
-        res = _CICS_RESOURCE.search(up)
-        endpoint = res.group(1) if res else ""
+        # Every command's own hits, plus the options it stores into that its own
+        # case does not publish (ledger item 158).
         opts = {k.upper(): v.upper() for k, v in _CICS_OPT.findall(up)}
-        ca = _CICS_COMMAREA.search(up)
-        commarea = [ca.group(1).upper()] if ca else []
-        into = [opts["INTO"]] if "INTO" in opts else []
-        from_ = [opts["FROM"]] if "FROM" in opts else []
-        ridfld = [opts["RIDFLD"]] if "RIDFLD" in opts else []
-        # Resolved resource-name operands (statechart._exec_resources): a
-        # PROGRAM/TRANSID/QUEUE/FILE/MAP(data-name) operand resolved by constant
-        # propagation names the RESOURCE where the raw text names the data item.
-        # Unresolved ones stay the identifier, marked dynamic, so downstream views
-        # never present a working-storage name as a real resource identity.
-        rs = (spec or {}).get("resources") or {}
-        if verb in ("LINK", "XCTL"):
-            return [_mark_dynamic(
-                _hit("create", _PROGRAM, _resource(rs, "PROGRAM", endpoint or "<program>"),
-                     "CICS " + verb, commarea), rs, "PROGRAM")]
-        if verb == "RETURN":
-            v = "CICS RETURN"
-            if "TRANSID" in opts:
-                v += f" TRANSID({_resource(rs, 'TRANSID', opts['TRANSID'])})"
-            return [_hit("create", _CALLER, "CALLER", v, commarea)]
-        if verb == "SEND":
-            ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
-            return [_with_mapset(_mark_dynamic(
-                _hit("create", _TERMINAL, ep, "CICS SEND", from_), rs, "MAP", "MAPSET"),
-                rs)]
-        if verb == "RECEIVE":
-            ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
-            hit = _with_mapset(_mark_dynamic(
-                _hit("get", _TERMINAL, ep, "CICS RECEIVE", into), rs, "MAP", "MAPSET"), rs)
-            if (not _CICS_MAP_OPERAND.search(mup)
-                    and not _CICS_CONVERSATION.search(mup)):
-                # Mapless: the area holds the raw terminal input. Say which area, how
-                # it is read and how long, so a consumer holding the transaction
-                # definitions can name what arrives in it.
-                terminal = {"buffer": bool(_CICS_BUFFER.search(mup))}
-                length = _CICS_LENGTH.search(mup)
-                if length:
-                    terminal["length"] = length.group(1)
-                if "SET" in opts:
-                    terminal["set"] = opts["SET"]
-                hit["terminalInput"] = terminal
-            return [hit]
-        if verb == "WRITE" and _CICS_OPERATOR.search(mup):
-            # WRITE OPERATOR: a message to the system console operator, not a record to
-            # a file. REPLY brings the operator's answer back.
-            text, reply = _CICS_TEXT.search(mup), _CICS_REPLY.search(mup)
-            hits = [_hit("create", _CONSOLE, "OPERATOR", "CICS WRITE OPERATOR",
-                         [text.group(1)] if text else [])]
-            if reply:
-                hits.append(_hit("get", _CONSOLE, "OPERATOR", "CICS WRITE OPERATOR",
-                                 [reply.group(1)]))
-            return hits
-        if verb == "DELETE" and _CICS_DELETE_NOT_A_FILE.search(mup):
-            return []  # a container, counter, timer, event or activity - like GET/PUT
-        if verb in ("READ", "READNEXT", "READPREV"):
-            f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
-            return [_mark_dynamic(
-                _hit("get", _FILE, f, "CICS " + verb,
-                     into or dv.record_fields(f), ridfld), rs, "FILE", "DATASET")]
-        if verb in ("STARTBR", "RESETBR"):
-            f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
-            return [_mark_dynamic(_hit("get", _FILE, f, "CICS " + verb, [], ridfld),
-                                  rs, "FILE", "DATASET")]
-        if verb == "ENDBR":
-            return []
-        if verb in ("WRITE", "REWRITE", "DELETE"):
-            f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
-            return [_mark_dynamic(
-                _hit("create", _FILE, f, "CICS " + verb, from_, ridfld),
-                rs, "FILE", "DATASET")]
-        if verb in ("READQ",):
-            q = _queue(rs, endpoint, opts)
-            qtype = "TD" if re.search(r"\bREADQ\s+TD\b", up) else "TS"
-            return [_mark_dynamic(_hit("get", _QUEUE, q, f"CICS READQ {qtype}", into),
-                                  rs, "QUEUE", "QNAME")]
-        if verb in ("WRITEQ",):
-            q = _queue(rs, endpoint, opts)
-            qtype = "TD" if re.search(r"\bWRITEQ\s+TD\b", up) else "TS"
-            return [_mark_dynamic(_hit("create", _QUEUE, q, f"CICS WRITEQ {qtype}", from_),
-                                  rs, "QUEUE", "QNAME")]
-        if verb == "DELETEQ":
-            q = _queue(rs, endpoint, opts)
-            return [_mark_dynamic(_hit("create", _QUEUE, q, "CICS DELETEQ", []),
-                                  rs, "QUEUE", "QNAME")]
-        if verb == "START":
-            t = _resource(rs, "TRANSID", opts.get("TRANSID", "<transid>"))
-            return [_mark_dynamic(_hit("create", _TRANSACTION, t, "CICS START", from_),
-                                  rs, "TRANSID")]
-        if verb == "RETRIEVE":
-            return [_hit("get", _TRANSACTION, "RETRIEVE", "CICS RETRIEVE", into)]
-        if verb == "ABEND":
-            code = opts.get("ABCODE", "ABEND")
-            return [_hit("create", _CONDITION, code, "CICS ABEND", [])]
-        if verb == "ASKTIME":
-            # Without ABSTIME it refreshes only EIBDATE / EIBTIME, which no field holds.
-            m = _CICS_ABSTIME.search(mup)
-            return [_hit("get", _SYSTEM, "SYSTEM-TIME", "CICS ASKTIME",
-                         [m.group(1)])] if m else []
-        if verb == "GETMAIN":
-            # GETMAIN SET(ADDRESS OF X): X is fresh storage CICS hands the program,
-            # which then initialises it - its origin, not a caller's. SET(ptr) addresses
-            # no record yet; the SET ADDRESS OF that later uses ptr says so.
-            m = _CICS_GETMAIN_SET.search(mup)
-            return [_hit("get", _SYSTEM, "SYSTEM-STORAGE", "CICS GETMAIN",
-                         [m.group(1)])] if m else []
-        return []  # HANDLE (-> handler region), ADDRESS, FORMATTIME (internal), etc.
+        return (_classify_cics(up, mup, verb, spec, dv)
+                + _cics_receivers(verb, mup, opts))
 
     # DLI / IMS
     if verb in ("GU", "GN", "GNP", "GHU", "GHN"):
@@ -1086,6 +1013,164 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
     if verb in ("ISRT", "REPL", "DLET"):
         return [_hit("create", _IMS, "IMS-DB", "DLI " + verb, [])]
     return []
+
+
+_CICS_RESP = re.compile(r"\bRESP2?\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+_CICS_ANY_OPT = re.compile(r"\b([A-Z][A-Z0-9]*)\s*\(\s*([A-Z][A-Z0-9-]*)\s*\)")
+_CICS_TOLENGTH = re.compile(r"\bTOF?LENGTH\s*\(\s*([A-Z0-9][A-Z0-9-]*)\s*\)")
+_CICS_SET_ADDRESS = re.compile(r"\bSET\s*\(\s*ADDRESS\s+OF\s+([A-Z0-9][A-Z0-9-]*)\s*\)")
+
+
+def _cics_receivers(verb: str, mup: str, opts: dict) -> List[dict]:
+    """The fields an EXEC CICS command stores into that its own case does not publish
+    (ledger item 158): RESP/RESP2 on any command, every ASSIGN option, GET CONTAINER /
+    CONVERSE / WEB RECEIVE INTO. Each is a fill with an endpoint type a consumer can
+    judge - CICS put the value there, so none of them is "internally set"."""
+    hits = []
+    resp = _dedup(_CICS_RESP.findall(mup))
+    if resp:
+        hits.append(_hit("get", _SYSTEM, "CICS-RESPONSE", f"CICS {verb} RESP", resp))
+    if verb == "ASSIGN":
+        f = _dedup([v for k, v in _CICS_ANY_OPT.findall(mup) if k not in ("RESP", "RESP2")])
+        if f:
+            hits.append(_hit("get", _SYSTEM, "CICS-ASSIGN", "CICS ASSIGN", f))
+    # A container's data and an HTTP request body arrive from whoever invoked this
+    # program - its channel, its web client - so they are the caller's, as a COMMAREA
+    # is. Named CONTAINER or "web", they became artifact rows the fetch stage would
+    # request from the estate: a CSD transaction CONTAINER, a BMS map "web".
+    if verb == "GET" and re.search(r"\bCONTAINER\b", mup) and "INTO" in opts:
+        hits.append(_hit("get", _CALLER, "CALLER", "CICS GET CONTAINER", [opts["INTO"]]))
+    if verb == "WEB" and re.search(r"\bRECEIVE\b", mup) and "INTO" in opts:
+        hits.append(_hit("get", _CALLER, "CALLER", "CICS WEB RECEIVE", [opts["INTO"]]))
+    if verb == "CONVERSE" and "INTO" in opts:
+        # Mapless terminal input, read the way a mapless RECEIVE's is.
+        hit = _hit("get", _TERMINAL, "terminal", "CICS CONVERSE", [opts["INTO"]])
+        hit["terminalInput"] = {"buffer": False}
+        length = _CICS_TOLENGTH.search(mup)
+        if length:
+            hit["terminalInput"]["length"] = length.group(1)
+        hits.append(hit)
+    return hits
+
+
+def _classify_cics(up: str, mup: str, verb: str, spec: Optional[dict],
+                   dv: _DataView) -> List[dict]:
+    """The CICS arm of `_classify_exec`: one command's own boundary hits."""
+    res = _CICS_RESOURCE.search(up)
+    endpoint = res.group(1) if res else ""
+    opts = {k.upper(): v.upper() for k, v in _CICS_OPT.findall(up)}
+    ca = _CICS_COMMAREA.search(up)
+    commarea = [ca.group(1).upper()] if ca else []
+    into = [opts["INTO"]] if "INTO" in opts else []
+    from_ = [opts["FROM"]] if "FROM" in opts else []
+    ridfld = [opts["RIDFLD"]] if "RIDFLD" in opts else []
+    # Resolved resource-name operands (statechart._exec_resources): a
+    # PROGRAM/TRANSID/QUEUE/FILE/MAP(data-name) operand resolved by constant
+    # propagation names the RESOURCE where the raw text names the data item.
+    # Unresolved ones stay the identifier, marked dynamic, so downstream views
+    # never present a working-storage name as a real resource identity.
+    rs = (spec or {}).get("resources") or {}
+    if verb in ("LINK", "XCTL"):
+        return [_mark_dynamic(
+            _hit("create", _PROGRAM, _resource(rs, "PROGRAM", endpoint or "<program>"),
+                 "CICS " + verb, commarea), rs, "PROGRAM")]
+    if verb == "RETURN":
+        v = "CICS RETURN"
+        if "TRANSID" in opts:
+            v += f" TRANSID({_resource(rs, 'TRANSID', opts['TRANSID'])})"
+        return [_hit("create", _CALLER, "CALLER", v, commarea)]
+    if verb == "SEND":
+        ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
+        return [_with_mapset(_mark_dynamic(
+            _hit("create", _TERMINAL, ep, "CICS SEND", from_), rs, "MAP", "MAPSET"),
+            rs)]
+    if verb == "RECEIVE":
+        ep = _resource(rs, "MAP", _resource(rs, "MAPSET", endpoint or "terminal"))
+        hit = _with_mapset(_mark_dynamic(
+            _hit("get", _TERMINAL, ep, "CICS RECEIVE", into), rs, "MAP", "MAPSET"), rs)
+        if (not _CICS_MAP_OPERAND.search(mup)
+                and not _CICS_CONVERSATION.search(mup)):
+            # Mapless: the area holds the raw terminal input. Say which area, how
+            # it is read and how long, so a consumer holding the transaction
+            # definitions can name what arrives in it.
+            terminal = {"buffer": bool(_CICS_BUFFER.search(mup))}
+            length = _CICS_LENGTH.search(mup)
+            if length:
+                terminal["length"] = length.group(1)
+            if "SET" in opts:
+                terminal["set"] = opts["SET"]
+            hit["terminalInput"] = terminal
+        return [hit]
+    if verb == "WRITE" and _CICS_OPERATOR.search(mup):
+        # WRITE OPERATOR: a message to the system console operator, not a record to
+        # a file. REPLY brings the operator's answer back.
+        text, reply = _CICS_TEXT.search(mup), _CICS_REPLY.search(mup)
+        hits = [_hit("create", _CONSOLE, "OPERATOR", "CICS WRITE OPERATOR",
+                     [text.group(1)] if text else [])]
+        if reply:
+            hits.append(_hit("get", _CONSOLE, "OPERATOR", "CICS WRITE OPERATOR",
+                             [reply.group(1)]))
+        return hits
+    if verb == "DELETE" and _CICS_DELETE_NOT_A_FILE.search(mup):
+        return []  # a container, counter, timer, event or activity - like GET/PUT
+    if verb in ("READ", "READNEXT", "READPREV"):
+        f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
+        # Locate mode, SET(ADDRESS OF X): the record is X (ledger item 158). With
+        # neither INTO nor SET, only a declared record of that name is a field - never
+        # a phantom field named after the file.
+        sa = _CICS_SET_ADDRESS.search(mup)
+        fields = into or (dv.record_fields(sa.group(1)) if sa else
+                          [x for x in dv.record_fields(f) if x in dv.data])
+        return [_mark_dynamic(
+            _hit("get", _FILE, f, "CICS " + verb, fields, ridfld),
+            rs, "FILE", "DATASET")]
+    if verb in ("STARTBR", "RESETBR"):
+        f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
+        return [_mark_dynamic(_hit("get", _FILE, f, "CICS " + verb, [], ridfld),
+                              rs, "FILE", "DATASET")]
+    if verb == "ENDBR":
+        return []
+    if verb in ("WRITE", "REWRITE", "DELETE"):
+        f = _resource(rs, "FILE", _resource(rs, "DATASET", endpoint or "<file>"))
+        return [_mark_dynamic(
+            _hit("create", _FILE, f, "CICS " + verb, from_, ridfld),
+            rs, "FILE", "DATASET")]
+    if verb in ("READQ",):
+        q = _queue(rs, endpoint, opts)
+        qtype = "TD" if re.search(r"\bREADQ\s+TD\b", up) else "TS"
+        return [_mark_dynamic(_hit("get", _QUEUE, q, f"CICS READQ {qtype}", into),
+                              rs, "QUEUE", "QNAME")]
+    if verb in ("WRITEQ",):
+        q = _queue(rs, endpoint, opts)
+        qtype = "TD" if re.search(r"\bWRITEQ\s+TD\b", up) else "TS"
+        return [_mark_dynamic(_hit("create", _QUEUE, q, f"CICS WRITEQ {qtype}", from_),
+                              rs, "QUEUE", "QNAME")]
+    if verb == "DELETEQ":
+        q = _queue(rs, endpoint, opts)
+        return [_mark_dynamic(_hit("create", _QUEUE, q, "CICS DELETEQ", []),
+                              rs, "QUEUE", "QNAME")]
+    if verb == "START":
+        t = _resource(rs, "TRANSID", opts.get("TRANSID", "<transid>"))
+        return [_mark_dynamic(_hit("create", _TRANSACTION, t, "CICS START", from_),
+                              rs, "TRANSID")]
+    if verb == "RETRIEVE":
+        return [_hit("get", _TRANSACTION, "RETRIEVE", "CICS RETRIEVE", into)]
+    if verb == "ABEND":
+        code = opts.get("ABCODE", "ABEND")
+        return [_hit("create", _CONDITION, code, "CICS ABEND", [])]
+    if verb == "ASKTIME":
+        # Without ABSTIME it refreshes only EIBDATE / EIBTIME, which no field holds.
+        m = _CICS_ABSTIME.search(mup)
+        return [_hit("get", _SYSTEM, "SYSTEM-TIME", "CICS ASKTIME",
+                     [m.group(1)])] if m else []
+    if verb == "GETMAIN":
+        # GETMAIN SET(ADDRESS OF X): X is fresh storage CICS hands the program,
+        # which then initialises it - its origin, not a caller's. SET(ptr) addresses
+        # no record yet; the SET ADDRESS OF that later uses ptr says so.
+        m = _CICS_GETMAIN_SET.search(mup)
+        return [_hit("get", _SYSTEM, "SYSTEM-STORAGE", "CICS GETMAIN",
+                     [m.group(1)])] if m else []
+    return []  # HANDLE (-> handler region), ADDRESS, FORMATTIME (internal), etc.
 
 
 # One OPEN can carry several mode clauses: `OPEN INPUT F1 OUTPUT F2`. The file-name run

@@ -827,3 +827,16 @@ def test_a_contained_programs_parameter_is_resolved_from_the_call_that_passes_it
     assert label.startswith("CALL LK-PGM -> resolved 'LOGWRITE'")
     assert "NESTSQL line 38 passes WS-LOGPGM" in label
     assert not [f for f in log.flags if "LK-PGM" in str(f)]
+
+
+def test_a_named_item_under_a_filler_says_which_filler():
+    # ledger item 159
+    m = _machine((EXAMPLES / "redefalias.cbl").read_text())
+    clock = m.data["WS-CLOCK"]["fillers"]
+    assert m.data["C-TIME-HOUR"]["parent"] == "FILLER"
+    assert m.data["C-TIME-HOUR"]["parentLine"] == clock[0]["line"]
+    assert m.data["C-DATE-YY"]["parentLine"] == clock[1]["line"]
+    assert clock[0]["members"] == ["C-TIME-HOUR", "C-TIME-MIN"]
+    assert clock[1]["members"] == ["C-DATE-CC", "C-DATE-YY"]
+    assert "parentLine" not in clock[0]["fillers"][0]
+    assert "parentLine" not in m.data["C-TIME"]

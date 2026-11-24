@@ -1533,3 +1533,49 @@ def test_field_set_zero_is_the_empty_list():
 def test_the_machine_only_bundle_carries_no_field_sets():
     import json
     assert "fieldSets" not in json.loads(many_reads(2).to_json(machine_only=True))
+
+
+def test_a_qualifier_is_neither_displayed_nor_passed():
+    # ledger item 155: ADDRESS OF Y still passes Y (the callee writes through it);
+    # LENGTH OF Y passes a number.
+    iface = _iface(
+        "           DISPLAY X OF R\n"
+        "           CALL 'SUBP' USING X OF R ADDRESS OF Y BY CONTENT LENGTH OF Y\n"
+        "           GOBACK.\n",
+        "       01  R.\n           05  X PIC X(10).\n       01  Y PIC X(10).\n")
+    by_verb = {e["verb"]: e for e in iface["events"]}
+    assert by_verb["DISPLAY"]["fields"] == ["X"]
+    assert by_verb["CALL"]["fields"] == ["X", "Y"]
+
+
+def test_get_diagnostics_is_a_db2_diagnostics_read():
+    # ledger item 157
+    iface = _iface(
+        "           EXEC SQL GET DIAGNOSTICS CONDITION :WS-I\n"
+        "               :WS-RC = DB2_RETURNED_SQLCODE END-EXEC\n"
+        "           GOBACK.\n",
+        "       01  WS-I PIC S9(9) COMP.\n       01  WS-RC PIC S9(9) COMP.\n")
+    ev = [e for e in iface["events"] if e["endpoint"] == "DB2-DIAGNOSTICS"]
+    assert len(ev) == 1
+    assert ev[0]["direction"] == "get" and ev[0]["endpointType"] == "system"
+    assert ev[0]["fields"] == ["WS-RC"] and ev[0]["params"] == ["WS-I"]
+
+
+def test_cics_resp_adds_a_response_fill_beside_the_command():
+    # ledger item 158: a LINK keeps its program output; HANDLE CONDITION and
+    # ADDRESS publish nothing; a READ FILE with neither INTO nor SET names no field.
+    iface = _iface(
+        "           EXEC CICS LINK PROGRAM('SUBP') COMMAREA(WS-CA)\n"
+        "                RESP(WS-RESP) END-EXEC\n"
+        "           EXEC CICS HANDLE CONDITION ERROR(9000-X) END-EXEC\n"
+        "           EXEC CICS ADDRESS EIB(WS-P) END-EXEC\n"
+        "           EXEC CICS READ FILE('F3') RIDFLD(WS-CA) END-EXEC\n"
+        "           GOBACK.\n"
+        "       9000-X.\n           GOBACK.\n",
+        "       01  WS-CA PIC X(20).\n       01  WS-RESP PIC S9(8) COMP.\n"
+        "       01  WS-P POINTER.\n")
+    got = sorted((e["event"], tuple(e["fields"])) for e in iface["events"]
+                 if e["endpointType"] != "condition")      # the HANDLE's watch event
+    assert got == [("CREATE.PROGRAM.SUBP", ("WS-CA",)),
+                   ("GET.FILE.F3", ()),
+                   ("GET.SYSTEM.CICS-RESPONSE", ("WS-RESP",))]

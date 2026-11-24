@@ -110,6 +110,29 @@ def _operands(s: str) -> List[str]:
             buf.append(ch)
     if buf:
         out.append("".join(buf))
+    return _fold_qualified(out)
+
+
+_QUALIFIER = ("OF", "IN")
+
+
+def _fold_qualified(ops: List[str]) -> List[str]:
+    """``X OF G`` / ``X IN G OF H`` is ONE reference to X (ledger item 155): the words
+    after OF/IN say which X, they are not further operands - read as operands they made
+    ``MOVE A TO B OF H C`` assign to B, OF, H and C, and the group store into H spread
+    A's origins over every member of H. A subscript written after the qualifier
+    (``X OF G (I)``) belongs to X."""
+    out: List[str] = []
+    i = 0
+    while i < len(ops):
+        if ops[i].upper() in _QUALIFIER and out and i + 1 < len(ops):
+            q = ops[i + 1]
+            if "(" in q:
+                out[-1] += q[q.index("("):]
+            i += 2
+            continue
+        out.append(ops[i])
+        i += 1
     return out
 
 

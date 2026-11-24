@@ -214,3 +214,22 @@ def test_a_filler_group_holding_named_items_is_not_provable():
         "           05  ZZ-B       PIC X(2).\n"), "ZZ-REC")
     assert not layout["provable"]
     assert "parent is recorded only as FILLER" in layout["reason"]
+
+
+def test_each_record_lays_out_its_own_declaration_of_a_shared_name():
+    # ledger item 154: CUST-REF-N is declared under IN-REC, ORD-ENTRY and ORD-INFO;
+    # the dictionary key is the last one, but every record keeps its own members, in
+    # its own order.
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "examples" / "dupnames.cbl").read_text()
+    data = build_machine(parse_program(src)).data
+    parents = [d["parent"] for d in data["CUST-REF-N"]["declarations"]]
+    assert parents == ["IN-REC", "ORD-ENTRY", "ORD-INFO"]
+    assert data["CUST-REF-N"]["parent"] == "ORD-INFO"      # the key is unchanged
+    assert "declarations" not in data["WS-OUT"]
+    for rec, first in (("IN-REC", "ORD-N"), ("ORD-ENTRY", "ORD-N"),
+                       ("ORD-INFO", "INFO-ORD")):
+        lay = record_layout(data, rec)
+        assert lay["provable"], rec
+        assert [(f["name"], f["offset"]) for f in lay["fields"]] == [
+            (first, 1), ("CUST-REF-N", 11)], rec
