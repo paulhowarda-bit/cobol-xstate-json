@@ -833,15 +833,15 @@ def test_an_expression_over_columns_reports_all_of_them():
     assert _derived(_iface("sqlderiv.cbl"), "W-EXTENDED")["derivedFrom"] == ["QTY", "PRICE"]
 
 
-def test_a_case_expression_refuses_to_name_its_sources():
-    """Which branch supplied the value is a RUN-TIME fact.
-
-    Listing both HIGH_C and LOW_C would claim two dependencies where the source proves
-    at most one - flag it as derived, do not guess what it derived from.
-    """
+def test_a_case_expression_names_the_columns_its_results_read():
+    """Ledger item 162: the value is one of HIGH_C or LOW_C, so both are what it was
+    derived FROM - provenance, as for COALESCE. Which result a row takes is a run-time
+    fact, so the slot stays `derived` with no `column`; BAL_A only chooses, and is not
+    named."""
     case = _derived(_iface("sqlderiv.cbl"), "W-BANDING")
     assert case["expression"] == "CASE"
-    assert case["derivedFrom"] == []
+    assert case["derivedFrom"] == ["HIGH_C", "LOW_C"]
+    assert "column" not in case
 
 
 def test_a_fetch_takes_its_derivation_from_the_cursors_declare():
@@ -1803,3 +1803,33 @@ def test_a_write_from_host_variables_only_has_no_value_columns():
     assert not any("valueColumns" in spec
                    for spec in m.bundle()["semantics"]["actions"].values()
                    if spec.get("verb") in ("INSERT", "UPDATE"))
+
+
+# --------------------------------------------------------------------------- #
+# sqlshortinto: an INTO list shorter than the select list (ledger item 163)
+# --------------------------------------------------------------------------- #
+def _short_events(verb):
+    return [e for e in _iface("sqlshortinto.cbl")["events"]
+            if e["verb"] == verb and e["endpoint"] == "ZZPR_PRICING"]
+
+
+def test_a_fetch_with_fewer_host_variables_maps_the_cursors_first_columns():
+    (fetch,) = _short_events("FETCH")
+    assert [(c["column"], c["hostVar"]) for c in fetch["columns"]] == [
+        ("PRC_N", "PR-PRC-N"), ("CCY_C", "PR-CCY-C")]
+    assert "columnsUnresolved" not in fetch
+    assert "SQLWARN3" in fetch["columnNote"] and "EFF_D" in fetch["columnNote"]
+
+
+def test_a_select_into_with_fewer_host_variables_maps_the_first_columns():
+    mapped, refused = _short_events("SELECT")
+    assert [(c["column"], c["hostVar"]) for c in mapped["columns"]] == [
+        ("PRC_N", "PR-PRC-N"), ("CCY_C", "PR-CCY-C")]
+    # :ZZ-MISSING-GROUP is not declared: one name may stand for several columns.
+    assert not refused.get("columns")
+    assert refused["columnsUnresolved"] == "count-mismatch"
+
+
+def test_a_case_item_in_a_select_names_its_result_columns():
+    assert _derived(_iface("sqlshortinto.cbl"), "WS-FULL-NAME")["derivedFrom"] == [
+        "GVN_NM", "ORG_NM"]

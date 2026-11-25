@@ -1480,8 +1480,14 @@ class _Lineage:
         is an alias of every item of the other - a superset, the safe direction."""
         bases: Dict[str, List[Tuple[str, dict]]] = {}
         for n, e in self.data.items():
-            if isinstance(e, dict) and e.get("redefines") and n != _FILLER:
-                bases.setdefault(str(e["redefines"]).upper(), []).append((n, e))
+            if not isinstance(e, dict) or n == _FILLER:
+                continue
+            # A name declared more than once keeps each declaration (item 154), and
+            # the REDEFINES may be on one that is not the entry's own: `15 X REDEFINES
+            # Y.` holding `20 X PIC X(9).` keys the 20 (ledger item 169).
+            for d in e.get("declarations") or (e,):
+                if d.get("redefines"):
+                    bases.setdefault(str(d["redefines"]).upper(), []).append((n, d))
         stack = [f for e in self.data.values() if isinstance(e, dict)
                  for f in e.get("fillers") or ()]
         while stack:
@@ -1534,7 +1540,8 @@ class _Lineage:
             merged = named + [(_FILLER, f) for f in e.get("fillers") or ()]
             return sorted(merged, key=lambda p: int(p[1].get("line") or 0))
 
-        def walk(n: str, e: dict, offset: int, root: bool) -> int:
+        def walk(n: str, e: dict, offset: int, root: bool,
+                 above: FrozenSet[str] = frozenset()) -> int:
             if not root and e.get("redefines"):
                 provable[0] = False
             if e.get("occursDependingOn") or e.get("sync"):
@@ -1543,11 +1550,18 @@ class _Lineage:
                 times = int(e.get("occurs") or 1)
             except (TypeError, ValueError):
                 times, provable[0] = 1, False
-            ks = kids(n, e)
+            # Children are found by NAME, so an item named like a group it sits in
+            # (`15 X REDEFINES Y. 20 X PIC X(9).`) would be handed that group's
+            # children again, forever (ledger item 169): lay it out from its own
+            # declaration. If that does not size it, the layout is unprovable and the
+            # every-item-aliases-every-item fallback applies.
+            key = n.upper()
+            ks = [] if n != _FILLER and key in above else kids(n, e)
             if ks:
                 cur = offset
+                inner = above | {key} if n != _FILLER else above
                 for k, d in ks:
-                    nxt = walk(k, d, cur, False)
+                    nxt = walk(k, d, cur, False, inner)
                     if not d.get("redefines"):
                         cur = nxt
                 return offset + (cur - offset) * times

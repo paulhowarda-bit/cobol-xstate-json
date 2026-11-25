@@ -40,7 +40,7 @@ provable rather than blocking the offset.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from .data_division import expand_pic
 
@@ -169,8 +169,14 @@ def _members(data: Dict[str, dict], name: str, entry: dict,
 
 
 def _sized(data: Dict[str, dict], name: str, entry: dict,
-           blockers: List[str], kids_of: _Kids) -> Optional[int]:
-    """Total bytes for one item including OCCURS, appending any reason it is unknown."""
+           blockers: List[str], kids_of: _Kids,
+           above: FrozenSet[str] = frozenset()) -> Optional[int]:
+    """Total bytes for one item including OCCURS, appending any reason it is unknown.
+
+    ``above`` holds the names of the groups this item sits inside. Children are found
+    by NAME, so an item named like a group it sits in (`15 X REDEFINES Y. 20 X PIC
+    X(9).`) would be handed that group's children again, forever: it is sized from its
+    own declaration instead (ledger item 169)."""
     if entry.get("occursDependingOn"):
         blockers.append(
             f"{name} OCCURS DEPENDING ON {entry['occursDependingOn']} - the record "
@@ -180,7 +186,10 @@ def _sized(data: Dict[str, dict], name: str, entry: dict,
             f"{name} is SYNCHRONIZED - the compiler inserts slack bytes to align it, "
             f"and how many depends on where the record itself starts")
 
-    kids = _members(data, name, entry, blockers, kids_of)
+    key = name.upper()
+    kids = ([] if key != _FILLER and key in above
+            else _members(data, name, entry, blockers, kids_of))
+    inner = above | {key} if key != _FILLER else above
     if kids:
         total = 0
         for kid_name, kid in kids:
@@ -191,7 +200,7 @@ def _sized(data: Dict[str, dict], name: str, entry: dict,
                     f"{kid_name} REDEFINES {kid['redefines']} - two names occupy the "
                     f"same bytes, so a single offset would not describe both")
                 continue
-            size = _sized(data, kid_name, kid, blockers, kids_of)
+            size = _sized(data, kid_name, kid, blockers, kids_of, inner)
             if size is None:
                 return None
             total += size
@@ -243,15 +252,23 @@ def record_layout(data: Dict[str, dict], record: str, *,
             return None
         return n
 
-    def walk(name: str, ent: dict, offset: int) -> Optional[int]:
+    def walk(name: str, ent: dict, offset: int,
+             above: FrozenSet[str] = frozenset()) -> Optional[int]:
         """Append leaves under `name`, returning the offset just past it.
+
+        ``above`` is the names of the enclosing groups: an item named like one of them
+        is laid out from its own declaration, not handed that group's children again
+        (``_sized``, ledger item 169).
 
         A table occupies ``n`` copies of its element, so the offset handed to the NEXT
         field must clear the whole table - not just its first occurrence. The listed
         rows describe occurrence one (the only one whose position is fixed relative to
         the record); `occurs`/`elementLength` say how to step through the rest.
         """
-        kids = _members(data, name, ent, blockers, kids_of)
+        key = name.upper()
+        kids = ([] if key != _FILLER and key in above
+                else _members(data, name, ent, blockers, kids_of))
+        inner = above | {key} if key != _FILLER else above
         if ent.get("redefines"):
             blockers.append(
                 f"{name} REDEFINES {ent['redefines']} - two names occupy the same "
@@ -271,7 +288,7 @@ def record_layout(data: Dict[str, dict], record: str, *,
             return None if size is None or n is None else offset + size * n
         cur = offset
         for kid_name, kid in kids:
-            nxt = walk(kid_name, kid, cur)
+            nxt = walk(kid_name, kid, cur, inner)
             if nxt is None:
                 return None
             cur = nxt

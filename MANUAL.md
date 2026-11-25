@@ -843,7 +843,11 @@ is a deposit.*
   of another alternative of the same bytes (the redefined item, each named
   `REDEFINES`, each `FILLER REDEFINES`) - placed by byte offset within the alternative
   when every item of both can be sized, otherwise to every item of the other
-  alternative. It is a union, never a replacement.
+  alternative. It is a union, never a replacement. A `REDEFINES` on any declaration of
+  a name declared more than once counts, and an item named like a group it sits in
+  (`15 X REDEFINES Y.` holding `20 X PIC X(9).`) is laid out from its own declaration
+  rather than handed that group's members again (ledger item 169; the byte layout in
+  `record_layout` follows the same rule).
 - **"Did a LINKAGE item change it?"** needs no column — reading a linkage field *is* a
   `GET.CALLER.CALLER` event, so it shows up in `origins` like any other source.
 - **`changedByProgram`** means the program *assigns* it. An input event's own fill
@@ -1623,6 +1627,16 @@ Recovered from five shapes, and **only** where the source proves the corresponde
 | `DECLARE cur CURSOR FOR SELECT …` + `FETCH cur INTO …` | the columns are on the DECLARE and the host variables on the FETCH; the two are joined by cursor name after the whole program is compiled |
 | `INSERT INTO t VALUES (:a, :b)` (no column list) | Db2 defines the slots as the table's **declared order** — taken from the table's `DECLARE TABLE` (its DCLGEN, usually already in the source via `EXEC SQL INCLUDE`), joined after the whole program is compiled |
 
+**A `SELECT INTO` or `FETCH` with fewer host variables than columns** (ledger item 163)
+is zipped too: Db2 assigns the first M columns to the M host variables, in order, and sets
+`SQLWARN3`. It is done only when every INTO name is a data item the program declares
+(structures expanded, indicators attached) — a group whose entry did not arrive is one
+name standing for several columns, and stays `count-mismatch`. The `columnNote` says so
+(`3 column(s) into 2 host variable(s): Db2 assigns the first 2 in order and sets
+SQLWARN3; EFF_D not assigned`), no `columnsUnresolved` is set, and the residual note is
+flagged like a derived slot's. **More** host variables than columns stays refused: Db2
+rejects that statement. Example: `examples/sqlshortinto.cbl`.
+
 **`valueColumns` — a column written from no host variable** (ledger item 161). An
 `INSERT ... VALUES` slot, an `UPDATE ... SET` assignment, or a `MERGE` arm's `SET` /
 `INSERT VALUES` that writes a column from a Db2 clock register or a literal names no
@@ -1781,8 +1795,13 @@ ever added**. It answers a different question — *where did this value read?* �
 `{ "hostVar", "derived" }` entry alone left as "nowhere". An **empty** `derivedFrom` is
 a fact, not a failure to look: `COUNT(*)` and `SELECT 'Y'` genuinely read no column,
 which is what distinguishes them from a `SUM(COL)` whose source was lost. A `CASE`
-expression reports none — which branch supplied the value is a run-time fact, so its
-columns are not a proven dependency. A cursor splits the evidence across two
+expression names the columns its `THEN` and `ELSE` results read — the values it can
+take — and not its `WHEN` conditions (or a simple `CASE`'s subject), which only choose
+between them (ledger item 162): `CASE WHEN C.ORG_NM = ' ' THEN C.GVN_NM ELSE C.ORG_NM
+END` gives `["GVN_NM", "ORG_NM"]`, `CASE WHEN A > 0 THEN 'Y' ELSE 'N' END` gives `[]`.
+Which result a row takes is a run-time fact, as for `COALESCE`, so the entry stays
+`derived`. A `WHEN` inside parentheses (a subselect, a function's arguments) is not the
+item's own, so `SUM(CASE … END)` still reports none. A cursor splits the evidence across two
 statements, so a `FETCH`'s derived slot takes its derivation from the `DECLARE` that
 holds the aggregate. A literal `VALUES (…, CURRENT TIMESTAMP)` slot writes a column from no
 program field and is noted from the column's side. Note `COUNT(*)` is *not*

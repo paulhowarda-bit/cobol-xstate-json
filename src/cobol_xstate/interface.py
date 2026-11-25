@@ -164,7 +164,7 @@ _STR_LIT = re.compile(r"'[^']*'|\"[^\"]*\"")
 from .semantics import mask_literals  # noqa: E402
 # Every table a statement names. Lives with the parser, which needs it for a cursor
 # DECLAREd outside the procedure division and must not import this modelling module.
-from cobol_parser.parser import _sql_table_refs  # noqa: E402
+from cobol_parser.parser import _sql_table_refs, _unassigned_note  # noqa: E402
 from .storage import children_index  # noqa: E402
 
 
@@ -328,6 +328,12 @@ class _DataView:
         self._leaves_memo: Dict[str, List[str]] = {}
         self._record_fields_memo: Dict[str, List[str]] = {}
 
+
+    def declares(self, name: str) -> bool:
+        """True when the data dictionary holds ``name`` as a data item (a condition-name
+        is not one) - what lets a short FETCH INTO list be zipped (ledger item 163)."""
+        it = self.data.get((name or "").upper())
+        return isinstance(it, dict) and it.get("kind") != "condition-name"
     def file_of(self, name: str) -> Optional[str]:
         it = self.data.get((name or "").upper())
         return ((it.get("file") if isinstance(it, dict) else None)
@@ -673,7 +679,8 @@ def _fetch_cursor_name(spec: Optional[dict], up: str) -> Optional[str]:
 
 def _fetch_columns(cursor: Optional[str], into_fields: List[str],
                    cursor_cols: Dict[str, List[str]],
-                   cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None
+                   cursor_derivations: Optional[Dict[str, List[Optional[dict]]]] = None,
+                   all_declared: bool = False
                    ) -> Tuple[Optional[List[dict]], Optional[str], Optional[str]]:
     """Correlate a FETCH's host variables against its cursor's select list.
 
@@ -687,6 +694,12 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
     flag; a consumer that has to branch on it either matches on wording that was never a
     contract, or - as the v52 trace did - reports every field of the event separately as
     an unmapped field, when the whole EVENT is one known unknown.
+
+    A FETCH with FEWER host variables than the cursor selects is zipped by position
+    when ``all_declared`` says every INTO name is a declared data item (ledger item 163,
+    the parser's rule): Db2 assigns the first M columns and sets SQLWARN3, so the note
+    says which columns are not assigned and no reason token is set. More host variables
+    than columns stays refused.
     """
     if not cursor:
         return None, ("the cursor this FETCH reads could not be identified, so its "
@@ -701,6 +714,10 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
         # the reader after a copybook that had never failed to arrive.
         return None, (f"no DECLARE for cursor {cursor} was found in the expanded "
                       f"source, so its columns are unknown"), "cursor-declare-missing"
+    unassigned: List[Optional[str]] = []
+    if len(into_fields) < len(cols) and all_declared:
+        unassigned = cols[len(into_fields):]
+        cols = cols[:len(into_fields)]
     if len(cols) != len(into_fields):
         return None, (f"cursor {cursor} selects {len(cols)} column(s) but this FETCH "
                       f"has {len(into_fields)} host variable(s), host structures already "
@@ -724,6 +741,9 @@ def _fetch_columns(cursor: Optional[str], into_fields: List[str],
         if d:
             entry.update(d)
         out.append(entry)
+    if unassigned:
+        return out, _unassigned_note(len(cols) + len(unassigned), len(into_fields),
+                                     unassigned), None
     return out, None, None
 
 
@@ -795,7 +815,8 @@ def _classify_exec(name: str, cobol: str, spec: Optional[dict], dv: _DataView,
                 if columns is None and note is None:
                     # Spec-less overlay (reactive's rewritten config): correlate here.
                     columns, note, unresolved = _fetch_columns(
-                        cname, into_fields, cursor_cols or {}, cursor_derivations)
+                        cname, into_fields, cursor_cols or {}, cursor_derivations,
+                        all(dv.declares(f) for f in into_fields))
             if endpoint is None:
                 m = _SQL_FROM.search(mup)
                 endpoint = m.group(1) if m else "<cursor>"

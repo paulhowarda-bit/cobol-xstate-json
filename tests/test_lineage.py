@@ -1852,3 +1852,12 @@ def test_the_file_status_field_is_filled_by_every_io_on_its_file():
     assert _sources(d, "OUT-REC") == [["WS-REC"]]     # WRITE ... FROM still flows
     assert not [f for f in d["fills"]
                 if f["endpoint"] == "NOSTAT-FILE" and f["endpointType"] == "response"]
+
+
+def test_a_name_declared_inside_a_group_of_the_same_name_finishes():
+    # item 169: every shape in samename.cbl recursed until RecursionError, so the
+    # program got no lineage at all. ZZADDR-POSTAL-CODE-ERR is the byte
+    # ZZADDR-DOM-ZIP-ERR is, so the ACCEPT reaches OUT-ERR through the REDEFINES.
+    d = _lin("samename.cbl")
+    assert _origins(_row(d, "OUT-ERR")) == {"GET.CONSOLE.SYSIN"}
+    assert _origins(_row(d, "OUT-HEAD")) >= {"GET.CONSOLE.SYSIN"}

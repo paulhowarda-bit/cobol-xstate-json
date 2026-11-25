@@ -1769,20 +1769,24 @@ def _candidate_columns(program: Program, stmt: Optional[str], cursor: str,
     disagrees with the FETCH is dropped, as a static cursor's would get no mapping."""
     from .interface import _fetch_columns
     from .prepared_text import prepared_selects
+    from cobol_parser.parser import _declared_names
+    _declares = _declared_names(program.data_items)
     if not stmt:
         return []
     out: List[dict] = []
     n = 0
     for row in prepared_selects(program, stmt):
         cols, _note, _ = _fetch_columns(cursor, into, {cursor: row["selectList"]},
-                                        {cursor: row.get("selectDerivations") or []})
+                                        {cursor: row.get("selectDerivations") or []},
+                                        all(_declares(v) for v in into))
         if not cols:
             continue
         n += 1
         slot_tables = row.get("selectTables") or []
         only = row["tables"][0] if len(row.get("tables") or []) == 1 else None
         for k, entry in enumerate(cols):
-            table = slot_tables[k] if len(slot_tables) == len(cols) else only
+            table = (slot_tables[k] if len(slot_tables) == len(row["selectList"])
+                     else only)
             if table and "column" in entry:
                 entry = {"table": table, **entry}
             out.append({**entry, "dynamic": True, "candidate": n})
@@ -1811,6 +1815,8 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
     validated against the endpoint table beats one inferred alone).
     """
     from .interface import _SQL_FROM, _data_targets, _fetch_columns
+    from cobol_parser.parser import _declared_names
+    _declares = _declared_names(program.data_items)
     cols_by_cursor: Dict[str, List[Optional[str]]] = {}
     derivs_by_cursor: Dict[str, List[Optional[dict]]] = {}
     tables_by_cursor: Dict[str, List[Optional[str]]] = {}
@@ -1919,10 +1925,13 @@ def _correlate_fetches(ctx: "_BuildCtx", program: Program,
                      f"its columns and tables are not statically knowable")
             continue
         columns, note, unresolved = _fetch_columns(
-            spec.get("cursor"), into, cols_by_cursor, derivs_by_cursor)
+            spec.get("cursor"), into, cols_by_cursor, derivs_by_cursor,
+            all(_declares(v) for v in into))
         slot_tables = tables_by_cursor.get(spec.get("cursor")) or []
-        if columns and len(slot_tables) == len(columns):
-            # One entry per select-list slot, in order (`_fetch_columns` zips them).
+        if columns and len(slot_tables) == len(
+                cols_by_cursor.get(spec.get("cursor")) or ()):
+            # One entry per select-list slot, in order (`_fetch_columns` zips them;
+            # a short INTO list maps the first len(columns) slots, ledger item 163).
             for entry, tbl in zip(columns, slot_tables):
                 if tbl and "column" in entry:
                     entry["table"] = tbl

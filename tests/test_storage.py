@@ -233,3 +233,28 @@ def test_each_record_lays_out_its_own_declaration_of_a_shared_name():
         assert lay["provable"], rec
         assert [(f["name"], f["offset"]) for f in lay["fields"]] == [
             (first, 1), ("CUST-REF-N", 11)], rec
+
+
+# item 169: an item named like a group it sits in is sized from its own declaration,
+# not handed that group's children again until RecursionError.
+def test_record_layout_of_a_group_holding_an_item_of_its_own_name():
+    lay = record_layout(_data("       01  FILL.\n"
+                              "           05  EDIT-AMT     PIC ZZ9.99.\n"
+                              "           05  EDIT-AMT-X REDEFINES EDIT-AMT.\n"
+                              "               10  FILL     PIC X.\n"), "FILL")
+    assert [f["name"] for f in lay["fields"]] == ["EDIT-AMT", "FILL"]
+
+
+def test_record_layout_of_an_01_holding_a_05_of_its_own_name():
+    lay = record_layout(_data("       01  WS-AREA.\n"
+                              "           05  WS-AREA      PIC X(600).\n"), "WS-AREA")
+    assert lay["provable"] and lay["size"] == 600
+    assert lay["fields"][0]["length"] == 600
+
+
+def test_record_layout_through_a_cycle_of_two_names():
+    data = _data("       01  CY-REC-1.\n           05  CY-B.\n"
+                 "               10  CY-C     PIC X(2).\n"
+                 "       01  CY-REC-2.\n           05  CY-C.\n"
+                 "               10  CY-B     PIC X(2).\n")
+    assert record_layout(data, "CY-REC-1")["fields"]

@@ -12,8 +12,8 @@
       *   3000  SELECT 'Y'        - a literal: truly no source column  *
       *   4000  COUNT(*)          - aggregates all rows: no source     *
       *   5000  QTY * PRICE       - an expression over two columns     *
-      *   6000  CASE ... END      - which branch supplied it is a      *
-      *         RUN-TIME fact, so the sources are NOT proven: refused  *
+      *   6000  CASE ... END      - its THEN/ELSE results name the     *
+      *         columns; the WHEN condition only chooses (item 162)    *
       *   7000  a cursor whose DECLARE holds the aggregate, and the    *
       *         FETCH that fills the slot without ever seeing it       *
       *================================================================*
