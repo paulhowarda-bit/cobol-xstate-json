@@ -1861,3 +1861,111 @@ def test_a_name_declared_inside_a_group_of_the_same_name_finishes():
     d = _lin("samename.cbl")
     assert _origins(_row(d, "OUT-ERR")) == {"GET.CONSOLE.SYSIN"}
     assert _origins(_row(d, "OUT-HEAD")) >= {"GET.CONSOLE.SYSIN"}
+
+
+# --------------------------------------------------------------------------- #
+# Ledger item 170: a SORT / MERGE work file is a channel inside the program
+# --------------------------------------------------------------------------- #
+
+def _src_lin(src: str) -> dict:
+    return build_lineage(build_machine(parse_program(src), source_name="inline.cbl"))
+
+
+def _rows(d: dict, field: str, verb: str) -> list:
+    return [r for r in d["rows"] if r["field"] == field and r["verb"] == verb]
+
+
+def test_a_sort_gives_what_its_input_procedure_released():
+    # the item's minimum shape: one GIVING row per WO-* field, from IN-FILE; the
+    # program reads WORK-OUT back and gets IN-FILE's records, and so does RPT-FILE
+    d = _lin("sortgive.cbl")
+    for f in ("WO-REC", "WO-KEY", "WO-AMT"):
+        rows = _rows(d, f, "SORT GIVING")
+        assert len(rows) == 1 and rows[0]["direction"] == "output"
+        assert rows[0]["event"] == "CREATE.FILE.WORK-OUT"
+        assert _origins(rows[0]) == {"GET.FILE.IN-FILE"}
+        reads = _rows(d, f, "READ")
+        assert reads and all(_origins(r) == {"GET.FILE.IN-FILE"} for r in reads)
+    assert _origins(_row(d, "RPT-AMT")) == {"GET.FILE.IN-FILE"}
+
+
+def test_a_sort_using_and_giving_crosses_both_files():
+    d = _lin("sortusing.cbl")
+    assert _origins(_rows(d, "A-KEY", "SORT USING")[0]) == {"GET.FILE.A-FILE"}
+    assert _origins(_rows(d, "B-VAL", "SORT GIVING")[0]) == {"GET.FILE.A-FILE"}
+    src = (EXAMPLES / "sortusing.cbl").read_text()
+    iface = build_machine(parse_program(src), source_name="sortusing.cbl").interface()
+    crossings = {(e["event"], e["verb"]) for e in iface["events"]}
+    assert ("GET.FILE.A-FILE", "SORT USING") in crossings
+    assert ("CREATE.FILE.B-FILE", "SORT GIVING") in crossings
+
+
+def test_a_return_delivers_the_using_file_not_the_sort_file():
+    d = _lin("sortusing.cbl")
+    assert _origins(_rows(d, "WS-X", "RETURN (sort)")[0]) == {"GET.FILE.A-FILE"}
+    assert _origins(_row(d, "WS-X-VAL")) == {"GET.FILE.A-FILE"}
+
+
+def test_a_merge_gives_every_input():
+    d = _lin("sortusing.cbl")
+    assert _origins(_rows(d, "C-VAL", "MERGE GIVING")[0]) == {
+        "GET.FILE.A-FILE", "GET.FILE.D-FILE"}
+
+
+_TWO_SORTS = """\
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. TWOSORT.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT F1 ASSIGN TO F1.
+           SELECT F2 ASSIGN TO F2.
+           SELECT G1 ASSIGN TO G1.
+           SELECT G2 ASSIGN TO G2.
+           SELECT SW ASSIGN TO SORTWK.
+       DATA DIVISION.
+       FILE SECTION.
+       FD  F1.
+       01  F1-REC     PIC X(8).
+       FD  F2.
+       01  F2-REC     PIC X(8).
+       FD  G1.
+       01  G1-REC     PIC X(8).
+       FD  G2.
+       01  G2-REC     PIC X(8).
+       SD  SW.
+       01  SW-REC     PIC X(8).
+       WORKING-STORAGE SECTION.
+       01  WS-A       PIC X(8).
+       01  WS-B       PIC X(8).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           READ G2 INTO WS-A
+           SORT SW ON ASCENDING KEY SW-REC
+               INPUT PROCEDURE 1000-ONE GIVING G1
+           SORT SW ON ASCENDING KEY SW-REC
+               INPUT PROCEDURE 2000-TWO GIVING G2
+           READ G2 INTO WS-B
+           DISPLAY WS-A WS-B
+           STOP RUN.
+       1000-ONE.
+           READ F1
+           RELEASE SW-REC FROM F1-REC.
+       2000-TWO.
+           READ F2
+           RELEASE SW-REC FROM F2-REC.
+"""
+
+
+def test_a_second_sort_on_the_same_file_starts_empty():
+    d = _src_lin(_TWO_SORTS)
+    assert _origins(_rows(d, "G1-REC", "SORT GIVING")[0]) == {"GET.FILE.F1"}
+    assert _origins(_rows(d, "G2-REC", "SORT GIVING")[0]) == {"GET.FILE.F2"}
+
+
+def test_a_given_file_read_before_its_sort_reads_the_file():
+    # the read before the GIVING is the dataset's records; the read after it is the
+    # sort's (the second SORT's: F2)
+    d = _src_lin(_TWO_SORTS)
+    assert _origins(_row(d, "WS-A")) == {"GET.FILE.G2"}
+    assert _origins(_row(d, "WS-B")) == {"GET.FILE.F2"}

@@ -358,6 +358,14 @@ _WORD = re.compile(r"[A-Z][A-Z0-9-]*")
 # *dependency* is plain from the operands - which is all lineage needs.
 _DEP_ONLY = {"STRING", "UNSTRING", "INSPECT"}
 _UNKNOWN = "<unknown>"
+# A SORT / MERGE work file as a channel INSIDE the program (ledger item 170): what goes
+# in (the INPUT PROCEDURE's RELEASEs, the USING files) and what comes out (its RETURNs,
+# its GIVING files), and what a file the program GAVE holds when it reads it back. Keys
+# of the origin map that no data name can spell, kept beside the fields' own.
+_RELEASED = "__RELEASE__:"   # + sort file: records RELEASEd since its last sort ran
+_SORTED = "__SORT__:"        # + sort file: what its last sort delivers
+_GIVEN = "__GIVEN__:"        # + file: what a GIVING last wrote into it
+_SORT_VERBS = ("SORT", "MERGE")
 # `IN-FILE_atEnd` / `IN-FILE_notAtEnd`: the READ lowering's synthetic end-of-stream guards.
 _ATEND = re.compile(r"^(.*?)_(not)?[Aa]t[Ee]nd$")
 
@@ -589,6 +597,12 @@ class _Lineage:
         # sites read only `h["direction"]`.
         self._classify_memo: Dict[str, List[dict]] = {}
         self._exec_writes_memo: Dict[str, List[Tuple[str, List[str]]]] = {}
+        # The SORT / MERGE effects (action names): their channel is the only reason
+        # `_apply` looks at a sort at all, so a program with none skips it entirely.
+        self._sorts: Set[str] = {
+            a for a, p in self.provenance.items()
+            if p.get("kind") == "action" and a not in self.actions
+            and (p.get("cobol") or "").upper().split()[:1] in (["SORT"], ["MERGE"])}
         self.flags: List[str] = []
         self._flag_set: Set[str] = set()      # `flags` as a set: the dedup test
         # Primitive provenance facts, recorded during the final (row-emitting) pass so a
@@ -1125,12 +1139,7 @@ class _Lineage:
             cobol = prov.get("cobol", "")
             line = prov.get("line", 0)
             spec = self.actions.get(aname)
-            hits = self._classify_memo.get(aname)
-            if hits is None:
-                hits = _iface._classify(aname, cobol, spec, self.dv, self.files,
-                                        self.cursors, self.cursor_cols,
-                                        self.cursor_derivs, self.cursor_refs)
-                self._classify_memo[aname] = hits
+            hits = self._hits(aname, cobol, spec)
             got = [h for h in hits if h["direction"] == "get"]
             made = [h for h in hits if h["direction"] == "create"]
             # A MOVE / COMPUTE / SET into a LINKAGE (COMMAREA) field or RETURN-CODE is the
@@ -1173,11 +1182,18 @@ class _Lineage:
             # bytes: a group reads as its leaves and FILLERs (`_read`), so a fill that
             # left `G#FILLER` holding an older `MOVE SPACES TO G` made `ACCEPT G` /
             # `MOVE G TO T` say T was "internally set".
+            # What arrives is the event itself, except where the record comes off a sort
+            # channel (`_arrival`): a RETURN, or a read of a file this program GAVE.
             for h in got + status:
                 ev = _iface._event("get", h["etype"], h["endpoint"])
-                for f in h["fields"]:
+                filled = self._arrival(h, ev, cur)
+                fields = h["fields"]
+                if h["verb"] == "RETURN (sort)":
+                    # RETURN s INTO x fills the SD record, then x from it
+                    fields = fields + [x for r in self.dv.records_of(h["endpoint"])
+                                       for x in self.dv.record_fields(r)]
+                for f in fields:
                     fu = f.upper()
-                    filled = frozenset({(ev, False, None)})
                     values = {fu: filled}
                     for leaf in self.dv.leaves(fu):
                         if leaf != fu:
@@ -1326,6 +1342,10 @@ class _Lineage:
                             cur[x] = frozenset(set(cur.get(x, frozenset()))
                                                | {(ev, True, h["endpoint"])})
 
+            # 4b. the sort channel (ledger item 170), before step 5 reports GIVING.
+            if self._sorts:
+                self._sort_channel(aname, cobol, got, made, cur)
+
             # 5. an OUTPUT event emits fields: report what reaches it.
             if rows is not None:
                 for h in made:
@@ -1354,6 +1374,85 @@ class _Lineage:
                             "origins": self._origins_of(str(h["endpoint"]), cur),
                         })
         return cur
+
+    def _hits(self, aname: str, cobol: str, spec: Optional[dict]) -> List[dict]:
+        """``_classify``'s boundary hits for one action, memoized per instance (see
+        `_classify_memo` for why never wider)."""
+        hits = self._classify_memo.get(aname)
+        if hits is None:
+            hits = _iface._classify(aname, cobol, spec, self.dv, self.files,
+                                    self.cursors, self.cursor_cols,
+                                    self.cursor_derivs, self.cursor_refs)
+            self._classify_memo[aname] = hits
+        return hits
+
+    def _arrival(self, h: dict, ev: str, cur: State) -> OriginSet:
+        """What the fields of input hit ``h`` hold once it arrives: the event ``ev``
+        itself, unless the record comes off a sort channel. A RETURN delivers what its
+        sort was given; a read of a file a SORT / MERGE ... GIVING wrote delivers what
+        that GIVING wrote - the program reads back exactly what it sorted, whatever the
+        step binds the ddname to (`_GIVEN` is seeded with the file's own event, so a path
+        on which no GIVING ran still reads the file)."""
+        if self._sorts and h["etype"] == _iface._FILE:
+            key = (_SORTED if h["verb"] == "RETURN (sort)" else _GIVEN) + h["endpoint"]
+            held = cur.get(key)
+            if held is not None:
+                return held
+        return frozenset({(ev, False, None)})
+
+    def _sort_channel(self, aname: str, cobol: str, got: List[dict], made: List[dict],
+                      cur: State) -> None:
+        """Carry records through a sort work file. A RELEASE adds the origins of the
+        record it writes to the file's `_RELEASED` key; the SORT / MERGE itself turns
+        those, and its USING files, into what it delivers (`_SORTED`), and starts the
+        next sort on the file empty; a GIVING file is written with what it delivers,
+        into its records and its `_GIVEN` key, before step 5 reports them. A RETURN
+        reads `_SORTED` (`_arrival`)."""
+        for h in made:
+            if h["verb"] == "RELEASE (sort)":
+                acc: Set[Origin] = set()
+                for f in h["fields"]:
+                    acc |= self._read(f.upper(), cur)
+                key = _RELEASED + h["endpoint"]
+                cur[key] = frozenset(acc | set(cur.get(key) or ()))
+        if aname not in self._sorts:
+            return
+        words = cobol.upper().split()
+        sfile = words[1] if len(words) > 1 and words[1] not in ("USING", "GIVING") \
+            else None
+        delivered: Set[Origin] = set()
+        if sfile:
+            released = cur.get(_RELEASED + sfile)
+            if released:
+                delivered |= released
+                cur[_RELEASED + sfile] = frozenset()
+        for h in got:
+            if h["verb"].endswith(" USING"):
+                delivered |= self._arrival(
+                    h, _iface._event("get", h["etype"], h["endpoint"]), cur)
+        delivered = frozenset(delivered)
+        if sfile:
+            cur[_SORTED + sfile] = delivered
+        for h in made:
+            if h["verb"].endswith(" GIVING"):
+                values: Dict[str, OriginSet] = {_GIVEN + h["endpoint"]: delivered}
+                for f in h["fields"]:
+                    fu = f.upper()
+                    values[fu] = delivered
+                    for leaf in self.dv.leaves(fu):
+                        values[leaf] = delivered
+                    for key in self.sub_fillers.get(fu, ()):
+                        values[key] = delivered
+                self._put(values, cur)
+
+    def _sort_givings(self) -> List[str]:
+        """Every file a SORT / MERGE of this program GIVES, sorted."""
+        out = set()
+        for a in self._sorts:
+            for h in self._hits(a, self.provenance[a].get("cobol", ""), None):
+                if h["direction"] == "create" and h["etype"] == _iface._FILE:
+                    out.add(h["endpoint"])
+        return sorted(out)
 
     _CLOSE = re.compile(r"^\s*CLOSE\b(.*)$", re.I | re.S)
 
@@ -1786,6 +1885,11 @@ class _Lineage:
                 # as its leaves and FILLER keys only (`_read`)
                 for key in self.sub_fillers.get(n.upper(), ()):
                     seed[key] = seed[n.upper()]
+        # A file some SORT / MERGE GIVES holds the file's own records until a GIVING
+        # writes it, so a read on a path where none ran still reads the file (`_arrival`).
+        for f in self._sort_givings():
+            seed[_GIVEN + f] = frozenset({(_iface._event("get", _iface._FILE, f),
+                                           False, None)})
         return seed
 
     def _changers(self) -> Dict[str, List[dict]]:

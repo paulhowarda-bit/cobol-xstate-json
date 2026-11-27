@@ -1154,9 +1154,16 @@ class _ParaCompiler:
         if st.input_proc:
             perform_proc(st.input_proc, st.input_thru, "INPUT")
 
+        # The effect's text carries the USING / GIVING clauses the parse holds: the
+        # interface's SORT/MERGE branch reads its file crossings off this text, and the
+        # lineage view its sort channel (ledger item 170). Without them both found none.
+        text = st.raw or f"{st.verb} {st.file or ''}".strip()
+        if st.using:
+            text += " USING " + " ".join(st.using)
+        if st.giving:
+            text += " GIVING " + " ".join(st.giving)
         sort_eff = self.reg.action_named(
-            f"{st.verb.lower()}_{_slug(st.file or 'FILE')}",
-            st.raw or f"{st.verb} {st.file or ''}".strip(), st.line)
+            f"{st.verb.lower()}_{_slug(st.file or 'FILE')}", text, st.line)
         entry.append(sort_eff)
         self.ctx.flag(self.pname, st.line,
                       f"{st.verb} on {st.file or '?'} is an opaque effect; record ordering "

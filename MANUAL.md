@@ -871,6 +871,17 @@ is a deposit.*
   cannot be placed field by field`: a superset, never an empty answer.
 - **`CALL ... USING`** is by reference and the callee is another program, so its arguments
   get a `maybe` origin with `resolvedBy` naming the program that would settle it.
+- **A `SORT` / `MERGE` work file is a channel inside the program** (ledger item 170).
+  What goes in — each `RELEASE`'s record, each `USING` file — is what comes out: a
+  `RETURN s [INTO x]` fills the SD record (and `x`) with it, not with `GET.FILE.s`, and
+  a `GIVING g` writes it into `g`'s records, so the `SORT GIVING` output rows (one per
+  field of `g`'s records) say what was sorted into the file. A `USING f` has input rows
+  of its own. A file the program `GIVES` and then reads back holds what the `GIVING`
+  wrote: the program reads exactly what it sorted, whatever the step binds the ddname
+  to, while a read on a path where no `GIVING` ran still reads the file. Each sort on a
+  work file starts empty. The channel is record-grained: every field the sort delivers
+  carries every origin that went in, since which input field lands in which output field
+  is the record layout, not the sort.
 - **LINKAGE the program addresses itself is not the caller's.** A record whose address is
   set, every time, to this program's own storage — `SET ADDRESS OF LK-X TO ADDRESS OF
   WS-Y`, a pointer provably holding such an address, or CICS `GETMAIN SET(ADDRESS OF
@@ -1397,7 +1408,7 @@ collapsed is a run of genuinely straight-line statements, which folds into one s
 | `PERFORM p` (simple) | call-return action `perform_p`; a real `invoke` in `--target js` |
 | **`PERFORM section-name`** | owns the section's whole extent — header **plus all member paragraphs** |
 | `PERFORM p THRU q` | a range actor spanning `p..q` in source order (a THRU tail that is a section extends through its members) |
-| `SORT/MERGE … INPUT/OUTPUT PROCEDURE` | `perform_input` → `sort_file` effect → `perform_output` |
+| `SORT/MERGE … INPUT/OUTPUT PROCEDURE` | `perform_input` → `sort_file` effect → `perform_output`; the effect's text keeps its `USING` / `GIVING` files, which the interface publishes as `SORT USING` (`get`) and `SORT GIVING` (`create`) file crossings (ledger item 170) |
 | `GO TO p` | exit `always` edge (no return); suppresses fall-through |
 | **`GO TO p OF sec`** | qualification consumed; the unqualified name is the target |
 | **`GO TO` unknown paragraph** | flagged and rerouted to program end (never a dangling edge) |
@@ -1801,7 +1812,26 @@ between them (ledger item 162): `CASE WHEN C.ORG_NM = ' ' THEN C.GVN_NM ELSE C.O
 END` gives `["GVN_NM", "ORG_NM"]`, `CASE WHEN A > 0 THEN 'Y' ELSE 'N' END` gives `[]`.
 Which result a row takes is a run-time fact, as for `COALESCE`, so the entry stays
 `derived`. A `WHEN` inside parentheses (a subselect, a function's arguments) is not the
-item's own, so `SUM(CASE … END)` still reports none. A cursor splits the evidence across two
+item's own, so `SUM(CASE … END)` still reports none. Nor is a scalar subselect's
+`SELECT` keyword, or `STRIP`'s strip-type argument (`STRIP(T.NM, TRAILING, ' ')` gives
+`["NM"]`).
+
+Beside `derivedFrom`, **`derivedFromColumns`** says which table each of those columns
+belongs to (ledger item 171) — one `{table, column}` per reference, so a name read from
+two tables appears twice. The entry's own `table` is the statement's first `FROM`
+table; for a join that is often not where the column lives:
+
+```json
+{ "table": "T_ACCT", "hostVar": "WS-ADDR", "derived": true,
+  "expression": "COALESCE", "derivedFrom": ["ADDR_1"],
+  "derivedFromColumns": [{ "table": "T_ADDR", "column": "ADDR_1" }] }
+```
+
+A qualified reference takes the base table its qualifier binds; `table` is `null` where
+the qualifier binds no single base table (a nested table expression, a common table
+expression) or where a bare name sits in a statement reading several tables. A bare name
+over one table takes that table. A scalar subselect's columns are its own `FROM`'s and
+are not listed. The key is present only where `derivedFrom` is non-empty. A cursor splits the evidence across two
 statements, so a `FETCH`'s derived slot takes its derivation from the `DECLARE` that
 holds the aggregate. A literal `VALUES (…, CURRENT TIMESTAMP)` slot writes a column from no
 program field and is noted from the column's side. Note `COUNT(*)` is *not*

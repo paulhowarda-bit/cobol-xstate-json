@@ -807,7 +807,8 @@ def test_an_aggregates_source_column_is_kept_as_provenance():
     iface = _iface("sqlderiv.cbl")
     assert _derived(iface, "W-TOTAL-SPOKE") == {
         "table": "T_DMJT_JRNL_TXN", "hostVar": "W-TOTAL-SPOKE", "derived": True,
-        "expression": "SUM", "derivedFrom": ["SPOKE_ZOL_A"]}
+        "expression": "SUM", "derivedFrom": ["SPOKE_ZOL_A"],
+        "derivedFromColumns": [{"table": "T_DMJT_JRNL_TXN", "column": "SPOKE_ZOL_A"}]}
     # Nested: `VALUE(SUM(COL), 0)` reports the outermost function and recurses through
     # its arguments, so the innermost NAMED column is the source.
     nested = _derived(iface, "W-TOTAL-HST")
@@ -853,7 +854,8 @@ def test_a_fetch_takes_its_derivation_from_the_cursors_declare():
         "ORGX_BRCH_C", "ORGX_BASE_C", None]
     assert fetch["columns"][2] == {
         "table": "RTOA_ADJUSTMENT", "hostVar": "W-SUM-ADJ", "derived": True,
-        "expression": "SUM", "derivedFrom": ["ADJ_A"]}
+        "expression": "SUM", "derivedFrom": ["ADJ_A"],
+        "derivedFromColumns": [{"table": "RTOA_ADJUSTMENT", "column": "ADJ_A"}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -1833,3 +1835,28 @@ def test_a_select_into_with_fewer_host_variables_maps_the_first_columns():
 def test_a_case_item_in_a_select_names_its_result_columns():
     assert _derived(_iface("sqlshortinto.cbl"), "WS-FULL-NAME")["derivedFrom"] == [
         "GVN_NM", "ORG_NM"]
+
+
+# --------------------------------------------------------------------------- #
+# sqlderivtab: ledger item 171 - the table each derived column belongs to
+# --------------------------------------------------------------------------- #
+
+def test_a_derived_slot_names_the_table_of_each_column_it_reads():
+    iface = _iface("sqlderivtab.cbl")
+    addr = _derived(iface, "WS-ADDR")
+    assert addr["table"] == "T_ACCT"            # the entry's own stamp is unchanged
+    assert addr["derivedFrom"] == ["ADDR_1"]
+    assert addr["derivedFromColumns"] == [{"table": "T_ADDR", "column": "ADDR_1"}]
+    assert _derived(iface, "WS-DOL")["derivedFromColumns"] == [
+        {"table": None, "column": "ZOL_A"}]
+    strip = _derived(iface, "WS-NM")
+    assert strip["derivedFrom"] == ["ZSS_1_DS"]
+    assert strip["derivedFromColumns"] == [{"table": "T_QMSP_SPEED", "column": "ZSS_1_DS"}]
+
+
+def test_a_fetch_carries_the_declares_derived_columns():
+    iface = _iface("sqlderivtab.cbl")
+    fetch = next(e for e in iface["events"] if e["verb"] == "FETCH")
+    assert fetch["columns"][1]["derivedFromColumns"] == [
+        {"table": "T_QXRI_BANK", "column": "ZNK_NM_AD_1"},
+        {"table": "T_QXES_BANK", "column": "ZNK_NM_AD_1"}]
