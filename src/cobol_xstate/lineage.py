@@ -43,6 +43,7 @@ Honest limits, all surfaced in ``flags`` rather than guessed:
 
 from __future__ import annotations
 
+import bisect
 import functools
 import heapq
 import json
@@ -566,6 +567,10 @@ class _Lineage:
         self.aliases: Dict[str, Tuple[str, ...]] = self._redefines_aliases()
         self._layouts: Dict[str, dict] = {}
         self._placements: Dict[Tuple[str, str], tuple] = {}
+        # written keys -> (aliases outside them, the written keys reaching each): the
+        # alias walk of `_put`, done once per store shape rather than at every visit
+        # (ledger item 177).
+        self._alias_plans: Dict[Tuple[str, ...], tuple] = {}
         self._canon: Dict[OriginSet, OriginSet] = {}
         self.cursors = _iface._cursor_tables(self.provenance)
         # A FETCH's host-variable <-> Db2 COLUMN correlation, recovered from the cursor's
@@ -1561,27 +1566,40 @@ class _Lineage:
         alias gains the store's origins as a UNION, never a replacement - it may cover
         bytes this store does not reach. A union keeps the transfer monotone."""
         if self.aliases:
-            # A group store writes ONE origins object to every leaf, and each leaf can
-            # have many aliases: union per alias only what is new, never the same set
-            # again (ledger item 176).
-            extra: Dict[str, OriginSet] = {}
-            aliases, xget = self.aliases, extra.get
-            for written, origins in values.items():
-                for a in aliases.get(written, ()):
-                    if a in values:
-                        continue
-                    got = xget(a)
-                    if got is None:
-                        extra[a] = origins
-                    elif got is not origins and not origins <= got:
-                        extra[a] = got | origins
-            canon, get = self._canon, cur.get
-            for a, origins in extra.items():
-                prev = get(a)
-                if prev is not None and origins <= prev:
-                    continue                    # the alias holds every origin already
-                u = frozenset(origins.union(prev or ()))
-                values[a] = canon.setdefault(u, u)
+            # Which aliases a store reaches depends only on the keys it writes, and a
+            # store writes the same keys at every visit: walked once per key set. A
+            # group store of a whole REDEFINES base reaches none outside itself, and
+            # walking its leaves x aliases at every visit to find that out was most of
+            # the lineage pass on CICS programs with a many-layout COMMAREA.
+            key = tuple(values)
+            plan = self._alias_plans.get(key)
+            if plan is None:
+                reach: Dict[str, List[str]] = {}
+                aliases = self.aliases
+                for written in values:
+                    for a in aliases.get(written, ()):
+                        if a not in values:
+                            reach.setdefault(a, []).append(written)
+                plan = self._alias_plans[key] = (
+                    tuple(reach), tuple(tuple(ws) for ws in reach.values()))
+            names, reached = plan
+            if names:
+                # A coarse group store writes ONE origins object to every key: then
+                # every alias gains exactly that object, whichever keys reach it.
+                first = next(iter(values.values()))
+                same = all(v is first for v in values.values())
+                canon = self._canon
+                for a, ws, prev in zip(names, reached, cur.many(list(names))):
+                    origins = values[ws[0]]
+                    if not same:
+                        for w in ws[1:]:
+                            o = values[w]
+                            if o is not origins and not o <= origins:
+                                origins = origins | o
+                    if prev is not None and origins <= prev:
+                        continue                # the alias holds every origin already
+                    u = frozenset(origins.union(prev or ()))
+                    values[a] = canon.setdefault(u, u)
         cur.put(values)
 
     def _redefines_aliases(self) -> Dict[str, Tuple[str, ...]]:
@@ -1622,17 +1640,26 @@ class _Lineage:
                 sorted(bases[base], key=lambda p: int(p[1].get("line") or 0))]
             for i, (leaves_a, spans_a) in enumerate(alts):
                 for leaves_b, spans_b in alts[i + 1:]:
-                    placed = spans_a is not None and spans_b is not None
-                    for a in leaves_a:
+                    if spans_a is None or spans_b is None:
+                        # every item of one against every item of the other, a whole
+                        # set at a time (an item's pair with itself is dropped below)
+                        for a in leaves_a:
+                            out.setdefault(a, set()).update(leaves_b)
                         for b in leaves_b:
-                            if a == b:
-                                continue
-                            if placed and not (spans_a[a][0] < spans_b[b][1]
-                                               and spans_b[b][0] < spans_a[a][1]):
-                                continue
-                            out.setdefault(a, set()).add(b)
-                            out.setdefault(b, set()).add(a)
-        return {k: tuple(sorted(v)) for k, v in sorted(out.items())}
+                            out.setdefault(b, set()).update(leaves_a)
+                        continue
+                    bs = sorted(leaves_b, key=spans_b.__getitem__)
+                    starts = [spans_b[b][0] for b in bs]
+                    for a in leaves_a:
+                        lo, hi = spans_a[a]
+                        # only an item starting before `a` ends can overlap it
+                        for b in bs[:bisect.bisect_left(starts, hi)]:
+                            if a != b and lo < spans_b[b][1]:
+                                out.setdefault(a, set()).add(b)
+                                out.setdefault(b, set()).add(a)
+        for k, v in out.items():
+            v.discard(k)                        # an item is never its own alias
+        return {k: tuple(sorted(v)) for k, v in sorted(out.items()) if v}
 
     def _alternative(self, name: str, entry: dict
                      ) -> Tuple[List[str], Optional[Dict[str, Tuple[int, int]]]]:
@@ -2450,6 +2477,7 @@ class _Lineage:
         # Only the solve reads these, and the view above is all that is asked for again;
         # the Machine keeps this instance cached, so do not keep them alive with it.
         self._kids, self._layouts, self._placements, self._canon = None, {}, {}, {}
+        self._alias_plans = {}
         return self._view
 
 

@@ -1851,6 +1851,103 @@ def test_an_unplaceable_redefines_gains_the_union_of_a_placed_group_store():
     assert _origins(_row(d, "OUT-A")) == three
 
 
+def _lineage_of(name: str):
+    from cobol_xstate.lineage import _Lineage
+    src = (EXAMPLES / name).read_text()
+    return _Lineage(build_machine(parse_program(src), source_name=name))
+
+
+def _pairwise_aliases(lin) -> dict:
+    """The definition `_redefines_aliases` must keep (ledger item 177): every pair of
+    items of two alternatives of one base, placed pairs only where their bytes overlap."""
+    bases = {}
+    for n, e in lin.data.items():
+        if isinstance(e, dict) and n != "FILLER":
+            for d in e.get("declarations") or (e,):
+                if d.get("redefines"):
+                    bases.setdefault(str(d["redefines"]).upper(), []).append((n, d))
+    stack = [f for e in lin.data.values() if isinstance(e, dict)
+             for f in e.get("fillers") or ()]
+    while stack:
+        f = stack.pop()
+        stack.extend(f.get("fillers") or ())
+        if f.get("redefines"):
+            bases.setdefault(str(f["redefines"]).upper(), []).append(("FILLER", f))
+    out = {}
+    for base in sorted(bases):
+        entry = lin.data.get(base)
+        if not isinstance(entry, dict) or base not in lin.known:
+            continue
+        alts = [lin._alternative(base, entry)] + [
+            lin._alternative(n, e) for n, e in
+            sorted(bases[base], key=lambda p: int(p[1].get("line") or 0))]
+        for i, (la, sa) in enumerate(alts):
+            for lb, sb in alts[i + 1:]:
+                placed = sa is not None and sb is not None
+                for a in la:
+                    for b in lb:
+                        if a == b or placed and not (sa[a][0] < sb[b][1]
+                                                     and sb[b][0] < sa[a][1]):
+                            continue
+                        out.setdefault(a, set()).add(b)
+                        out.setdefault(b, set()).add(a)
+    return {k: tuple(sorted(v)) for k, v in sorted(out.items())}
+
+
+@pytest.mark.parametrize("name", ["redefalias.cbl", "redefloop.cbl", "samename.cbl"])
+def test_redefines_aliases_keep_the_pairwise_definition(name):
+    # item 177: placed (redefalias), unplaced and mixed (redefloop: REC-W cannot be
+    # placed, W-B-N REDEFINES W-B can), and a re-declared name (samename)
+    lin = _lineage_of(name)
+    assert lin.aliases
+    assert lin.aliases == _pairwise_aliases(lin)
+
+
+def _uncached_put(lin, values, cur):
+    """`_put` as it was before ledger item 177: the alias walk at every visit."""
+    extra = {}
+    for written, origins in values.items():
+        for a in lin.aliases.get(written, ()):
+            if a in values:
+                continue
+            got = extra.get(a)
+            if got is None:
+                extra[a] = origins
+            elif got is not origins and not origins <= got:
+                extra[a] = got | origins
+    for a, origins in extra.items():
+        prev = cur.get(a)
+        if prev is not None and origins <= prev:
+            continue
+        values[a] = frozenset(origins.union(prev or ()))
+    cur.put(values)
+
+
+def test_a_planned_put_reaches_what_the_uncached_walk_reaches():
+    # item 177: a one-origins group store, a placed group store whose leaves carry
+    # different origins, and a store whose aliases already hold every origin - each
+    # twice, so the second visit runs from the cached plan
+    from cobol_xstate.lineage import _Tracked
+    lin = _lineage_of("redefloop.cbl")
+    x = frozenset({("GET.X", False, None)})
+    y = frozenset({("GET.Y", False, None)})
+    z = frozenset({("GET.Z", False, None)})
+    stores = [
+        {"V-A": x, "V-B": x, "V-C": x},
+        {"V-A": x, "V-B": y, "V-C": z},
+        {"W-B": y},
+    ]
+    starts = [{}, {"W-A": frozenset(x | y | z), "W-B-N": x}]
+    for start in starts:
+        for store in stores:
+            for _ in range(2):
+                want, got = _Tracked.of(start), _Tracked.of(start)
+                _uncached_put(lin, dict(store), want)
+                lin._put(dict(store), got)
+                assert dict(got) == dict(want), (start, store)
+    assert lin._alias_plans
+
+
 def test_the_file_status_field_is_filled_by_every_io_on_its_file():
     # item 160
     d = _lin("filestat.cbl")
