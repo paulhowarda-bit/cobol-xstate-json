@@ -1841,6 +1841,16 @@ def test_a_store_is_carried_across_a_redefines():
     assert _origins(_row(d, "OUT-NB")) == set()
 
 
+def test_an_unplaceable_redefines_gains_the_union_of_a_placed_group_store():
+    # item 176: REC-W holds a REDEFINES of its own, so every item of REC-V is an alias
+    # of every item of REC-W; the MOVE into REC-V is placed field by field, so each
+    # REC-W item gains all three fields' origins, and keeps them round the loop.
+    d = _lin("redefloop.cbl")
+    three = {"GET.CONSOLE.SYSIN", "GET.SYSTEM.SYSTEM-DATE", "GET.SYSTEM.SYSTEM-TIME"}
+    assert _origins(_row(d, "OUT-B")) == three
+    assert _origins(_row(d, "OUT-A")) == three
+
+
 def test_the_file_status_field_is_filled_by_every_io_on_its_file():
     # item 160
     d = _lin("filestat.cbl")

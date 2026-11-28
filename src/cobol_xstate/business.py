@@ -151,7 +151,7 @@ class _BusinessView:
         self.iface = iface
         self.perimeter = iface["perimeterStates"]
         self.files = getattr(machine, "files", {}) or {}
-        self._dv = _iface._DataView(machine.data, machine.fd_records)
+        self._dv = _iface._DataView(machine.data, machine.fd_records, machine.children())
         self._cursors = _iface._cursor_tables(machine.provenance)
         # host-var <-> Db2 column correlation for a cursor FETCH; without it a FETCH's
         # boundary action carried no columns (only the interface build passed this).

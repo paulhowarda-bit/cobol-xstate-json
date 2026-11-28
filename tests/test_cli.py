@@ -236,6 +236,21 @@ def test_default_run_writes_all_views(tmp_path):
                                 "banktran.dynamic-calls.json"}  # targets it cannot name
 
 
+def test_indent_none_writes_every_view_compact_and_otherwise_the_same(tmp_path):
+    """Ledger item 173: a caller that reads the views back by machine asks for compact
+    text; each file is then one line holding the default run's document."""
+    src = Path(__file__).resolve().parents[1] / "examples" / "banktran.cbl"
+    pretty, compact = tmp_path / "pretty", tmp_path / "compact"
+    assert run([str(src), "--outdir", str(pretty)]) == 0
+    assert run([str(src), "--outdir", str(compact), "--indent", "none"]) == 0
+    names = sorted(p.name for p in pretty.glob("*.json"))
+    assert names == sorted(p.name for p in compact.glob("*.json")) and len(names) >= 6
+    for name in names:
+        text = (compact / name).read_text(encoding="utf-8")
+        assert text.count("\n") == 1 and text.endswith("\n"), name
+        assert json.loads(text) == json.loads((pretty / name).read_text(encoding="utf-8"))
+
+
 def test_machine_generated_depth_writes_every_view(tmp_path, caplog):
     """Shapes generated code has, each about 1,500 deep, every one of which overflowed
     Python's stack somewhere: an IF with 1,500 ORs (the whole run died) or ANDs, a

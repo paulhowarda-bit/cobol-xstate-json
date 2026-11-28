@@ -108,6 +108,31 @@ def test_lineage_returns_the_same_object_on_repeat_calls():
     assert again is first
 
 
+def test_the_children_index_is_built_once_per_machine(monkeypatch):
+    """Ledger item 175: every view laid its `_DataView` over the same dictionary and
+    built the same children index - seven times in a default run of a large program."""
+    import cobol_xstate.reactive as reactive_mod
+    import cobol_xstate.storage as storage_mod
+    calls = []
+    real = storage_mod.children_index
+
+    def counting(data):
+        calls.append(1)
+        return real(data)
+
+    for mod in (storage_mod, iface_mod, statechart_mod, lineage_mod):
+        if hasattr(mod, "children_index"):
+            monkeypatch.setattr(mod, "children_index", counting)
+    m = _machine()
+    m.bundle()
+    build_business_view(m)
+    build_lineage(m)
+    build_artifacts(m)
+    reactive_mod.build_reactive_view(m)
+    assert len(calls) == 1
+    assert m.children() is m.children()
+
+
 def test_reactive_is_not_served_the_cached_overlay():
     """The reactive view builds its overlay over a FLATTENED, rewritten config - a
     different input - so it must not be handed the machine's cached one."""

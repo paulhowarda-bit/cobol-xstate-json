@@ -613,7 +613,12 @@ load on the service. `--jobs 0` means the same thing and is clamped rather than 
 
 ### `--indent N`
 
-JSON indent. Default 2.
+JSON indent. Default 2. `--indent none` writes each JSON file as one line of compact
+JSON (the standard library's C encoder; `, ` and `: ` separators): the same document,
+several times faster to write and smaller to read back, for a caller that reads the views
+by machine. The default and every number are unchanged, so the goldens are too. The same
+flag, from the shared argument group, is on `jcl-dependencies`, `eztrieve-dependencies`,
+`asm-dependencies` and `cics-dependencies`; `cobol-parser` keeps its own numeric flag.
 
 ### `--timing`
 
@@ -1683,7 +1688,9 @@ lives in the catalog, not the source. That knowledge arrives by one of two doors
 the host's to supply and neither ever guessed. `--synonym-map file.json` is a flat
 `{"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}` object (the shape `mfdep catalog
 export-synonym-map` emits) — the operator's explicit answer, and the only door for a
-hand run. `--synonym-resolver MODULE:FUNC` names a callable `FUNC(name) -> base | None`
+hand run. A host that runs the CLI in-process once per member reads the map once: the
+upper-cased mapping is kept per process while the file's path, size and modification
+time are unchanged (a refused file is never kept). `--synonym-resolver MODULE:FUNC` names a callable `FUNC(name) -> base | None`
 that is asked **at the point of need** — only for a column-list-less INSERT with no
 visible `DECLARE TABLE`, never for a SELECT or FETCH, and never for a name the map
 already holds — so a host that runs this tool once per program never hands each run its

@@ -433,7 +433,7 @@ def _split_multi_gets(states: dict, machine: Machine) -> None:
     flag the rest. Split the run so each read gets its own wait. States with 0 or 1 gets
     are left exactly as they are (which is what keeps PERFORM-free machines byte-stable).
     """
-    dv = _iface._DataView(machine.data, machine.fd_records)
+    dv = _iface._DataView(machine.data, machine.fd_records, machine.children())
     files = getattr(machine, "files", {}) or {}
     cursors = _iface._cursor_tables(machine.provenance)
     actions = machine.semantics.get("actions", {})
@@ -708,13 +708,14 @@ def _lower_uncached(machine: Machine) -> _Lowered:
         # SECOND build_interface call, not a differently-seeded one.
         internal_programs=set(getattr(machine, "nested_programs", ()) or ()),
         sql_cursors=getattr(machine, "sql_cursors", None),
-        fd_records=machine.fd_records)
+        fd_records=machine.fd_records, children=machine.children())
     config = _strip_meta(config)          # build_interface re-annotates meta onto nodes
     ev_by_state = _events_by_state(iface)
 
     # 4. the boundary rewrite.
     rw = _Rewriter(machine.provenance, machine.semantics.get("actions", {}),
-                   dv=_iface._DataView(machine.data, machine.fd_records),
+                   dv=_iface._DataView(machine.data, machine.fd_records,
+                                       machine.children()),
                    files=getattr(machine, "files", {}) or {},
                    cursors=_iface._cursor_tables(machine.provenance))
     rw.flags.extend(flat.flags)

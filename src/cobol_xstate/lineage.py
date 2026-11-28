@@ -60,7 +60,7 @@ from .emitter import (
     perform_target as _perform_target, segment_entry,
 )
 from .statechart import Machine
-from .storage import children_index, item_size, record_layout
+from .storage import item_size, record_layout
 
 # An origin: (event name, maybe?, program that would resolve a `maybe`).
 Origin = Tuple[str, bool, Optional[str]]
@@ -528,7 +528,7 @@ class _Lineage:
         # Built once: PERFORM targets are resolved through it, never by list scans.
         self._index = order_index(self.ordered)
         self.files = getattr(machine, "files", {}) or {}
-        self.dv = _iface._DataView(self.data, machine.fd_records)
+        self.dv = _iface._DataView(self.data, machine.fd_records, machine.children())
         # group -> its elementary fields. A group's value IS those fields' bytes, so
         # every read and write of a group goes through them (`_read` / `_store`).
         self.groups: Dict[str, List[str]] = {}
@@ -1561,13 +1561,27 @@ class _Lineage:
         alias gains the store's origins as a UNION, never a replacement - it may cover
         bytes this store does not reach. A union keeps the transfer monotone."""
         if self.aliases:
-            extra: Dict[str, Set[Origin]] = {}
+            # A group store writes ONE origins object to every leaf, and each leaf can
+            # have many aliases: union per alias only what is new, never the same set
+            # again (ledger item 176).
+            extra: Dict[str, OriginSet] = {}
+            aliases, xget = self.aliases, extra.get
             for written, origins in values.items():
-                for a in self.aliases.get(written, ()):
-                    if a not in values:
-                        extra.setdefault(a, set()).update(origins)
+                for a in aliases.get(written, ()):
+                    if a in values:
+                        continue
+                    got = xget(a)
+                    if got is None:
+                        extra[a] = origins
+                    elif got is not origins and not origins <= got:
+                        extra[a] = got | origins
+            canon, get = self._canon, cur.get
             for a, origins in extra.items():
-                values[a] = frozenset(origins.union(cur.get(a) or ()))
+                prev = get(a)
+                if prev is not None and origins <= prev:
+                    continue                    # the alias holds every origin already
+                u = frozenset(origins.union(prev or ()))
+                values[a] = canon.setdefault(u, u)
         cur.put(values)
 
     def _redefines_aliases(self) -> Dict[str, Tuple[str, ...]]:
@@ -1597,7 +1611,7 @@ class _Lineage:
         if not bases:
             return {}
         if self._kids is None:
-            self._kids = children_index(self.data)
+            self._kids = self.m.children()
         out: Dict[str, Set[str]] = {}
         for base in sorted(bases):
             entry = self.data.get(base)
@@ -1746,7 +1760,7 @@ class _Lineage:
         of the whole data dictionary per group node - at every group MOVE the fixpoint
         ran, which took a 2,172-line program's lineage from 0.05 s to 20 s)."""
         if self._kids is None:
-            self._kids = children_index(self.data)
+            self._kids = self.m.children()
         for rec in (src, tgt):
             if rec not in self._layouts:
                 self._layouts[rec] = record_layout(self.data, rec, children=self._kids)

@@ -291,7 +291,8 @@ def _with_mapset(hit: dict, rs: dict) -> dict:
 
 class _DataView:
     def __init__(self, data: Optional[dict],
-                 fd_records: Optional[Dict[str, List[str]]] = None):
+                 fd_records: Optional[Dict[str, List[str]]] = None,
+                 children: Optional[dict] = None):
         self.data = data or {}
         # record -> file from the FDs' DATA RECORD clauses: the only route back to the
         # file when the record's 01 is not in the visible source. A record two FDs both
@@ -315,8 +316,11 @@ class _DataView:
                 self.records.setdefault(it["file"], []).append(name)
         # Every group's members - each declaration of a name declared under several
         # groups included (ledger item 154) - from the one index `storage` lays records
-        # out from, so a record's fields and its byte layout cannot disagree.
-        for parent, pairs in children_index(self.data).items():
+        # out from, so a record's fields and its byte layout cannot disagree. A caller
+        # holding that index already (`Machine.children`) passes it as ``children``.
+        if children is None:
+            children = children_index(self.data)
+        for parent, pairs in children.items():
             if parent:
                 self.children[parent] = [n for n, _ in pairs]
         # `leaves` is a pure function of the data dictionary, which is fixed for this
@@ -1678,7 +1682,8 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
                     internal_programs: Optional[set] = None,
                     sql_cursors: Optional[List[dict]] = None,
                     unresolved_calls: Optional[Dict[str, dict]] = None,
-                    fd_records: Optional[Dict[str, List[str]]] = None) -> dict:
+                    fd_records: Optional[Dict[str, List[str]]] = None,
+                    children: Optional[dict] = None) -> dict:
     """Return the external-interface overlay: events, per-state get/create, endpoints,
     and the program's own parameter interface.
 
@@ -1709,7 +1714,7 @@ def build_interface(config: dict, semantics: dict, provenance: dict,
     files = files or {}
     internal_programs = {str(p).upper() for p in (internal_programs or ())}
     unresolved_calls = unresolved_calls or {}
-    dv = _DataView(data, fd_records)
+    dv = _DataView(data, fd_records, children)
     cursors = _cursor_tables(provenance)
     cursor_cols = _cursor_columns(semantics, provenance)
     cursor_derivs = _cursor_derivations(semantics)

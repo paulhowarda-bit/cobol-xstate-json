@@ -43,6 +43,7 @@ from .analysis import CallAnalysis, analyze_calls
 from .conventions import base_table as _base_table
 from .conventions import load as _load_conventions
 from .interface import FieldSets, build_interface, publish_interface
+from .storage import children_index
 from .semantics import (mask_literals, parse_condition, parse_operation,
                         split_outside_literals)
 from .model import (
@@ -135,6 +136,15 @@ class Machine:
     _lineage_cache: object = field(default=None, repr=False, compare=False)
     # The reactive lowering (reactive._lower), solved once for the same reason.
     _lowered_cache: object = field(default=None, repr=False, compare=False)
+    _kids_cache: Optional[dict] = field(default=None, repr=False, compare=False)
+
+    def children(self) -> dict:
+        """``storage.children_index(self.data)``, built once. Every view lays its
+        `_DataView` over the same unchanged dictionary, and the lineage lays records out
+        from it, so a run built the one index seven times (ledger item 175)."""
+        if self._kids_cache is None:
+            self._kids_cache = children_index(self.data)
+        return self._kids_cache
 
     def interface(self) -> dict:
         """The external-interface overlay over THIS machine's config, computed once.
@@ -155,7 +165,7 @@ class Machine:
                 data=self.data, using=self.using, returning=self.returning,
                 files=self.files, internal_programs=set(self.nested_programs),
                 sql_cursors=self.sql_cursors, unresolved_calls=self.unresolved_calls,
-                fd_records=self.fd_records)
+                fd_records=self.fd_records, children=self.children())
         return self._iface_cache
 
     def lineage(self, timer=None):
