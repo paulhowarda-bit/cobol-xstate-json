@@ -1197,6 +1197,43 @@ whose text is `analysis.js_module()` / `.reactive_module()`, plus the decimal ru
 it from `read_runtime_asset("cobolRuntime.mjs")` — three lines, with none of the naming or
 isolation logic above to reproduce.
 
+#### Reading the views in-process
+
+A host that embeds this package and reads the views back by machine does not need the
+files at all. Writing a view and reading it back spends time on text only a machine
+reads: encoding it here, decoding it there. Each view is available on the `Analysis` as
+the Python object the file would hold:
+
+| view | in-process | file |
+|---|---|---|
+| bundle | `analysis.machine.bundle()` | `<base>.json` |
+| business | `analysis.business()` | `<base>.business.json` |
+| lineage | `analysis.lineage()` | `<base>.lineage.json` |
+| reactive | `analysis.reactive()` | `<base>.reactive.json` |
+| artifacts | `analysis.artifacts()` | `<base>.artifacts.json` |
+| dynamic-calls | `analysis.dynamic_calls()` | `<base>.dynamic-calls.json` |
+| dependents | `analysis.dependents()` (`None`: no door opened, no file) | `<base>.dependents.json` |
+| retrieval reports | `analysis.prefetch.report()`, `analysis.fetch` | `<base>.prefetch.json`, `<base>.fetch.json` |
+
+The contract:
+
+- **Same document.** Each object is made only of `dict` (string keys), `list`, `str`,
+  `int`, `float`, `bool` and `None`, and `json.loads` of its file equals it. This was
+  checked for every view and both reports of every example: 660 documents, all equal.
+- **Read-only.** The views are memoized: a second call returns the SAME object, and
+  `write_views` writes that object. Mutating one changes what is written, and what every
+  later caller sees. Copy it first if you need to change it.
+- **Failures are the caller's to isolate.** `business()` raises `ViewBudgetExceeded`
+  past its budget, and `reactive()` raises `ReactiveLoweringError` for a program the
+  lowering refuses (a fact about the program, not a failure). `write_views` catches
+  these per view and logs them. A direct caller decides for itself, and should keep the
+  two apart from a crash, as `write_views` does.
+- **The bundle is built on each call.** `machine.bundle()` is not memoized: call it once
+  per program. `--machine-only`'s trimmed form is its `machine`, `charts` and
+  `paragraphs` keys.
+- **Write files for what you keep.** `write_views(..., targets=...)` computes only the
+  targets named. `--indent none` (or `indent=None`) makes any file you do write compact.
+
 ### Beyond one program: the state axis
 
 Every target above answers *"what does this program do?"* — the **program axis**. A
